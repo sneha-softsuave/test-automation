@@ -1,0 +1,100 @@
+/* =====================================================
+   Notifications Component - Clean Light Professional Theme
+   ===================================================== */
+
+.container {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 400px;
+}
+
+.notification {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+}
+
+.notification.success {
+  border-left: 4px solid #22c55e;
+  background: #f0fdf4;
+}
+
+.notification.success .icon {
+  color: #22c55e;
+}
+
+.notification.error {
+  border-left: 4px solid #ef4444;
+  background: #fef2f2;
+}
+
+.notification.error .icon {
+  color: #ef4444;
+}
+
+.notification.warning {
+  border-left: 4px solid #f59e0b;
+  background: #fffbeb;
+}
+
+.notification.warning .icon {
+  color: #f59e0b;
+}
+
+.notification.info {
+  border-left: 4px solid #3b82f6;
+  background: #eff6ff;
+}
+
+.notification.info .icon {
+  color: #3b82f6;
+}
+
+.icon {
+  flex-shrink: 0;
+}
+
+.message {
+  flex: 1;
+  font-size: 0.875rem;
+  color: #1e293b;
+  line-height: 1.4;
+}
+
+.closeButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.closeButton:hover {
+  background: #f1f5f9;
+  color: #1e293b;
+}
+
+@media (max-width: 640px) {
+  .container {
+    top: calc(60px + 12px);
+    left: 12px;
+    right: 12px;
+    max-width: none;
+  }
+}
