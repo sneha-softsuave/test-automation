@@ -690,7 +690,7 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
     }
 
     const sessionId = sessionIdRef.current;
-    const sseUrl = `http://127.0.0.1:8000/api/v1/sse/${sessionId}`;
+    const sseUrl = `/api/v1/sse/${sessionId}`;
 
     console.log('📡 Connecting to SSE:', sseUrl);
 

@@ -5,11 +5,12 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 3000,
+    host: '0.0.0.0', // Allow external access
+    port: 5000,
     proxy: {
       // HTTP API proxy
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://localhost:9000',
         changeOrigin: true,
         ws: true, // Enable WebSocket proxying for all /api routes
         configure: (proxy, _options) => {

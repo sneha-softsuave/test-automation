@@ -324,3 +324,60 @@
     max-width: 300px;
   }
 }
+
+/* ===== Collapsible Navigation (Parent/Child) ===== */
+.navParent {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.expandButton {
+  background: transparent;
+  border: none;
+  padding: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  margin-left: auto;
+}
+
+.expandButton:hover {
+  background: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
+}
+
+.navChildren {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+
+.navChild {
+  padding-left: 48px; /* Indent child items */
+  font-size: 0.8125rem;
+  border-left-width: 2px;
+}
+
+.navChild .navItemIcon {
+  width: 18px;
+  height: 18px;
+}
+
+.navChild:hover:not(.disabled) {
+  transform: translateX(2px);
+}
+
+.navChild.active {
+  border-left-color: #3b82f6;
+  background: linear-gradient(90deg, rgba(59, 130, 246, 0.08) 0%, rgba(59, 130, 246, 0.03) 100%);
+}

@@ -85,7 +85,7 @@ export interface ExecutionResult {
   executed_at: string;
 }
 
-type View = 'upload' | 'suite' | 'execution' | 'results' | 'download';
+type View = 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest';
 
 // Execution mode: Multi-Agent (Supervisor + Sub-agents)
 export type ExecutionMode = 'multi-agent';
@@ -119,6 +119,52 @@ export interface ScreenshotData {
   url: string;
   title: string;
   timestamp: Date;
+}
+
+// Load Test Types
+export interface LoadTestAPIConfig {
+  name: string;
+  base_url: string;
+  endpoint: string;
+  method: string;
+  headers: Record<string, string>;
+  payload?: Record<string, any> | null;
+  query_params?: Record<string, any> | null;
+  auth_config: {
+    auth_type: 'bearer' | 'basic' | 'api_key' | 'none';
+    token?: string;
+    username?: string;
+    password?: string;
+    api_key_name?: string;
+    api_key_value?: string;
+  };
+  description?: string;
+}
+
+export interface LoadTestConfig {
+  users: number;
+  spawn_rate: number;
+  run_time: string;
+  host?: string;
+}
+
+export interface LoadTestMetrics {
+  test_id: string;
+  status: string;
+  current_users: number;
+  total_requests: number;
+  total_failures: number;
+  requests_per_second: number;
+  failures_per_second: number;
+  avg_response_time: number;
+  min_response_time: number;
+  max_response_time: number;
+  median_response_time: number;
+  percentile_95: number;
+  percentile_99: number;
+  failure_rate: number;
+  elapsed_time: number;
+  timestamp: string;
 }
 
 interface AppState {
@@ -178,6 +224,18 @@ interface AppState {
   }>;
   addNotification: (type: 'success' | 'error' | 'info' | 'warning', message: string) => void;
   removeNotification: (id: string) => void;
+
+  // Load Test State
+  uploadedApis: LoadTestAPIConfig[] | null;
+  setUploadedApis: (apis: LoadTestAPIConfig[] | null) => void;
+  selectedLoadTestApi: LoadTestAPIConfig | null;
+  setSelectedLoadTestApi: (api: LoadTestAPIConfig | null) => void;
+  loadTestMetrics: LoadTestMetrics | null;
+  setLoadTestMetrics: (metrics: LoadTestMetrics | null) => void;
+  isLoadTesting: boolean;
+  setIsLoadTesting: (testing: boolean) => void;
+  activeLoadTestId: string | null;
+  setActiveLoadTestId: (id: string | null) => void;
 
   // Reset
   reset: () => void;
@@ -256,6 +314,18 @@ export const useStore = create<AppState>()(
         set((state) => ({
           notifications: state.notifications.filter((n) => n.id !== id),
         })),
+
+      // Load Test State
+      uploadedApis: null,
+      setUploadedApis: (apis) => set({ uploadedApis: apis }),
+      selectedLoadTestApi: null,
+      setSelectedLoadTestApi: (api) => set({ selectedLoadTestApi: api }),
+      loadTestMetrics: null,
+      setLoadTestMetrics: (metrics) => set({ loadTestMetrics: metrics }),
+      isLoadTesting: false,
+      setIsLoadTesting: (testing) => set({ isLoadTesting: testing }),
+      activeLoadTestId: null,
+      setActiveLoadTestId: (id) => set({ activeLoadTestId: id }),
 
       // Reset - also clears localStorage
       reset: () => {

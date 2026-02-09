@@ -44,3 +44,14 @@ build/
 # Temporary files
 nul
 *.tmp
+
+#test data
+test_data/
+
+# Load testing files
+generated_locustfiles/
+uploads/load_test_configs/
+load_test_results/
+
+# docs
+docs

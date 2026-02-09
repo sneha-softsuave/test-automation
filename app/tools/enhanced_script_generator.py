@@ -234,7 +234,9 @@ def _generate_action_code(
         elif element_name.lower() in ["password", "pass"]:
             lines.append(f'page.get_by_label("Password").fill(TEST_PASSWORD)')
         else:
-            lines.append(f'{selector or "page.locator(\"input\")"}.fill("{value or ""}")')
+            default_selector = 'page.locator("input")'
+            default_value = ""
+            lines.append(f'{selector or default_selector}.fill("{value or default_value}")')
 
     elif action_type == "select":
         select_value = step_test_data.get("value", "")
@@ -324,7 +326,8 @@ def _generate_assertion_code(assertion: Dict[str, Any], selector_hints: Dict[str
 
     elif assertion_type == "toast_message":
         lines.append(f'# Wait for toast message')
-        lines.append(f'expect(page.locator(".toast, .Toastify, [role=\\"alert\\"]").first).to_contain_text("{expected_value}", timeout=10000)')
+        toast_selector = '.toast, .Toastify, [role="alert"]'
+        lines.append(f'expect(page.locator("{toast_selector}").first).to_contain_text("{expected_value}", timeout=10000)')
 
     elif playwright_assertion:
         # Use the provided playwright assertion directly

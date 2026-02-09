@@ -10,11 +10,81 @@ from app.agents.base_agent import BaseAgent, LLMProvider
 
 ENHANCED_PARSER_PROMPT = '''Convert the test case data into Playwright-optimized JSON structure.
 
+⚠️ **CRITICAL: You must ONLY output valid JSON. Do NOT write code, explanations, or any text outside the JSON structure.**
+
 INPUT DATA:
 {content}
 
 PROJECT: {project_name}
 BASE URL: {base_url}
+
+⚠️ **CRITICAL INSTRUCTION - HANDLING SEPARATE INPUT DATA COLUMN:**
+
+The input JSON may contain a separate "Input data" or "Input Values" field with key-value pairs that provide actual test values.
+
+**YOUR TASK:**
+1. First, check if there is an "Input data" field in the input
+2. If present, parse it to extract all key-value pairs (format: "Key: Value")
+3. When processing each test step, check if the step references any key from Input data
+4. Use the value from Input data instead of any placeholder or generic text in the step
+
+**KEY MATCHING RULES:**
+- Match keys case-insensitively (e.g., "Application URL" matches "application url" in step)
+- Keys commonly found in steps:
+  * "Application URL" or "URL" → navigation URLs
+  * "Expected URL" → assertion URLs
+  * "Email" → email addresses
+  * "Password" → passwords
+  * "Expected Toast Message" → toast message text
+  * "Expected heading" or "Expected dashboard heading" → page heading text
+  * "Project Name" → dropdown selection values
+  * "Test data" → large text inputs (incident descriptions, etc.)
+  * "Expected status" or "incident status" → status values
+  * Button names, element text, any labeled data
+
+**MATCHING EXAMPLES:**
+
+Example 1 - Simple URL:
+```
+Step: "Launch the web application using the application URL:"
+Input data: "Application URL: https://dev-emergex.zapptor.com/"
+→ Extract: test_data = {{"url": "https://dev-emergex.zapptor.com/"}}
+```
+
+Example 2 - Credentials:
+```
+Step: "Enter a valid email address in the Email field"
+Input data: "Email: Naif.Otaibi@aramcooverseas.com"
+→ Extract: test_data = {{"email": "Naif.Otaibi@aramcooverseas.com"}}
+```
+
+Example 3 - Assertion Value:
+```
+Step: "Verify that a success toast message is displayed with the Expected Toast Message"
+Input data: "Expected Toast Message: 'Login successful'"
+→ Extract: assertions = [{{"type": "toast", "expected_value": "Login successful"}}]
+```
+
+Example 4 - Multiple Keys:
+```
+Step 1: "Verify URL with Expected URL:"
+Step 2: "Verify heading with Expected dashboard heading"
+Input data: "Expected URL: https://dev-emergex.zapptor.com/login\nExpected dashboard heading: 'Dashboard'"
+→ Step 1 gets: assertions = [{{"type": "url", "expected_value": "https://dev-emergex.zapptor.com/login"}}]
+→ Step 2 gets: assertions = [{{"type": "heading", "expected_value": "Dashboard"}}]
+```
+
+Example 5 - Multi-line Values:
+```
+Step: "Enter valid input data in the field with test data"
+Input data: "Test data: 'An equipment malfunction occurred on September 24, 2025...'"
+→ Extract: test_data = {{"text": "An equipment malfunction occurred on September 24, 2025..."}}
+```
+
+**BACKWARD COMPATIBILITY:**
+If "Input data" field is missing or empty, extract values from step text as you currently do.
+
+---
 
 OUTPUT THIS EXACT JSON STRUCTURE:
 
@@ -199,11 +269,53 @@ ASSERTION TYPES: url, text, heading, toast, status, element, visible, enabled
 
 RULES:
 1. Parse EVERY step from input - do not skip any
-2. Extract credentials into test_data.default_credentials
-3. For fill/click actions, provide 2-3 suggested_selectors using getByLabel, getByRole, getByPlaceholder, locator
-4. Use null for fields that don't apply
-5. Keep original instruction text
-6. Return ONLY the JSON object - no markdown, no explanation, no extra text
+2. **Check for "Input data" or "Input Values" field first**
+3. **Parse Input data into key-value pairs (format: "Key: Value")**
+4. **For each step, check if it references any key from Input data**
+5. **Use values from Input data when matching keys are found - this takes priority over values in step text**
+6. Extract credentials into test_data.default_credentials (prioritize Input data)
+7. For fill/click actions, provide 2-3 suggested_selectors using getByLabel, getByRole, getByPlaceholder, locator
+8. Use null for fields that don't apply
+9. Keep original instruction text
+10. **CRITICAL: Return ONLY valid JSON - no Python code, no markdown blocks, no explanations, no extra text. Start directly with {{ and end with }}**
+
+**KEY-VALUE MATCHING EXAMPLES:**
+
+Example 1 - URL Navigation:
+- Step: "Launch the web application using the application URL:"
+- Input data: "Application URL: https://dev-emergex.zapptor.com/"
+- Result: test_data = {{"url": "https://dev-emergex.zapptor.com/"}}
+
+Example 2 - Form Fill:
+- Step: "Enter email in Email field"
+- Input data: "Email: Naif.Otaibi@aramcooverseas.com"
+- Result: test_data = {{"email": "Naif.Otaibi@aramcooverseas.com"}}
+
+Example 3 - Assertion:
+- Step: "Verify toast message with Expected Toast Message"
+- Input data: "Expected Toast Message: Login successful"
+- Result: assertions = [{{"type": "toast", "expected_value": "Login successful"}}]
+
+Example 4 - Multiple Similar Keys:
+- Step 1: "Verify URL with Expected URL"
+- Step 2: "Verify toast with Expected Toast Message"
+- Input data: "Expected URL: https://.../login\nExpected Toast Message: Success"
+- Match "Expected URL" to step 1, "Expected Toast Message" to step 2 (exact key match)
+
+---
+
+⚠️ **FINAL REMINDER: Output ONLY the JSON object. Do NOT include:
+- Python code or any programming language code
+- Markdown code blocks or backticks
+- Explanatory text before or after the JSON
+- Comments or notes
+START your response with {{ and END with }}**
+
+⚠️ **CRITICAL JSON SYNTAX:**
+- ALWAYS add commas between object properties: {{"key1": "value1", "key2": "value2"}}
+- ALWAYS add commas between array elements: ["item1", "item2", "item3"]
+- NEVER forget commas after closing }} or ]] when followed by another property
+- Check every closing bracket: }}, then comma if more properties follow
 
 JSON:'''
 

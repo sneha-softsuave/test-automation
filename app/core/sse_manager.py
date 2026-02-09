@@ -42,6 +42,14 @@ class SSEManager:
             except Exception as e:
                 print(f"SSE broadcast error: {e}")
 
+    async def broadcast_to_session(self, session_id: str, event_type: str, data: Any):
+        """Broadcast an event with type and data to a session."""
+        message = {
+            "type": event_type,
+            "data": data
+        }
+        await self.broadcast(session_id, message)
+
     def broadcast_sync(self, session_id: str, message: dict):
         """Synchronous broadcast for use in subprocess."""
         # This will be called from the execution process
