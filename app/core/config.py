@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
     HOST: str = "0.0.0.0"
-    PORT: int = 8000
+    PORT: int = 9000
 
     # Test Execution Timeouts (in milliseconds)
     DEFAULT_ACTION_TIMEOUT: int = 10000  # Default timeout for actions
