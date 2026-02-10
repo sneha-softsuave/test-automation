@@ -1,10 +1,49 @@
 # AI-Powered Test Automation System
 
-An intelligent test automation framework that uses **LLM-powered agents** to parse Excel test cases and execute them using **Playwright** browser automation. The system features a **Supervisor + Sub-Agents architecture** for orchestrating complex test workflows.
+An intelligent test automation framework with **two powerful testing modes**:
+
+1. **Functional Testing** - LLM-powered agents that parse Excel test cases and execute them using **Playwright** browser automation
+2. **Load Testing** - Excel-driven API load testing with **Locust.io** and real-time metrics visualization
 
 ---
 
-## Table of Contents
+## 🚀 Quick Links
+
+| Testing Mode | Documentation | Description |
+|--------------|---------------|-------------|
+| **Functional Testing** | [See Below](#overview) | AI-powered UI automation with Playwright |
+| **Load Testing** | [📊 LOAD_TEST_COMPLETE_GUIDE.md](./LOAD_TEST_COMPLETE_GUIDE.md) | API performance testing with Locust |
+
+---
+
+## 📊 Load Testing System
+
+The Load Testing system provides Excel-based API load testing with:
+
+- ✅ **Excel Configuration** - Define APIs, headers, payloads in Excel
+- ✅ **Dual Modes** - Manual (single API) or Sequential (multiple APIs)
+- ✅ **Real-time Metrics** - Live RPS, response time, failure rate
+- ✅ **Interactive Reports** - Chart.js visualizations, JSON export
+- ✅ **Smart Caching** - Metrics preserved after test completion
+
+### Quick Start (Load Testing)
+
+```bash
+# Start backend
+uvicorn app.main:app --reload --port 9000 --host 0.0.0.0 \
+  --reload-exclude "generated_locustfiles/*" \
+  --reload-exclude "load_test_results/*" \
+  --reload-exclude "uploads/*"
+
+# Start frontend
+cd frontend && npm run dev
+```
+
+**📖 Full Documentation**: [LOAD_TEST_COMPLETE_GUIDE.md](./LOAD_TEST_COMPLETE_GUIDE.md)
+
+---
+
+## Table of Contents (Functional Testing)
 
 - [Overview](#overview)
 - [Architecture](#architecture)
@@ -21,9 +60,9 @@ An intelligent test automation framework that uses **LLM-powered agents** to par
 
 ---
 
-## Overview
+## Overview (Functional Testing)
 
-This system transforms the traditional test automation workflow by using AI agents to:
+This AI-powered functional testing system transforms the traditional test automation workflow by using AI agents to:
 
 1. **Parse natural language test cases** from Excel files
 2. **Generate Playwright selectors** dynamically using LLM intelligence

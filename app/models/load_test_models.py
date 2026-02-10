@@ -35,6 +35,10 @@ class APIConfig(BaseModel):
     query_params: Optional[Dict[str, Any]] = Field(default=None, description="Query parameters")
     auth_config: AuthConfig = Field(default_factory=AuthConfig, description="Authentication config")
     description: Optional[str] = Field(default=None, description="API description")
+    # Load test configuration (from Excel)
+    users: Optional[int] = Field(default=None, description="Number of users for this API")
+    spawn_rate: Optional[float] = Field(default=None, description="Spawn rate for this API")
+    run_time: Optional[str] = Field(default=None, description="Run time for this API")
 
 
 class LoadTestConfig(BaseModel):
@@ -139,3 +143,10 @@ class ValidationResult(BaseModel):
     response_time_ms: Optional[float] = None
     error_message: Optional[str] = None
     warnings: List[str] = Field(default_factory=list)
+
+
+class SequentialLoadTestRequest(BaseModel):
+    """Request to start sequential load testing of multiple APIs."""
+    upload_id: str = Field(..., description="Upload session ID")
+    selected_api_names: List[str] = Field(..., description="List of API names to test sequentially")
+    session_id: str = Field(..., description="SSE session ID for streaming")

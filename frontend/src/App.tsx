@@ -5,6 +5,7 @@ import { ExecutionPanel } from './components/ExecutionPanel';
 import { ResultsViewer } from './components/ResultsViewer';
 import { DownloadReport } from './components/DownloadReport';
 import { LoadTestDashboard } from './components/LoadTesting/LoadTestDashboard';
+import { LoadTestReports } from './components/LoadTesting/LoadTestReports';
 import { Notifications } from './components/Notifications';
 import { useStore } from './store/useStore';
 
@@ -25,6 +26,8 @@ function App() {
         return <DownloadReport />;
       case 'loadtest':
         return <LoadTestDashboard />;
+      case 'loadtest-reports':
+        return <LoadTestReports />;
       default:
         return <AgentChat />;
     }

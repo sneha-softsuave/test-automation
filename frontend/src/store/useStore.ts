@@ -85,7 +85,7 @@ export interface ExecutionResult {
   executed_at: string;
 }
 
-type View = 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest';
+type View = 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest' | 'loadtest-reports';
 
 // Execution mode: Multi-Agent (Supervisor + Sub-agents)
 export type ExecutionMode = 'multi-agent';
@@ -139,6 +139,10 @@ export interface LoadTestAPIConfig {
     api_key_value?: string;
   };
   description?: string;
+  // Load test configuration (from Excel)
+  users?: number;
+  spawn_rate?: number;
+  run_time?: string;
 }
 
 export interface LoadTestConfig {
@@ -165,6 +169,15 @@ export interface LoadTestMetrics {
   failure_rate: number;
   elapsed_time: number;
   timestamp: string;
+}
+
+export interface SequentialTestStatus {
+  sequential_test_id: string;
+  status: 'running' | 'completed' | 'stopped';
+  current_index: number;
+  total_apis: number;
+  current_api: string | null;
+  apis: string[];
 }
 
 interface AppState {
@@ -236,6 +249,22 @@ interface AppState {
   setIsLoadTesting: (testing: boolean) => void;
   activeLoadTestId: string | null;
   setActiveLoadTestId: (id: string | null) => void;
+
+  // Auto-Execute Mode
+  autoExecuteMode: boolean;
+  setAutoExecuteMode: (enabled: boolean) => void;
+
+  // Sequential Test State
+  sequentialTestId: string | null;
+  setSequentialTestId: (id: string | null) => void;
+  sequentialTestStatus: SequentialTestStatus | null;
+  setSequentialTestStatus: (status: SequentialTestStatus | null) => void;
+  selectedApis: string[];
+  setSelectedApis: (apis: string[]) => void;
+
+  // Load Test Session ID (persists across navigation)
+  loadTestSessionId: string | null;
+  setLoadTestSessionId: (id: string | null) => void;
 
   // Reset
   reset: () => void;
@@ -327,6 +356,22 @@ export const useStore = create<AppState>()(
       activeLoadTestId: null,
       setActiveLoadTestId: (id) => set({ activeLoadTestId: id }),
 
+      // Auto-Execute Mode
+      autoExecuteMode: false,
+      setAutoExecuteMode: (enabled) => set({ autoExecuteMode: enabled }),
+
+      // Sequential Test State
+      sequentialTestId: null,
+      setSequentialTestId: (id) => set({ sequentialTestId: id }),
+      sequentialTestStatus: null,
+      setSequentialTestStatus: (status) => set({ sequentialTestStatus: status }),
+      selectedApis: [],
+      setSelectedApis: (apis) => set({ selectedApis: apis }),
+
+      // Load Test Session ID
+      loadTestSessionId: null,
+      setLoadTestSessionId: (id) => set({ loadTestSessionId: id }),
+
       // Reset - also clears localStorage
       reset: () => {
         // Clear persisted storage
@@ -359,6 +404,13 @@ export const useStore = create<AppState>()(
         testSuite: state.testSuite,
         executionResult: state.executionResult,
         generatedScript: state.generatedScript,
+        // Load test state persistence
+        loadTestSessionId: state.loadTestSessionId,
+        isLoadTesting: state.isLoadTesting,
+        activeLoadTestId: state.activeLoadTestId,
+        sequentialTestId: state.sequentialTestId,
+        loadTestMetrics: state.loadTestMetrics,
+        sequentialTestStatus: state.sequentialTestStatus,
         // screenshots excluded - base64 images exceed localStorage quota
       }),
       // Handle Date serialization on rehydration

@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Bot, MessageSquare, FlaskConical, Play, FileCheck, Download, Menu, X, Zap, Wrench, ChevronDown, ChevronRight } from 'lucide-react';
+import { Bot, MessageSquare, FlaskConical, Play, FileCheck, Download, Menu, X, Zap, Wrench, ChevronDown, ChevronRight, BarChart3 } from 'lucide-react';
 import { useState } from 'react';
 import { useStore } from '../../store/useStore';
 import styles from './Layout.module.css';
@@ -17,15 +17,17 @@ const functionalTestItems = [
   { id: 'download', label: 'Download', icon: Download },
 ] as const;
 
-// Standalone items
-const standaloneItems = [
-  { id: 'loadtest', label: 'Load Test', icon: Zap },
+// Load Test sub-items
+const loadTestItems = [
+  { id: 'loadtest', label: 'Agent', icon: Zap },
+  { id: 'loadtest-reports', label: 'Reports', icon: BarChart3 },
 ] as const;
 
 export const Layout = ({ children }: LayoutProps) => {
   const { currentView, setCurrentView, testSuite, executionResult, rawTestCases } = useStore();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [functionalTestExpanded, setFunctionalTestExpanded] = useState(true); // Default: expanded
+  const [loadTestExpanded, setLoadTestExpanded] = useState(true); // Default: expanded
 
   const canNavigateTo = (view: string): boolean => {
     switch (view) {
@@ -40,7 +42,9 @@ export const Layout = ({ children }: LayoutProps) => {
       case 'download':
         return !!(testSuite || rawTestCases || executionResult);
       case 'loadtest':
-        return true; // Load Test is always accessible
+        return true; // Load Test Agent is always accessible
+      case 'loadtest-reports':
+        return true; // Load Test Reports is always accessible
       default:
         return false;
     }
@@ -48,6 +52,9 @@ export const Layout = ({ children }: LayoutProps) => {
 
   // Check if any functional test item is active
   const isFunctionalTestActive = functionalTestItems.some(item => item.id === currentView);
+
+  // Check if any load test item is active
+  const isLoadTestActive = loadTestItems.some(item => item.id === currentView);
 
   // Handle functional test parent click
   const handleFunctionalTestClick = () => {
@@ -66,6 +73,25 @@ export const Layout = ({ children }: LayoutProps) => {
   const toggleFunctionalTest = (e: React.MouseEvent) => {
     e.stopPropagation(); // Prevent parent click
     setFunctionalTestExpanded(!functionalTestExpanded);
+  };
+
+  // Handle load test parent click
+  const handleLoadTestClick = () => {
+    if (!loadTestExpanded) {
+      // If collapsed, expand and navigate to Agent
+      setLoadTestExpanded(true);
+      setCurrentView('loadtest');
+    } else {
+      // If expanded, navigate to Agent (first child)
+      setCurrentView('loadtest');
+    }
+    setMobileMenuOpen(false);
+  };
+
+  // Toggle expand/collapse
+  const toggleLoadTest = (e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent parent click
+    setLoadTestExpanded(!loadTestExpanded);
   };
 
   return (
@@ -174,43 +200,83 @@ export const Layout = ({ children }: LayoutProps) => {
             )}
           </motion.div>
 
-          {/* Standalone Items (Load Test) */}
-          {standaloneItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = currentView === item.id;
-            const isDisabled = !canNavigateTo(item.id);
-
-            return (
-              <motion.div
-                key={item.id}
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.5 }}
+          {/* Load Test Parent */}
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: 0.5 }}
+          >
+            <button
+              className={`${styles.navItem} ${styles.navParent} ${isLoadTestActive ? styles.active : ''}`}
+              onClick={handleLoadTestClick}
+            >
+              <div className={styles.navItemIcon}>
+                <Zap size={20} />
+              </div>
+              <span className={styles.navItemLabel}>Load Test</span>
+              <button
+                className={styles.expandButton}
+                onClick={toggleLoadTest}
+                aria-label={loadTestExpanded ? 'Collapse' : 'Expand'}
               >
-                <button
-                  className={`${styles.navItem} ${isActive ? styles.active : ''} ${isDisabled ? styles.disabled : ''}`}
-                  onClick={() => {
-                    if (!isDisabled) {
-                      setCurrentView(item.id);
-                      setMobileMenuOpen(false);
-                    }
-                  }}
-                >
-                  <div className={styles.navItemIcon}>
-                    <Icon size={20} />
-                  </div>
-                  <span className={styles.navItemLabel}>{item.label}</span>
-                  {isActive && (
-                    <motion.div
-                      className={styles.navItemIndicator}
-                      layoutId="navIndicator"
-                      transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                    />
-                  )}
-                </button>
+                {loadTestExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              </button>
+              {isLoadTestActive && (
+                <motion.div
+                  className={styles.navItemIndicator}
+                  layoutId="navIndicator"
+                  transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                />
+              )}
+            </button>
+
+            {/* Load Test Children */}
+            {loadTestExpanded && (
+              <motion.div
+                className={styles.navChildren}
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.2 }}
+              >
+                {loadTestItems.map((item, index) => {
+                  const Icon = item.icon;
+                  const isActive = currentView === item.id;
+                  const isDisabled = !canNavigateTo(item.id);
+
+                  return (
+                    <motion.button
+                      key={item.id}
+                      className={`${styles.navItem} ${styles.navChild} ${isActive ? styles.active : ''} ${isDisabled ? styles.disabled : ''}`}
+                      onClick={() => {
+                        if (!isDisabled) {
+                          setCurrentView(item.id);
+                          setMobileMenuOpen(false);
+                        }
+                      }}
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.05 * (index + 1) }}
+                      whileHover={!isDisabled ? { x: 4 } : {}}
+                      whileTap={!isDisabled ? { scale: 0.98 } : {}}
+                    >
+                      <div className={styles.navItemIcon}>
+                        <Icon size={18} />
+                      </div>
+                      <span className={styles.navItemLabel}>{item.label}</span>
+                      {isActive && (
+                        <motion.div
+                          className={styles.navItemIndicator}
+                          layoutId="navChildIndicator"
+                          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                        />
+                      )}
+                    </motion.button>
+                  );
+                })}
               </motion.div>
-            );
-          })}
+            )}
+          </motion.div>
         </nav>
 
         {/* Status */}

@@ -112,6 +112,9 @@ Expected fields (columns may vary):
 - query_params: Query Params, Query Parameters, URL Params, Parameters (JSON string)
 - auth_type: Auth Type, Authentication, Auth Method (bearer, basic, api_key, none)
 - auth_token: Auth Token, Token, API Key, Bearer Token, Authorization
+- users: Users, Number of Users, Concurrent Users, User Count (integer)
+- spawn_rate: Spawn Rate, Rate, Users Per Second, Spawn (number)
+- run_time: Run Time, Duration, Test Duration, Time (e.g., "5m", "1h", "30s")
 
 Excel Data:
 {excel_data}
@@ -130,7 +133,10 @@ Return ONLY a valid JSON array with this exact structure (no markdown, no explan
       "auth_type": "bearer",
       "token": "eyJhbGc..."
     }},
-    "description": "API description"
+    "description": "API description",
+    "users": 10,
+    "spawn_rate": 2,
+    "run_time": "5m"
   }}
 ]
 
@@ -142,6 +148,9 @@ Rules:
 5. auth_type must be one of: bearer, basic, api_key, none
 6. If no auth info found, set auth_type to "none"
 7. Handle missing/optional fields gracefully
+8. If users/spawn_rate/run_time are present, include them; otherwise omit them (don't set to null)
+9. users should be integer, spawn_rate should be number, run_time should be string like "5m"
+10. If run_time is just a number (e.g., "5", "10"), append "m" to make it "5m", "10m"
 """
 
     def _extract_json_from_response(self, response: str) -> List[Dict[str, Any]]:
@@ -190,6 +199,14 @@ Rules:
         # Ensure method is uppercase
         method = config_dict.get('method', 'GET').upper()
 
+        # Process run_time: append 'm' if just a number
+        run_time = config_dict.get('run_time')
+        if run_time is not None:
+            run_time = str(run_time).strip()
+            # If it's just a number without unit, append 'm' (minutes)
+            if run_time and run_time.replace('.', '').isdigit():
+                run_time = f"{run_time}m"
+
         return APIConfig(
             name=config_dict.get('name', 'Unnamed API'),
             base_url=base_url,
@@ -199,7 +216,10 @@ Rules:
             payload=config_dict.get('payload'),
             query_params=config_dict.get('query_params'),
             auth_config=auth_config,
-            description=config_dict.get('description')
+            description=config_dict.get('description'),
+            users=config_dict.get('users'),
+            spawn_rate=config_dict.get('spawn_rate'),
+            run_time=run_time
         )
 
     def _parse_heuristic(self, df: pd.DataFrame) -> List[APIConfig]:
@@ -239,7 +259,10 @@ Rules:
             'query_params': ['query params', 'query parameters', 'url params', 'parameters', 'query'],
             'auth_type': ['auth type', 'authentication', 'auth method', 'auth'],
             'auth_token': ['auth token', 'token', 'api key', 'bearer token', 'authorization'],
-            'description': ['description', 'desc', 'notes', 'comment']
+            'description': ['description', 'desc', 'notes', 'comment'],
+            'users': ['users', 'number of users', 'concurrent users', 'user count', 'num users'],
+            'spawn_rate': ['spawn rate', 'rate', 'users per second', 'spawn', 'spawn_rate'],
+            'run_time': ['run time', 'duration', 'test duration', 'time', 'run_time']
         }
 
         for field, possible_names in patterns.items():
@@ -328,6 +351,28 @@ Rules:
         if method in ['POST', 'PUT', 'PATCH'] and 'Content-Type' not in headers:
             headers['Content-Type'] = 'application/json'
 
+        # Get load test configuration (users, spawn_rate, run_time)
+        users = get_value('users')
+        if users is not None:
+            try:
+                users = int(users)
+            except (ValueError, TypeError):
+                users = None
+
+        spawn_rate = get_value('spawn_rate')
+        if spawn_rate is not None:
+            try:
+                spawn_rate = float(spawn_rate)
+            except (ValueError, TypeError):
+                spawn_rate = None
+
+        run_time = get_value('run_time')
+        if run_time is not None:
+            run_time = str(run_time).strip()
+            # If it's just a number without unit, append 'm' (minutes)
+            if run_time and run_time.replace('.', '').isdigit():
+                run_time = f"{run_time}m"
+
         return APIConfig(
             name=str(name),
             base_url=base_url,
@@ -337,5 +382,8 @@ Rules:
             payload=payload,
             query_params=query_params,
             auth_config=auth_config,
-            description=get_value('description')
+            description=get_value('description'),
+            users=users,
+            spawn_rate=spawn_rate,
+            run_time=run_time
         )

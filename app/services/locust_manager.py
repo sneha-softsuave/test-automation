@@ -21,6 +21,7 @@ class LocustManager:
         self.test_start_times: Dict[str, datetime] = {}
         self.test_ports: Dict[str, int] = {}  # Track port for each test
         self.base_locust_port = 8089  # Starting Locust web port
+        self.last_metrics: Dict[str, LoadTestMetrics] = {}  # Store last known metrics for each test
 
     def start_test(
         self,
@@ -144,12 +145,13 @@ class LocustManager:
                     process.kill()
                     process.wait()
 
-            # Clean up
+            # Clean up (but keep last_metrics for report generation)
             del self.active_processes[test_id]
             if test_id in self.test_start_times:
                 del self.test_start_times[test_id]
             if test_id in self.test_ports:
                 del self.test_ports[test_id]
+            # Note: We keep self.last_metrics[test_id] for report generation
 
             print(f"Locust test {test_id} stopped successfully")
             return True
@@ -168,21 +170,30 @@ class LocustManager:
         Returns:
             LoadTestMetrics object or None if not available
         """
+        # First check if we have cached metrics (for completed tests)
+        if test_id in self.last_metrics:
+            process_completed = test_id not in self.active_processes or self.active_processes[test_id].poll() is not None
+            if process_completed:
+                print(f"📊 Returning cached final metrics for completed test {test_id}", flush=True)
+                return self.last_metrics[test_id]
+
         if test_id not in self.active_processes:
-            return None
+            print(f"⚠️ Test {test_id} not in active_processes, checking cache...", flush=True)
+            return self.last_metrics.get(test_id)
 
         process = self.active_processes[test_id]
 
         # Check if process is still running
         if process.poll() is not None:
-            # Process has ended
-            return None
+            # Process has ended - return last known metrics
+            print(f"⚠️ Process {test_id} has ended, returning last known metrics", flush=True)
+            return self.last_metrics.get(test_id)
 
         try:
             # Get the port for this test
             if test_id not in self.test_ports:
                 print(f"No port found for test {test_id}")
-                return None
+                return self.last_metrics.get(test_id)
 
             port = self.test_ports[test_id]
 
@@ -195,11 +206,18 @@ class LocustManager:
 
                 if response.status_code == 200:
                     stats_data = response.json()
-                    return self._parse_stats(test_id, stats_data)
+                    metrics = self._parse_stats(test_id, stats_data)
+
+                    # Cache the metrics
+                    if metrics:
+                        self.last_metrics[test_id] = metrics
+                        print(f"📊 Cached metrics for {test_id}: RPS={metrics.requests_per_second:.2f}, Total Requests={metrics.total_requests}", flush=True)
+
+                    return metrics
 
         except Exception as e:
-            print(f"Error fetching Locust metrics: {e}")
-            return None
+            print(f"Error fetching Locust metrics: {e}", flush=True)
+            return self.last_metrics.get(test_id)
 
     def _parse_stats(self, test_id: str, stats_data: Dict[str, Any]) -> LoadTestMetrics:
         """Parse Locust stats API response into LoadTestMetrics."""
