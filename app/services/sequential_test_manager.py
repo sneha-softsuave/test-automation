@@ -148,7 +148,7 @@ class SequentialTestManager:
                 api_start_time = time.time()
 
                 # Start Locust test
-                success = locust_manager.start_test(test_id, str(locustfile_path), config)
+                success = locust_manager.start_test(test_id, str(locustfile_path), config, session_id)
 
                 if not success:
                     raise Exception(f"Failed to start Locust for {api.name}")

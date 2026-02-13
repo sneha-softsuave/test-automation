@@ -767,22 +767,22 @@ class LoadTestReportGenerator:
                                 api.max_response_time
                             ],
                             backgroundColor: [
-                                'rgba(67, 233, 123, 0.7)',
-                                'rgba(79, 172, 254, 0.7)',
-                                'rgba(102, 126, 234, 0.7)',
-                                'rgba(139, 92, 246, 0.7)',
-                                'rgba(245, 158, 11, 0.7)',
-                                'rgba(245, 87, 108, 0.7)'
+                                'rgba(34, 197, 94, 0.8)',
+                                'rgba(59, 130, 246, 0.8)',
+                                'rgba(249, 115, 22, 0.8)',
+                                'rgba(168, 85, 247, 0.8)',
+                                'rgba(236, 72, 153, 0.8)',
+                                'rgba(239, 68, 68, 0.8)'
                             ],
                             borderColor: [
-                                'rgba(67, 233, 123, 1)',
-                                'rgba(79, 172, 254, 1)',
-                                'rgba(102, 126, 234, 1)',
-                                'rgba(139, 92, 246, 1)',
-                                'rgba(245, 158, 11, 1)',
-                                'rgba(245, 87, 108, 1)'
+                                'rgb(34, 197, 94)',
+                                'rgb(59, 130, 246)',
+                                'rgb(249, 115, 22)',
+                                'rgb(168, 85, 247)',
+                                'rgb(236, 72, 153)',
+                                'rgb(239, 68, 68)'
                             ],
-                            borderWidth: 2
+                            borderWidth: 1
                         }}]
                     }},
                     options: {{
@@ -794,17 +794,60 @@ class LoadTestReportGenerator:
                             }},
                             title: {{
                                 display: false
+                            }},
+                            tooltip: {{
+                                mode: 'index',
+                                intersect: false,
+                                backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                                titleColor: '#111',
+                                bodyColor: '#333',
+                                borderColor: '#ccc',
+                                borderWidth: 1,
+                                callbacks: {{
+                                    label: function(context) {{
+                                        return context.label + ': ' + context.parsed.y + ' ms';
+                                    }}
+                                }}
                             }}
                         }},
                         scales: {{
+                            x: {{
+                                grid: {{
+                                    color: 'rgba(0, 0, 0, 0.05)',
+                                    drawBorder: true,
+                                    borderColor: '#e5e7eb'
+                                }},
+                                ticks: {{
+                                    color: '#6b7280',
+                                    font: {{ size: 10 }}
+                                }}
+                            }},
                             y: {{
                                 beginAtZero: true,
+                                grid: {{
+                                    color: 'rgba(0, 0, 0, 0.05)',
+                                    drawBorder: true,
+                                    borderColor: '#e5e7eb'
+                                }},
+                                ticks: {{
+                                    color: '#6b7280',
+                                    font: {{ size: 10 }},
+                                    callback: function(value) {{
+                                        return value + ' ms';
+                                    }}
+                                }},
                                 title: {{
                                     display: true,
-                                    text: 'Time (ms)',
-                                    font: {{ size: 12 }}
+                                    text: 'Response Time (ms)',
+                                    color: '#374151',
+                                    font: {{ size: 11 }}
                                 }}
                             }}
+                        }},
+                        interaction: {{
+                            mode: 'nearest',
+                            axis: 'x',
+                            intersect: false
                         }}
                     }}
                 }});
@@ -850,11 +893,17 @@ class LoadTestReportGenerator:
                             legend: {{
                                 position: 'right',
                                 labels: {{
+                                    color: '#374151',
                                     font: {{ size: 12 }},
                                     padding: 15
                                 }}
                             }},
                             tooltip: {{
+                                backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                                titleColor: '#111',
+                                bodyColor: '#333',
+                                borderColor: '#ccc',
+                                borderWidth: 1,
                                 callbacks: {{
                                     label: function(context) {{
                                         const label = context.label || '';

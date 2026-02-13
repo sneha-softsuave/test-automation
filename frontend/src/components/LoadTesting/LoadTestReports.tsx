@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { FileText, AlertCircle, RefreshCw } from 'lucide-react';
+import { useStore } from '../../store/useStore';
 import styles from './LoadTestReports.module.css';
 
 const API_BASE_URL = '';
@@ -13,6 +14,7 @@ interface ReportInfo {
 }
 
 export const LoadTestReports: React.FC = () => {
+  const { setCurrentView, addNotification } = useStore();
   const [currentReport, setCurrentReport] = useState<ReportInfo | null>(null);
   const [reportHtml, setReportHtml] = useState<string>('');
   const [loading, setLoading] = useState(false);
@@ -77,15 +79,11 @@ export const LoadTestReports: React.FC = () => {
   }, []);
 
   const handleRefresh = () => {
-    // Immediately update refresh key to force iframe unmount
+    // Clear all report state
     setRefreshKey(prev => prev + 1);
-
-    // Clear report state first
     setReportHtml('');
     setCurrentReport(null);
-
-    // Fetch with cache clearing
-    fetchCurrentReport(true);
+    setError('No test report available. Complete a load test to generate a report.');
   };
 
   return (
@@ -105,7 +103,6 @@ export const LoadTestReports: React.FC = () => {
           title="Refresh Report"
         >
           <RefreshCw size={18} className={loading ? styles.spinning : ''} />
-          <span>Refresh</span>
         </button>
       </div>
 
@@ -157,7 +154,7 @@ export const LoadTestReports: React.FC = () => {
             srcDoc={reportHtml}
             className={styles.reportFrame}
             title="Load Test Report"
-            sandbox="allow-same-origin allow-scripts"
+            sandbox="allow-same-origin allow-scripts allow-downloads allow-popups allow-popups-to-escape-sandbox"
           />
         </div>
       )}

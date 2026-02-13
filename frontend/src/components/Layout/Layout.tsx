@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Bot, MessageSquare, FlaskConical, Play, FileCheck, Download, Menu, X, Zap, Wrench, ChevronDown, ChevronRight, BarChart3 } from 'lucide-react';
+import { Bot, MessageSquare, FlaskConical, Play, FileCheck, Download, Menu, X, Zap, Wrench, ChevronDown, ChevronRight, BarChart3, Terminal, Brain } from 'lucide-react';
 import { useState } from 'react';
 import { useStore } from '../../store/useStore';
 import styles from './Layout.module.css';
@@ -20,7 +20,9 @@ const functionalTestItems = [
 // Load Test sub-items
 const loadTestItems = [
   { id: 'loadtest', label: 'Agent', icon: Zap },
+  { id: 'loadtest-logs', label: 'Logs', icon: Terminal },
   { id: 'loadtest-reports', label: 'Reports', icon: BarChart3 },
+  { id: 'loadtest-insights', label: 'AI Insights', icon: Brain },
 ] as const;
 
 export const Layout = ({ children }: LayoutProps) => {
@@ -43,8 +45,12 @@ export const Layout = ({ children }: LayoutProps) => {
         return !!(testSuite || rawTestCases || executionResult);
       case 'loadtest':
         return true; // Load Test Agent is always accessible
+      case 'loadtest-logs':
+        return true; // Load Test Logs is always accessible
       case 'loadtest-reports':
         return true; // Load Test Reports is always accessible
+      case 'loadtest-insights':
+        return true; // AI Insights is always accessible
       default:
         return false;
     }

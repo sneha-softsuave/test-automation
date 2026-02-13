@@ -12,7 +12,9 @@ An intelligent test automation framework with **two powerful testing modes**:
 | Testing Mode | Documentation | Description |
 |--------------|---------------|-------------|
 | **Functional Testing** | [See Below](#overview) | AI-powered UI automation with Playwright |
-| **Load Testing** | [📊 LOAD_TEST_COMPLETE_GUIDE.md](./LOAD_TEST_COMPLETE_GUIDE.md) | API performance testing with Locust |
+| **Load Testing** | [📊 LOAD_TEST_GUIDE.md](./LOAD_TEST_GUIDE.md) | API performance testing with Locust |
+
+> **Additional Documentation**: See the `docs/` folder for detailed guides on specific features and implementations.
 
 ---
 
@@ -39,7 +41,14 @@ uvicorn app.main:app --reload --port 9000 --host 0.0.0.0 \
 cd frontend && npm run dev
 ```
 
-**📖 Full Documentation**: [LOAD_TEST_COMPLETE_GUIDE.md](./LOAD_TEST_COMPLETE_GUIDE.md)
+**📖 Full Documentation**: [LOAD_TEST_GUIDE.md](./LOAD_TEST_GUIDE.md)
+
+**📚 Detailed Guides**: See `docs/` folder for:
+- Complete architecture guide
+- Excel formatting requirements
+- Multi-user testing guide
+- AI features documentation
+- Implementation history
 
 ---
 
@@ -618,6 +627,59 @@ test_automation/
 ├── .env
 └── README.md
 ```
+
+---
+
+## Documentation
+
+This project has comprehensive documentation organized as follows:
+
+### 📁 Root Documentation
+- **[README.md](./README.md)** - Main project overview (this file)
+- **[LOAD_TEST_GUIDE.md](./LOAD_TEST_GUIDE.md)** - Quick start guide for load testing
+
+### 📁 docs/ Folder (Detailed Documentation)
+
+**Load Testing Guides:**
+- `LOAD_TEST_COMPLETE_GUIDE.md` - Complete architecture and technical details
+- `LOAD_TESTING_WORKFLOW_EXPLAINED.md` - Detailed workflow explanations
+- `EXCEL_FORMAT_GUIDE.md` - Excel column requirements and formatting
+- `MULTI_USER_LOGIN_GUIDE.md` - Multi-user testing with credentials
+- `LOGGING_GUIDE.md` - Application logging documentation
+- `TERMINAL_LOGS_QUICK_START.md` - Terminal logs quick start
+
+**AI Features Documentation:**
+- `AGENTIC_LOAD_TESTING_SUMMARY.md` - Complete agentic system overview
+- `HOW_TO_USE_AGENTIC_MODE.md` - UI guide for AI mode
+- `AI_BENEFITS_EXPLAINED.md` - Time savings and benefits analysis
+- `AI_PANEL_REDESIGN.md` - AI panel UI design
+- `AI_TEST_DATA_TOGGLE.md` - AI test data generation toggle
+- `BATCH_AI_BACKEND_INTEGRATION.md` - Backend AI integration
+- `BATCH_AI_TOGGLES_IMPLEMENTATION.md` - Two-level toggle system
+- `BATCH_AI_VISUAL_GUIDE.md` - Visual UI layout guide
+
+**Implementation History:**
+- `COMPLETE_IMPLEMENTATION_SUMMARY.md` - Full 3-phase implementation summary
+- `PHASE1_IMPLEMENTATION_COMPLETE.md` - Phase 1: Multi-user data support
+- `PHASE2A_IMPLEMENTATION_COMPLETE.md` - Phase 2A: Basic AI features
+- `PHASE2B_IMPLEMENTATION_COMPLETE.md` - Phase 2B: Advanced AI features
+- `WHAT_WE_BUILT.md` - High-level summary of all features
+
+**Bug Fixes & Enhancements:**
+- `AUTH_VALIDATION_FIX.md` - Authentication validation fixes
+- `DOWNLOAD_BUTTONS_FIX.md` - iframe sandbox fixes
+- `LOGS_FIX_SUMMARY.md` - Terminal logs bug fixes
+- `DIAGNOSIS_AND_FIX.md` - Failure detection diagnosis
+- `TEST_DATA_TOGGLE_FIX.md` - Excel data preservation fix
+- `ENHANCEMENTS_SUMMARY.md` - Terminal logs enhancements
+- And more...
+
+**Setup & Configuration:**
+- `VENV_SETUP_COMPLETE.md` - Virtual environment setup guide
+- `FEATURE_MAP.md` - Visual architecture and feature map
+
+### 📁 unused-backup/ Folder (Git Ignored)
+Contains archived test files and temporary files that are no longer actively used.
 
 ---
 

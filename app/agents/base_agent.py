@@ -91,21 +91,27 @@ class BaseAgent(ABC):
         """Initialize the LLM client based on selected provider."""
         if self.provider == LLMProvider.ANTHROPIC:
             if not self.anthropic_api_key:
-                raise ValueError("Anthropic API key is required")
+                raise ValueError(
+                    "Anthropic provider selected but ANTHROPIC_API_KEY is not set in .env"
+                )
             anthropic_sdk = _get_anthropic()
             self.client = anthropic_sdk.Anthropic(api_key=self.anthropic_api_key)
             self.model = self.anthropic_model
             self.max_tokens = 8000
         elif self.provider == LLMProvider.OPENAI:
             if not self.openai_api_key:
-                raise ValueError("OpenAI API key is required")
+                raise ValueError(
+                    "OpenAI provider selected but OPENAI_API_KEY is not set in .env"
+                )
             openai_sdk = _get_openai()
             self.client = openai_sdk.OpenAI(api_key=self.openai_api_key)
             self.model = self.openai_model
             self.max_tokens = self.openai_max_tokens
         elif self.provider == LLMProvider.GROQ:
             if not self.groq_api_key:
-                raise ValueError("Groq API key is required")
+                raise ValueError(
+                    "Groq provider selected but GROQ_API_KEY is not set in .env"
+                )
             Groq_cls = _get_groq()
             self.client = Groq_cls(api_key=self.groq_api_key)
             self.model = self.groq_model.strip()

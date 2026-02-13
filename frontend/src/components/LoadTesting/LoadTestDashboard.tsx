@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
-import { useStore } from '../../store/useStore';
+import { useStore, type LLMProvider } from '../../store/useStore';
 import type { LoadTestConfig } from '../../store/useStore';
 import { useLoadTestSSE } from '../../hooks/useLoadTestSSE';
 import { LiveCharts } from './LiveCharts';
 import type { MetricsHistoryPoint } from './LiveCharts';
 import styles from './LoadTestDashboard.module.css';
-import { Upload, Play, Square, Zap, Users, TrendingUp, Clock, AlertCircle, BarChart3, Grid3x3, Wrench, CheckCircle, Loader, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
+import { Upload, Play, Square, Zap, Users, TrendingUp, Clock, AlertCircle, BarChart3, Grid3x3, Wrench, CheckCircle, Loader, ChevronDown, ChevronRight, RefreshCw, Brain } from 'lucide-react';
 
 // Use relative URL to leverage Vite proxy
 const API_BASE_URL = '';
@@ -33,6 +33,10 @@ export const LoadTestDashboard: React.FC = () => {
     setSelectedApis,
     loadTestSessionId,
     setLoadTestSessionId,
+    llmProvider,
+    setLlmProvider,
+    aiSuggestedConfig,
+    setAiSuggestedConfig,
   } = useStore();
 
   const [uploadId, setUploadId] = useState<string | null>(null);
@@ -45,6 +49,26 @@ export const LoadTestDashboard: React.FC = () => {
   const [viewMode, setViewMode] = useState<'cards' | 'charts'>('cards');
   const [metricsHistory, setMetricsHistory] = useState<MetricsHistoryPoint[]>([]);
   const [expandedApi, setExpandedApi] = useState<string | null>(null);
+  const [aiMode, setAiMode] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [aiRecommendations, setAiRecommendations] = useState<any>(null);
+  const [useAiTestData, setUseAiTestData] = useState(true); // Toggle for AI test data
+
+  // Batch AI analysis states (for sequential mode)
+  const [batchAiRecommendations, setBatchAiRecommendations] = useState<any>(null);
+  const [isAnalyzingBatch, setIsAnalyzingBatch] = useState(false);
+  const [expandedBatchApi, setExpandedBatchApi] = useState<string | null>(null);
+  const [useBatchAiTestData, setUseBatchAiTestData] = useState(false); // Common toggle - default OFF
+  const [batchApiTestDataOverrides, setBatchApiTestDataOverrides] = useState<Record<string, boolean>>({}); // Per-API overrides
+
+  // Custom Suggestions states (NEW)
+  const [showSuggestionsInput, setShowSuggestionsInput] = useState(false);
+  const [customSuggestions, setCustomSuggestions] = useState('');
+  const [showBatchSuggestionsInput, setShowBatchSuggestionsInput] = useState(false);
+  const [customBatchSuggestions, setCustomBatchSuggestions] = useState('');
+
+  // Track if AI config has been applied to prevent re-applying
+  const aiConfigAppliedRef = React.useRef(false);
 
   // Create or retrieve persistent session ID
   React.useEffect(() => {
@@ -56,6 +80,90 @@ export const LoadTestDashboard: React.FC = () => {
       console.log('Using existing session ID:', loadTestSessionId);
     }
   }, []);
+
+  // Apply AI suggested config when available
+  React.useEffect(() => {
+    console.log('=== AI Config Application useEffect ===');
+    console.log('aiSuggestedConfig:', aiSuggestedConfig);
+    console.log('selectedLoadTestApi:', selectedLoadTestApi);
+    console.log('aiConfigAppliedRef.current:', aiConfigAppliedRef.current);
+    console.log('loadConfig before:', loadConfig);
+
+    if (aiSuggestedConfig && !aiConfigAppliedRef.current) {
+      console.log('✅ Applying AI suggested config:', aiSuggestedConfig);
+
+      // Mark as applied to prevent re-applying
+      aiConfigAppliedRef.current = true;
+
+      // Update load config (users, spawn_rate, run_time)
+      const newLoadConfig = {
+        users: aiSuggestedConfig.users ?? 10,
+        spawn_rate: aiSuggestedConfig.spawn_rate ?? 2,
+        run_time: aiSuggestedConfig.run_time ?? '5m',
+      };
+      console.log('📝 Setting new load config:', newLoadConfig);
+      console.log('   - Users:', aiSuggestedConfig.users, '→', newLoadConfig.users);
+      console.log('   - Spawn Rate:', aiSuggestedConfig.spawn_rate, '→', newLoadConfig.spawn_rate);
+      console.log('   - Run Time:', aiSuggestedConfig.run_time, '→', newLoadConfig.run_time);
+      setLoadConfig(newLoadConfig);
+
+      // Update think_time in selectedLoadTestApi if provided
+      if (selectedLoadTestApi && (aiSuggestedConfig.think_time_min !== undefined || aiSuggestedConfig.think_time_max !== undefined)) {
+        console.log('📝 Updating think_time values in selectedLoadTestApi');
+        console.log('   - Think Time Min:', aiSuggestedConfig.think_time_min);
+        console.log('   - Think Time Max:', aiSuggestedConfig.think_time_max);
+        const updatedApi = {
+          ...selectedLoadTestApi,
+          think_time_min: aiSuggestedConfig.think_time_min ?? selectedLoadTestApi.think_time_min,
+          think_time_max: aiSuggestedConfig.think_time_max ?? selectedLoadTestApi.think_time_max,
+        };
+        setSelectedLoadTestApi(updatedApi);
+
+        // Also update in uploadedApis array
+        if (uploadedApis) {
+          setUploadedApis(
+            uploadedApis.map((api) =>
+              api.name === selectedLoadTestApi.name ? updatedApi : api
+            )
+          );
+        }
+      } else {
+        console.log('⚠️ No selectedLoadTestApi or no think_time values to update');
+        console.log('   - selectedLoadTestApi exists:', !!selectedLoadTestApi);
+        console.log('   - think_time_min:', aiSuggestedConfig.think_time_min);
+        console.log('   - think_time_max:', aiSuggestedConfig.think_time_max);
+      }
+
+      // Show success notification
+      addNotification('success', `✨ AI-suggested values applied: ${newLoadConfig.users} users, ${newLoadConfig.spawn_rate}/s spawn rate`);
+
+      // Scroll to the configuration section
+      setTimeout(() => {
+        const configSection = document.getElementById('load-test-config');
+        if (configSection) {
+          console.log('📜 Scrolling to config section');
+          configSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else {
+          console.log('⚠️ Config section not found in DOM');
+        }
+      }, 300);
+
+      // Clear the suggested config and reset the ref after a delay
+      setTimeout(() => {
+        console.log('🧹 Clearing aiSuggestedConfig');
+        setAiSuggestedConfig(null);
+        aiConfigAppliedRef.current = false;
+      }, 1000);
+    } else {
+      if (!aiSuggestedConfig) {
+        console.log('⏭️ No aiSuggestedConfig - skipping');
+      }
+      if (aiConfigAppliedRef.current) {
+        console.log('⏭️ Already applied - skipping');
+      }
+    }
+    console.log('=== End AI Config Application ===');
+  }, [aiSuggestedConfig, selectedLoadTestApi, uploadedApis]);
 
   // SSE connection for real-time metrics - uses persistent session ID
   const { messages } = useLoadTestSSE(loadTestSessionId || '', !!loadTestSessionId);
@@ -108,6 +216,8 @@ export const LoadTestDashboard: React.FC = () => {
         break;
       case 'sequential_api_started':
         if (latestMessage.data) {
+          // Update sequential status with current API info
+          setSequentialTestStatus(latestMessage.data);
           addNotification('info', `Starting: ${latestMessage.data.current_api || 'API'}`);
         }
         break;
@@ -256,6 +366,7 @@ export const LoadTestDashboard: React.FC = () => {
         body: JSON.stringify({
           upload_id: uploadId,
           selected_api_name: selectedLoadTestApi.name,
+          selected_api: selectedLoadTestApi, // Send full API object with user edits
           config: loadConfig,
           session_id: loadTestSessionId,
         }),
@@ -378,6 +489,14 @@ export const LoadTestDashboard: React.FC = () => {
     }
   };
 
+  // Helper function to format data mode for display
+  const formatDataMode = (mode: string) => {
+    return mode
+      .split('_')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+  };
+
   const handleRefresh = async () => {
     try {
       // Clear backend upload session if exists
@@ -450,6 +569,252 @@ export const LoadTestDashboard: React.FC = () => {
     }
   };
 
+  const handleAiAnalysis = async () => {
+    if (!uploadId || !selectedLoadTestApi) {
+      addNotification('error', 'Please select an API first');
+      return;
+    }
+
+    setIsAnalyzing(true);
+
+    // Show notification based on whether suggestions are provided
+    const notificationMsg = customSuggestions.trim()
+      ? '🤖 AI is analyzing with your custom suggestions...'
+      : '🤖 AI is analyzing your API...';
+    addNotification('info', notificationMsg);
+
+    try {
+      const url = `${API_BASE_URL}/api/v1/load-test/agentic-analyze?upload_id=${uploadId}&api_name=${encodeURIComponent(selectedLoadTestApi.name)}&llm_provider=${llmProvider}`;
+
+      const requestOptions: RequestInit = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      };
+
+      // Add suggestions to request body if provided
+      if (customSuggestions.trim()) {
+        requestOptions.body = JSON.stringify({
+          custom_suggestions: customSuggestions.trim()
+        });
+      }
+
+      const response = await fetch(url, requestOptions);
+
+      if (!response.ok) {
+        throw new Error('AI analysis failed');
+      }
+
+      const data = await response.json();
+      setAiRecommendations(data);
+
+      addNotification('success', `✅ AI detected ${data.api_type} API and generated recommendations!`);
+    } catch (error) {
+      console.error('AI analysis error:', error);
+      addNotification('error', 'AI analysis failed. Please try again.');
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleApplyRecommendations = async () => {
+    if (!uploadId || !selectedLoadTestApi || !aiRecommendations) {
+      console.log('❌ Missing required data for apply recommendations');
+      return;
+    }
+
+    // Prepare recommendations based on toggle
+    const recommendationsToApply = {
+      ...aiRecommendations.recommendations,
+    };
+
+    // If toggle is OFF, remove test_data key entirely (to preserve Excel data)
+    if (!useAiTestData) {
+      delete recommendationsToApply.test_data;
+    }
+
+    console.log('✨ Applying recommendations:', recommendationsToApply);
+    console.log(`   Test Data Mode: ${useAiTestData ? 'AI-Generated' : 'Excel Data (preserve existing)'}`);
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/v1/load-test/agentic-apply?upload_id=${uploadId}&api_name=${encodeURIComponent(selectedLoadTestApi.name)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ recommendations: recommendationsToApply })
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Failed to apply recommendations');
+      }
+
+      const data = await response.json();
+      const updatedApi = data.api;
+
+      console.log('✅ Updated API received:', updatedApi);
+      console.log('   • Users:', updatedApi.users);
+      console.log('   • Spawn Rate:', updatedApi.spawn_rate);
+      console.log('   • Run Time:', updatedApi.run_time);
+
+      // Update local state
+      if (uploadedApis) {
+        const updatedApis = uploadedApis.map(api =>
+          api.name === selectedLoadTestApi.name ? updatedApi : api
+        );
+        setUploadedApis(updatedApis);
+        setSelectedLoadTestApi(updatedApi);
+      }
+
+      // Update load config with explicit values
+      const newConfig = {
+        users: updatedApi.users || aiRecommendations.recommendations.users || 10,
+        spawn_rate: updatedApi.spawn_rate || aiRecommendations.recommendations.spawn_rate || 2,
+        run_time: updatedApi.run_time || '5m'
+      };
+
+      console.log('📝 Setting new load config:', newConfig);
+      setLoadConfig(newConfig);
+
+      // Force a small delay to ensure state updates
+      setTimeout(() => {
+        console.log('🔄 Load config after update:', loadConfig);
+      }, 100);
+
+      const dataSourceMsg = useAiTestData
+        ? 'Using AI-generated test data'
+        : 'Using Excel test data';
+      addNotification('success', `✅ AI recommendations applied! ${dataSourceMsg}.`);
+    } catch (error) {
+      console.error('Apply recommendations error:', error);
+      addNotification('error', 'Failed to apply recommendations');
+    }
+  };
+
+  const handleBatchAiAnalysis = async () => {
+    if (!uploadId || selectedApis.length === 0) {
+      addNotification('error', 'Please select at least one API');
+      return;
+    }
+
+    setIsAnalyzingBatch(true);
+
+    // Show notification based on whether suggestions are provided
+    const notificationMsg = customBatchSuggestions.trim()
+      ? `🤖 AI is analyzing ${selectedApis.length} APIs with your custom suggestions...`
+      : `🤖 AI is analyzing ${selectedApis.length} APIs...`;
+    addNotification('info', notificationMsg);
+
+    try {
+      const requestBody: any = {
+        upload_id: uploadId,
+        api_names: selectedApis,
+        llm_provider: llmProvider
+      };
+
+      // Add suggestions if provided
+      if (customBatchSuggestions.trim()) {
+        requestBody.custom_suggestions = customBatchSuggestions.trim();
+      }
+
+      const response = await fetch(
+        `${API_BASE_URL}/api/v1/load-test/agentic-analyze-batch`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody)
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Batch AI analysis failed');
+      }
+
+      const data = await response.json();
+      setBatchAiRecommendations(data);
+
+      addNotification('success', `✅ AI analyzed ${data.total_apis} APIs successfully!`);
+    } catch (error) {
+      console.error('Batch AI analysis error:', error);
+      addNotification('error', 'Batch AI analysis failed. Please try again.');
+    } finally {
+      setIsAnalyzingBatch(false);
+    }
+  };
+
+  const handleApplyBatchRecommendations = async () => {
+    if (!batchAiRecommendations || !uploadId) {
+      addNotification('error', 'No recommendations to apply');
+      return;
+    }
+
+    addNotification('info', 'Applying recommendations to all selected APIs...');
+
+    try {
+      // Prepare API configs with toggle states
+      const apisToApply = batchAiRecommendations.results.map((result: any) => ({
+        api_name: result.api_name,
+        use_ai_test_data: shouldUseAiTestData(result.api_name),
+        recommendations: result.recommendations
+      }));
+
+      const response = await fetch(
+        `${API_BASE_URL}/api/v1/load-test/agentic-apply-batch?upload_id=${uploadId}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apis: apisToApply })
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Failed to apply batch recommendations');
+      }
+
+      const data = await response.json();
+
+      // Update local state with updated APIs
+      if (uploadedApis) {
+        const updatedApisMap = new Map(data.updated_apis.map((api: any) => [api.name, api]));
+        const newUploadedApis = uploadedApis.map(api =>
+          updatedApisMap.has(api.name) ? updatedApisMap.get(api.name)! : api
+        );
+        setUploadedApis(newUploadedApis as any);
+      }
+
+      addNotification('success', `✅ Applied recommendations to ${data.total_updated} APIs!`);
+    } catch (error) {
+      console.error('Apply batch recommendations error:', error);
+      addNotification('error', 'Failed to apply recommendations. Please try again.');
+    }
+  };
+
+  const handleReanalyzeBatch = () => {
+    setBatchAiRecommendations(null);
+    handleBatchAiAnalysis();
+  };
+
+  const toggleBatchApiExpansion = (apiName: string) => {
+    setExpandedBatchApi(expandedBatchApi === apiName ? null : apiName);
+  };
+
+  const toggleBatchApiTestData = (apiName: string, currentValue: boolean) => {
+    setBatchApiTestDataOverrides(prev => ({
+      ...prev,
+      [apiName]: !currentValue
+    }));
+  };
+
+  // Determine if a specific API should use AI test data
+  const shouldUseAiTestData = (apiName: string): boolean => {
+    // If API has a specific override, use that
+    if (apiName in batchApiTestDataOverrides) {
+      return batchApiTestDataOverrides[apiName];
+    }
+    // Otherwise, use the common toggle value
+    return useBatchAiTestData;
+  };
+
   const totalApis = uploadedApis?.length || 0;
   const testsRun = 0; // TODO: Track from history
   const totalRequests = loadTestMetrics?.total_requests || 0;
@@ -465,91 +830,71 @@ export const LoadTestDashboard: React.FC = () => {
             <p>Upload Excel → Select API → Configure → Run Load Test</p>
           </div>
         </div>
-        <button
-          className={styles.refreshButton}
-          onClick={handleRefresh}
-          title="Refresh Load Test Page"
-          disabled={isLoadTesting}
-        >
-          <RefreshCw size={18} />
-          <span>Refresh</span>
-        </button>
+        <div className={styles.headerActions}>
+          {/* AI Provider Selector */}
+          <div className={styles.llmSelector}>
+            <Brain size={16} />
+            <select
+              value={llmProvider}
+              onChange={(e) => setLlmProvider(e.target.value as LLMProvider)}
+              className={styles.llmSelect}
+              disabled={isLoadTesting}
+              title="Select AI Provider for Analysis"
+            >
+              <option value="groq">Groq (Fast)</option>
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </div>
+          <button
+            className={styles.refreshButton}
+            onClick={handleRefresh}
+            title="Refresh Load Test Page"
+            disabled={isLoadTesting}
+          >
+            <RefreshCw size={18} />
+          </button>
+        </div>
       </header>
 
       {/* Split View Container */}
       <div className={styles.splitContainer}>
         {/* LEFT PANEL */}
         <div className={styles.leftPanel}>
-          {/* Auto-Execute Mode Toggle */}
-          <section className={styles.section}>
-            <div className={styles.toggleRow}>
-              <Wrench size={18} />
-              <span className={styles.toggleLabel}>Auto Execute Mode</span>
-              <label className={styles.switch}>
-                <input
-                  type="checkbox"
-                  checked={autoExecuteMode}
-                  onChange={(e) => {
-                    setAutoExecuteMode(e.target.checked);
-                    setSelectedApis([]);
-                    setSelectedLoadTestApi(null);
-                  }}
-                  disabled={isLoadTesting}
-                />
-                <span className={styles.slider}></span>
-              </label>
-              <span className={styles.modeHint}>
-                {autoExecuteMode
-                  ? 'Auto mode: Load config from Excel, run multiple APIs sequentially'
-                  : 'Manual mode: Enter config manually, run single API'}
-              </span>
-            </div>
-          </section>
-
-          {/* Upload API Configuration */}
-          <section className={styles.section}>
-            <h2>
-              <Upload size={20} /> Upload API Configuration
-            </h2>
-            <div className={styles.uploadZone}>
-              <input
-                type="file"
-                accept=".xlsx,.xls"
-                onChange={handleFileUpload}
-                disabled={isUploading || isLoadTesting}
-                id="excel-upload"
-                className={styles.fileInput}
-              />
-              <label htmlFor="excel-upload" className={styles.uploadLabel}>
-                {isUploading ? (
-                  'Uploading...'
-                ) : uploadedApis ? (
-                  `✓ Parsed ${uploadedApis.length} APIs`
-                ) : (
-                  'Click to browse or drag & drop Excel file'
-                )}
-              </label>
-              <p className={styles.hint}>
-                Sample columns: API Name, Base URL, Endpoint, Method, Headers, Payload, Auth Token
-              </p>
-            </div>
-          </section>
-
-          {/* API List - Swagger Style */}
-          {uploadedApis && uploadedApis.length > 0 && (
-            <section className={styles.section}>
-              <h2>Select API{autoExecuteMode && 's'}</h2>
-              <div className={styles.apiList}>
+          {/* Scrollable API List Card (Top) */}
+          <section className={styles.apiListCard}>
+            {!uploadedApis || uploadedApis.length === 0 ? (
+              // Empty state
+              <div className={styles.emptyState}>
+                <p>No APIs loaded yet</p>
+                <p>Upload an Excel file to see your APIs</p>
+              </div>
+            ) : (
+              // API list (existing logic)
+              <>
+                <h2>Select API{autoExecuteMode && 's'}</h2>
+                <div className={styles.apiList}>
                 {uploadedApis.map((api) => {
                   const isSelected = autoExecuteMode
                     ? selectedApis.includes(api.name)
                     : selectedLoadTestApi?.name === api.name;
                   const isExpanded = expandedApi === api.name;
 
+                  // Check if this API is currently executing
+                  const isExecuting = autoExecuteMode
+                    ? (
+                        sequentialTestStatus?.status === 'running' && (
+                          sequentialTestStatus.current_api === api.name ||
+                          // If current_api is not set yet, check if this is the first API
+                          (!sequentialTestStatus.current_api && sequentialTestStatus.apis?.[0] === api.name)
+                        )
+                      )
+                    : (isLoadTesting && selectedLoadTestApi?.name === api.name);
+
                   return (
                     <div key={api.name} className={styles.apiListItemWrapper}>
                       <div
-                        className={`${styles.apiListItem} ${isSelected ? styles.selected : ''}`}
+                        className={`${styles.apiListItem} ${isSelected ? styles.selected : ''} ${isExecuting ? styles.executingApi : ''}`}
                         onClick={() => handleApiSelect(api.name)}
                       >
                         {/* Checkbox or Radio */}
@@ -608,52 +953,349 @@ export const LoadTestDashboard: React.FC = () => {
                           <div className={styles.detailRow}>
                             <strong>Method:</strong> <span>{api.method}</span>
                           </div>
-                          {api.headers && Object.keys(api.headers).length > 0 && (
-                            <div className={styles.detailRow}>
-                              <strong>Headers:</strong>
-                              <pre className={styles.codeBlock}>
-                                {JSON.stringify(api.headers, null, 2)}
-                              </pre>
-                            </div>
-                          )}
-                          {api.payload && (
-                            <div className={styles.detailRow}>
-                              <strong>Payload:</strong>
-                              <pre className={styles.codeBlock}>
-                                {JSON.stringify(api.payload, null, 2)}
-                              </pre>
-                            </div>
-                          )}
+
+                          {/* Editable Headers */}
                           <div className={styles.detailRow}>
-                            <strong>Auth Type:</strong> <span>{api.auth_config.auth_type}</span>
+                            <strong>Headers:</strong>
+                            <textarea
+                              className={styles.editableCodeBlock}
+                              rows={3}
+                              value={JSON.stringify(api.headers || {}, null, 2)}
+                              onChange={(e) => {
+                                if (!uploadedApis) return;
+                                try {
+                                  const parsed = JSON.parse(e.target.value);
+                                  const updatedApis = uploadedApis.map(a =>
+                                    a.name === api.name ? { ...a, headers: parsed } : a
+                                  );
+                                  setUploadedApis(updatedApis);
+                                  if (selectedLoadTestApi?.name === api.name) {
+                                    setSelectedLoadTestApi({ ...api, headers: parsed });
+                                  }
+                                } catch (err) {
+                                  // Invalid JSON - ignore while typing
+                                }
+                              }}
+                              placeholder='{"Content-Type": "application/json"}'
+                            />
                           </div>
+
+                          {/* Editable Payload */}
+                          <div className={styles.detailRow}>
+                            <strong>Payload:</strong>
+                            <textarea
+                              className={styles.editableCodeBlock}
+                              rows={5}
+                              value={JSON.stringify(api.payload || {}, null, 2)}
+                              onChange={(e) => {
+                                if (!uploadedApis) return;
+                                try {
+                                  const parsed = JSON.parse(e.target.value);
+                                  const updatedApis = uploadedApis.map(a =>
+                                    a.name === api.name ? { ...a, payload: parsed } : a
+                                  );
+                                  setUploadedApis(updatedApis);
+                                  if (selectedLoadTestApi?.name === api.name) {
+                                    setSelectedLoadTestApi({ ...api, payload: parsed });
+                                  }
+                                } catch (err) {
+                                  // Invalid JSON - ignore while typing
+                                }
+                              }}
+                              placeholder='{"key": "value"}'
+                            />
+                          </div>
+
+                          {/* Editable Auth Type */}
+                          <div className={styles.detailRow}>
+                            <strong>Auth Type:</strong>
+                            <select
+                              className={styles.authSelect}
+                              value={api.auth_config?.auth_type || 'none'}
+                              onChange={(e) => {
+                                if (!uploadedApis) return;
+                                const authType = e.target.value as 'none' | 'bearer' | 'api_key' | 'basic';
+                                const updatedApis = uploadedApis.map(a =>
+                                  a.name === api.name
+                                    ? {
+                                        ...a,
+                                        auth_config: {
+                                          ...a.auth_config,
+                                          auth_type: authType
+                                        }
+                                      }
+                                    : a
+                                );
+                                setUploadedApis(updatedApis);
+                                if (selectedLoadTestApi?.name === api.name) {
+                                  setSelectedLoadTestApi({
+                                    ...api,
+                                    auth_config: {
+                                      ...api.auth_config,
+                                      auth_type: authType
+                                    }
+                                  });
+                                }
+                              }}
+                            >
+                              <option value="none">None</option>
+                              <option value="bearer">Bearer Token</option>
+                              <option value="api_key">API Key</option>
+                              <option value="basic">Basic Auth</option>
+                            </select>
+                          </div>
+
+                          {/* Conditional Auth Fields */}
+                          {api.auth_config?.auth_type === 'bearer' && (
+                            <div className={styles.detailRow}>
+                              <strong>Bearer Token:</strong>
+                              <input
+                                type="text"
+                                className={styles.authInput}
+                                placeholder="your-bearer-token"
+                                value={api.auth_config?.token || ''}
+                                onChange={(e) => {
+                                  if (!uploadedApis) return;
+                                  const updatedApis = uploadedApis.map(a =>
+                                    a.name === api.name
+                                      ? {
+                                          ...a,
+                                          auth_config: {
+                                            ...a.auth_config,
+                                            token: e.target.value
+                                          }
+                                        }
+                                      : a
+                                  );
+                                  setUploadedApis(updatedApis);
+                                  if (selectedLoadTestApi?.name === api.name) {
+                                    setSelectedLoadTestApi({
+                                      ...api,
+                                      auth_config: {
+                                        ...api.auth_config,
+                                        token: e.target.value
+                                      }
+                                    });
+                                  }
+                                }}
+                              />
+                            </div>
+                          )}
+
+                          {api.auth_config?.auth_type === 'api_key' && (
+                            <>
+                              <div className={styles.detailRow}>
+                                <strong>API Key Name:</strong>
+                                <input
+                                  type="text"
+                                  className={styles.authInput}
+                                  placeholder="X-API-Key"
+                                  value={api.auth_config?.api_key_name || ''}
+                                  onChange={(e) => {
+                                    if (!uploadedApis) return;
+                                    const updatedApis = uploadedApis.map(a =>
+                                      a.name === api.name
+                                        ? {
+                                            ...a,
+                                            auth_config: {
+                                              ...a.auth_config,
+                                              api_key_name: e.target.value
+                                            }
+                                          }
+                                        : a
+                                    );
+                                    setUploadedApis(updatedApis);
+                                    if (selectedLoadTestApi?.name === api.name) {
+                                      setSelectedLoadTestApi({
+                                        ...api,
+                                        auth_config: {
+                                          ...api.auth_config,
+                                          api_key_name: e.target.value
+                                        }
+                                      });
+                                    }
+                                  }}
+                                />
+                              </div>
+                              <div className={styles.detailRow}>
+                                <strong>API Key Value:</strong>
+                                <input
+                                  type="text"
+                                  className={styles.authInput}
+                                  placeholder="your-api-key-value"
+                                  value={api.auth_config?.api_key_value || ''}
+                                  onChange={(e) => {
+                                    if (!uploadedApis) return;
+                                    const updatedApis = uploadedApis.map(a =>
+                                      a.name === api.name
+                                        ? {
+                                            ...a,
+                                            auth_config: {
+                                              ...a.auth_config,
+                                              api_key_value: e.target.value
+                                            }
+                                          }
+                                        : a
+                                    );
+                                    setUploadedApis(updatedApis);
+                                    if (selectedLoadTestApi?.name === api.name) {
+                                      setSelectedLoadTestApi({
+                                        ...api,
+                                        auth_config: {
+                                          ...api.auth_config,
+                                          api_key_value: e.target.value
+                                        }
+                                      });
+                                    }
+                                  }}
+                                />
+                              </div>
+                            </>
+                          )}
+
+                          {api.auth_config?.auth_type === 'basic' && (
+                            <>
+                              <div className={styles.detailRow}>
+                                <strong>Username:</strong>
+                                <input
+                                  type="text"
+                                  className={styles.authInput}
+                                  placeholder="username"
+                                  value={api.auth_config?.username || ''}
+                                  onChange={(e) => {
+                                    if (!uploadedApis) return;
+                                    const updatedApis = uploadedApis.map(a =>
+                                      a.name === api.name
+                                        ? {
+                                            ...a,
+                                            auth_config: {
+                                              ...a.auth_config,
+                                              username: e.target.value
+                                            }
+                                          }
+                                        : a
+                                    );
+                                    setUploadedApis(updatedApis);
+                                    if (selectedLoadTestApi?.name === api.name) {
+                                      setSelectedLoadTestApi({
+                                        ...api,
+                                        auth_config: {
+                                          ...api.auth_config,
+                                          username: e.target.value
+                                        }
+                                      });
+                                    }
+                                  }}
+                                />
+                              </div>
+                              <div className={styles.detailRow}>
+                                <strong>Password:</strong>
+                                <input
+                                  type="password"
+                                  className={styles.authInput}
+                                  placeholder="password"
+                                  value={api.auth_config?.password || ''}
+                                  onChange={(e) => {
+                                    if (!uploadedApis) return;
+                                    const updatedApis = uploadedApis.map(a =>
+                                      a.name === api.name
+                                        ? {
+                                            ...a,
+                                            auth_config: {
+                                              ...a.auth_config,
+                                              password: e.target.value
+                                            }
+                                          }
+                                        : a
+                                    );
+                                    setUploadedApis(updatedApis);
+                                    if (selectedLoadTestApi?.name === api.name) {
+                                      setSelectedLoadTestApi({
+                                        ...api,
+                                        auth_config: {
+                                          ...api.auth_config,
+                                          password: e.target.value
+                                        }
+                                      });
+                                    }
+                                  }}
+                                />
+                              </div>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
                   );
                 })}
-              </div>
-
-              {/* Sequential Test Button for Auto Mode */}
-              {autoExecuteMode && selectedApis.length > 0 && (
-                <div className={styles.sequentialActions}>
-                  <div className={styles.selectedInfo}>
-                    <CheckCircle size={18} />
-                    <span>{selectedApis.length} API{selectedApis.length > 1 ? 's' : ''} selected</span>
-                  </div>
-                  {!isLoadTesting ? (
-                    <button className={styles.startButton} onClick={handleStartSequentialTest}>
-                      <Play size={16} /> Start Sequential Test
-                    </button>
-                  ) : (
-                    <button className={styles.stopButton} onClick={handleStopSequentialTest}>
-                      <Square size={16} /> Stop Sequential Test
-                    </button>
-                  )}
                 </div>
-              )}
-            </section>
-          )}
+              </>
+            )}
+          </section>
+
+          {/* Upload Section with Toggles Inside (Bottom) */}
+          <section className={styles.uploadSection}>
+            {/* Toggles Row inside upload section */}
+            <div className={styles.togglesRow}>
+              <div className={styles.toggleItem}>
+                <Wrench size={18} />
+                <span>Batch Execute</span>
+                <label className={styles.switch}>
+                  <input
+                    type="checkbox"
+                    checked={autoExecuteMode}
+                    onChange={(e) => {
+                      setAutoExecuteMode(e.target.checked);
+                      setSelectedApis([]);
+                      setSelectedLoadTestApi(null);
+                    }}
+                    disabled={isLoadTesting}
+                  />
+                  <span className={styles.slider}></span>
+                </label>
+              </div>
+              <div className={styles.toggleItem}>
+                <span className={styles.aiIcon}>🤖</span>
+                <span>AI-Powered</span>
+                <label className={styles.switch}>
+                  <input
+                    type="checkbox"
+                    checked={aiMode}
+                    onChange={(e) => {
+                      setAiMode(e.target.checked);
+                      setAiRecommendations(null);
+                    }}
+                    disabled={isLoadTesting}
+                  />
+                  <span className={styles.slider}></span>
+                </label>
+              </div>
+            </div>
+
+            {/* Upload zone below toggles */}
+            <div className={styles.uploadZone}>
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={handleFileUpload}
+                disabled={isUploading || isLoadTesting}
+                id="excel-upload"
+                className={styles.fileInput}
+              />
+              <label htmlFor="excel-upload" className={styles.uploadLabel}>
+                {isUploading ? (
+                  'Uploading...'
+                ) : uploadedApis ? (
+                  `✓ Parsed ${uploadedApis.length} APIs`
+                ) : (
+                  'Click to browse or drag & drop Excel file'
+                )}
+              </label>
+              <p className={styles.hint}>
+                Sample columns: API Name, Base URL, Endpoint, Method, Headers, Payload, Auth Token
+              </p>
+            </div>
+          </section>
         </div>
 
         {/* RIGHT PANEL */}
@@ -703,6 +1345,264 @@ export const LoadTestDashboard: React.FC = () => {
             </div>
           )}
 
+          {/* Batch AI Analysis Panel - Sequential Mode with AI */}
+          {autoExecuteMode && selectedApis.length > 0 && !isLoadTesting && aiMode && (
+            <div className={styles.aiPanel}>
+              <h2>
+                <span className={styles.aiIcon}>🤖</span> AI Analysis for Sequential Test
+              </h2>
+
+              {!batchAiRecommendations ? (
+                // Pre-Analysis State
+                <div className={styles.aiPrompt}>
+                  <p>Let AI analyze all selected APIs and optimize configuration for sequential execution!</p>
+
+                  {/* Suggestions Button */}
+                  <button
+                    className={styles.suggestionsButton}
+                    onClick={() => setShowBatchSuggestionsInput(!showBatchSuggestionsInput)}
+                  >
+                    💡 {showBatchSuggestionsInput ? 'Back to Features' : 'Add Custom Suggestions'}
+                  </button>
+
+                  {/* Conditional: Show Features or Suggestions */}
+                  {!showBatchSuggestionsInput ? (
+                    <div className={styles.aiFeatures}>
+                      <div className={styles.aiFeature}>
+                        ✅ Detect API types automatically
+                      </div>
+                      <div className={styles.aiFeature}>
+                        ✅ Generate realistic test data
+                      </div>
+                      <div className={styles.aiFeature}>
+                        ✅ Recommend optimal parameters
+                      </div>
+                      <div className={styles.aiFeature}>
+                        ✅ Optimize for each API individually
+                      </div>
+                    </div>
+                  ) : (
+                    <div className={styles.suggestionsContainer}>
+                      <textarea
+                        className={styles.suggestionsTextarea}
+                        rows={5}
+                        placeholder="Enter your suggestions for all APIs (e.g., 'Generate test data with email addresses only from @gmail.com domain', 'Use maximum 500 users for all APIs', 'Set spawn rate to 50/s')"
+                        value={customBatchSuggestions}
+                        onChange={(e) => setCustomBatchSuggestions(e.target.value)}
+                      />
+                      <div className={styles.suggestionsWarning}>
+                        ⚠️ Do not include sensitive data like passwords or API keys
+                      </div>
+                      {customBatchSuggestions.trim() && (
+                        <div className={styles.suggestionsButtonGroup}>
+                          <button
+                            className={styles.clearSuggestionsButton}
+                            onClick={() => setCustomBatchSuggestions('')}
+                          >
+                            Clear Suggestions
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <button
+                    className={styles.aiButton}
+                    onClick={handleBatchAiAnalysis}
+                    disabled={isAnalyzingBatch}
+                  >
+                    {isAnalyzingBatch ? (
+                      <>
+                        <span className={styles.spinner}></span>
+                        Analyzing {selectedApis.length} API{selectedApis.length > 1 ? 's' : ''}...
+                      </>
+                    ) : (
+                      <>
+                        <span className={styles.aiIcon}>🤖</span>
+                        Analyze All Selected APIs
+                        {customBatchSuggestions.trim() && (
+                          <span className={styles.suggestionsBadge}>✓ Custom Suggestions</span>
+                        )}
+                      </>
+                    )}
+                  </button>
+                </div>
+              ) : (
+                // Post-Analysis State
+                <div className={styles.batchAiResults}>
+                  <div className={styles.aiResultsHeader}>
+                    <span className={styles.successBadge}>
+                      ✅ Analysis Complete for {batchAiRecommendations.total_apis} API{batchAiRecommendations.total_apis > 1 ? 's' : ''}
+                    </span>
+                    <button
+                      className={styles.reanalyzeButton}
+                      onClick={handleReanalyzeBatch}
+                    >
+                      🔬 Analyze Again
+                    </button>
+                  </div>
+
+                  {/* Common Toggle for AI Test Data */}
+                  <div className={styles.batchTestDataToggle}>
+                    <span className={styles.toggleLabel}>
+                      Use AI-Generated Test Data for All APIs
+                    </span>
+                    <label className={styles.switch}>
+                      <input
+                        type="checkbox"
+                        checked={useBatchAiTestData}
+                        onChange={(e) => setUseBatchAiTestData(e.target.checked)}
+                      />
+                      <span className={styles.sliderWithRobot}>
+                        <span className={styles.robotIcon}>🤖</span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className={styles.batchApiList}>
+                    {batchAiRecommendations.results.map((result: any, index: number) => {
+                      const isExpanded = expandedBatchApi === result.api_name;
+
+                      return (
+                        <div key={result.api_name} className={styles.batchApiCard}>
+                          <div
+                            className={styles.batchApiHeader}
+                            onClick={() => toggleBatchApiExpansion(result.api_name)}
+                          >
+                            <div className={styles.batchApiTitle}>
+                              <span className={styles.batchApiIndex}>{index + 1}.</span>
+                              <div className={styles.batchApiInfo}>
+                                <span className={styles.batchApiName}>{result.api_name}</span>
+                                <span className={styles.batchApiEndpoint}>
+                                  {result.method} {result.endpoint}
+                                </span>
+                                {/* Inline Summary - Always visible */}
+                                <div className={styles.batchApiSummary}>
+                                  <div className={styles.summaryItem}>
+                                    <Users size={12} className={styles.summaryIcon} />
+                                    <span className={styles.summaryValue}>{result.recommendations.users}</span>
+                                  </div>
+                                  <div className={styles.summaryItem}>
+                                    <Zap size={12} className={styles.summaryIcon} />
+                                    <span className={styles.summaryValue}>{result.recommendations.spawn_rate}/s</span>
+                                  </div>
+                                  <div className={styles.summaryItem}>
+                                    <Clock size={12} className={styles.summaryIcon} />
+                                    <span className={styles.summaryValue}>
+                                      {result.recommendations.think_time_min}-{result.recommendations.think_time_max}s
+                                    </span>
+                                  </div>
+                                  <div className={styles.summaryItem}>
+                                    <RefreshCw size={12} className={styles.summaryIcon} />
+                                    <span className={styles.summaryValue}>{formatDataMode(result.recommendations.data_mode)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                            <button className={styles.expandBtn}>
+                              {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                            </button>
+                          </div>
+
+                          {isExpanded && (
+                            <div className={styles.batchApiDetails}>
+                              {/* API Summary */}
+                              <div className={styles.aiSummary}>
+                                <div className={styles.aiSummaryItem}>
+                                  <strong>API Type:</strong> {result.api_type}
+                                </div>
+                                {result.required_fields.length > 0 && (
+                                  <div className={styles.aiSummaryItem}>
+                                    <strong>Required Fields:</strong> {result.required_fields.join(', ')}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Recommendations Grid */}
+                              <div className={styles.aiRecommendations}>
+                                <h4>AI Recommendations:</h4>
+                                <div className={styles.recommendationGrid}>
+                                  <div className={styles.recommendationItem}>
+                                    <span className={styles.label}>Users:</span>
+                                    <span className={styles.value}>{result.recommendations.users}</span>
+                                  </div>
+                                  <div className={styles.recommendationItem}>
+                                    <span className={styles.label}>Spawn Rate:</span>
+                                    <span className={styles.value}>{result.recommendations.spawn_rate}/s</span>
+                                  </div>
+                                  <div className={styles.recommendationItem}>
+                                    <span className={styles.label}>Think Time:</span>
+                                    <span className={styles.value}>
+                                      {result.recommendations.think_time_min}-{result.recommendations.think_time_max}s
+                                    </span>
+                                  </div>
+                                  <div className={styles.recommendationItem}>
+                                    <span className={styles.label}>Data Mode:</span>
+                                    <span className={styles.value}>{formatDataMode(result.recommendations.data_mode)}</span>
+                                  </div>
+                                </div>
+
+                                {/* Test Data Section */}
+                                {result.recommendations.test_data && result.recommendations.test_data.length > 0 && (
+                                  <div className={styles.testDataSection}>
+                                    <div className={styles.testDataInfo}>
+                                      <span className={styles.label}>Generated Test Data:</span>
+                                      <span className={styles.value}>
+                                        {result.recommendations.test_data.length} entries
+                                      </span>
+                                    </div>
+
+                                    {/* Individual API Toggle */}
+                                    <div className={styles.testDataToggle}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <span className={styles.toggleLabel}>
+                                          Use AI-Generated Test Data for this API
+                                        </span>
+                                        {result.api_name in batchApiTestDataOverrides && (
+                                          <span className={styles.overrideBadge} title="This API has a custom override">
+                                            Override
+                                          </span>
+                                        )}
+                                      </div>
+                                      <label className={styles.switch}>
+                                        <input
+                                          type="checkbox"
+                                          checked={shouldUseAiTestData(result.api_name)}
+                                          onChange={() => toggleBatchApiTestData(result.api_name, shouldUseAiTestData(result.api_name))}
+                                        />
+                                        <span className={styles.sliderWithRobot}>
+                                          <span className={styles.robotIcon}>🤖</span>
+                                        </span>
+                                      </label>
+                                    </div>
+
+                                    <p className={styles.testDataHint}>
+                                      {shouldUseAiTestData(result.api_name)
+                                        ? '✅ Will use AI-generated test data'
+                                        : '📄 Will use test data from Excel file'}
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Apply All Button */}
+                  <button
+                    className={styles.applyButton}
+                    onClick={handleApplyBatchRecommendations}
+                  >
+                    ✨ Apply All Recommendations
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Auto Mode - Selected APIs Preview */}
           {autoExecuteMode && selectedApis.length > 0 && !isLoadTesting && !loadTestMetrics && (
             <div className={styles.autoPreviewSection}>
@@ -712,8 +1612,19 @@ export const LoadTestDashboard: React.FC = () => {
               </p>
 
               <div className={styles.selectedApisList}>
-                {uploadedApis?.filter(api => selectedApis.includes(api.name)).map((api, index) => (
-                  <div key={api.name} className={styles.selectedApiItem}>
+                {uploadedApis?.filter(api => selectedApis.includes(api.name)).map((api, index) => {
+                  // Check if this API is currently executing in sequential mode
+                  const isExecuting = sequentialTestStatus?.status === 'running' && (
+                    sequentialTestStatus.current_api === api.name ||
+                    // If current_api is not set yet, check if this is the first API (index 0)
+                    (!sequentialTestStatus.current_api && index === 0)
+                  );
+
+                  return (
+                  <div
+                    key={api.name}
+                    className={`${styles.selectedApiItem} ${isExecuting ? styles.executingApi : ''}`}
+                  >
                     <div className={styles.apiNumber}>{index + 1}</div>
                     <div className={styles.apiItemContent}>
                       <div className={`${styles.methodBadge} ${styles[api.method.toLowerCase()]}`}>
@@ -736,7 +1647,8 @@ export const LoadTestDashboard: React.FC = () => {
                       </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className={styles.testSummary}>
@@ -757,12 +1669,181 @@ export const LoadTestDashboard: React.FC = () => {
             </div>
           )}
 
+          {/* AI Analysis Panel - Manual Mode with AI */}
+          {!autoExecuteMode && selectedLoadTestApi && !isLoadTesting && aiMode && (
+            <div className={styles.aiPanel}>
+              <h2>
+                <span className={styles.aiIcon}>🤖</span> AI Analysis
+              </h2>
+
+              {!aiRecommendations ? (
+                <div className={styles.aiPrompt}>
+                  <p>Let AI analyze your API and generate optimal test data and configuration!</p>
+
+                  {/* Suggestions Button */}
+                  <button
+                    className={styles.suggestionsButton}
+                    onClick={() => setShowSuggestionsInput(!showSuggestionsInput)}
+                  >
+                    💡 {showSuggestionsInput ? 'Back to Features' : 'Add Custom Suggestions'}
+                  </button>
+
+                  {/* Conditional: Show Features or Suggestions */}
+                  {!showSuggestionsInput ? (
+                    <div className={styles.aiFeatures}>
+                      <div className={styles.aiFeature}>✅ Detect API type automatically</div>
+                      <div className={styles.aiFeature}>✅ Generate realistic test data</div>
+                      <div className={styles.aiFeature}>✅ Recommend optimal parameters</div>
+                      <div className={styles.aiFeature}>✅ Suggest best practices</div>
+                    </div>
+                  ) : (
+                    <div className={styles.suggestionsContainer}>
+                      <textarea
+                        className={styles.suggestionsTextarea}
+                        rows={5}
+                        placeholder="Enter your suggestions for load testing (e.g., 'Generate test data with email addresses only from @gmail.com domain', 'Use maximum 500 users', 'Set spawn rate to 50/s')"
+                        value={customSuggestions}
+                        onChange={(e) => setCustomSuggestions(e.target.value)}
+                      />
+                      <div className={styles.suggestionsWarning}>
+                        ⚠️ Do not include sensitive data like passwords or API keys
+                      </div>
+                      {customSuggestions.trim() && (
+                        <div className={styles.suggestionsButtonGroup}>
+                          <button
+                            className={styles.clearSuggestionsButton}
+                            onClick={() => setCustomSuggestions('')}
+                          >
+                            Clear Suggestions
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <button
+                    className={styles.aiButton}
+                    onClick={handleAiAnalysis}
+                    disabled={isAnalyzing}
+                  >
+                    {isAnalyzing ? (
+                      <>
+                        <span className={styles.spinner}></span> Analyzing...
+                      </>
+                    ) : (
+                      <>
+                        <span className={styles.aiIcon}>🤖</span> Analyze with AI
+                        {customSuggestions.trim() && (
+                          <span className={styles.suggestionsBadge}>✓ Custom Suggestions</span>
+                        )}
+                      </>
+                    )}
+                  </button>
+                </div>
+              ) : (
+                <div className={styles.aiResults}>
+                  <div className={styles.aiResultsHeader}>
+                    <span className={styles.successBadge}>✅ Analysis Complete</span>
+                    <button
+                      className={styles.reanalyzeButton}
+                      onClick={handleAiAnalysis}
+                      disabled={isAnalyzing}
+                    >
+                      {isAnalyzing ? (
+                        <>
+                          <span className={styles.spinner}></span> Analyzing...
+                        </>
+                      ) : (
+                        <>
+                          🔬 Analyze Again
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <div className={styles.aiSummary}>
+                    <div className={styles.aiSummaryItem}>
+                      <strong>API Type:</strong> {aiRecommendations.api_type}
+                    </div>
+                    <div className={styles.aiSummaryItem}>
+                      <strong>Required Fields:</strong> {aiRecommendations.required_fields.join(', ') || 'None'}
+                    </div>
+                  </div>
+
+                  <div className={styles.aiRecommendations}>
+                    <h3>AI Recommendations:</h3>
+                    <div className={styles.recommendationGrid}>
+                      <div className={styles.recommendationItem}>
+                        <span className={styles.label}>Users:</span>
+                        <span className={styles.value}>{aiRecommendations.recommendations.users}</span>
+                      </div>
+                      <div className={styles.recommendationItem}>
+                        <span className={styles.label}>Spawn Rate:</span>
+                        <span className={styles.value}>{aiRecommendations.recommendations.spawn_rate}/s</span>
+                      </div>
+                      <div className={styles.recommendationItem}>
+                        <span className={styles.label}>Think Time:</span>
+                        <span className={styles.value}>
+                          {aiRecommendations.recommendations.think_time_min}s - {aiRecommendations.recommendations.think_time_max}s
+                        </span>
+                      </div>
+                      <div className={styles.recommendationItem}>
+                        <span className={styles.label}>Data Mode:</span>
+                        <span className={styles.value}>{formatDataMode(aiRecommendations.recommendations.data_mode)}</span>
+                      </div>
+                    </div>
+
+                    {aiRecommendations.recommendations.test_data && aiRecommendations.recommendations.test_data.length > 0 && (
+                      <div className={styles.testDataSection}>
+                        <div className={styles.testDataInfo}>
+                          <span className={styles.label}>Generated Test Data:</span>
+                          <span className={styles.value}>{aiRecommendations.recommendations.test_data.length} entries</span>
+                        </div>
+
+                        <div className={styles.testDataToggle}>
+                          <span className={styles.toggleLabel}>
+                            Use AI-Generated Test Data
+                          </span>
+                          <label className={styles.switch}>
+                            <input
+                              type="checkbox"
+                              checked={useAiTestData}
+                              onChange={(e) => setUseAiTestData(e.target.checked)}
+                            />
+                            <span className={styles.slider}></span>
+                          </label>
+                        </div>
+
+                        <p className={styles.testDataHint}>
+                          {useAiTestData
+                            ? '✅ Will use AI-generated test data'
+                            : '📄 Will use test data from Excel file'}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    className={styles.applyButton}
+                    onClick={handleApplyRecommendations}
+                  >
+                    ✨ Apply AI Recommendations
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Config Form - Manual Mode */}
           {!autoExecuteMode && selectedLoadTestApi && !isLoadTesting && (
-            <div className={styles.configSection}>
+            <div id="load-test-config" className={styles.configSection}>
               <h2>Load Test Configuration</h2>
               <p className={styles.configSubtitle}>
-                {selectedLoadTestApi.users ? 'Pre-filled from Excel (editable)' : 'Default values (editable)'}
+                {aiMode && aiRecommendations
+                  ? '✨ AI-generated configuration (editable)'
+                  : selectedLoadTestApi.users
+                  ? 'Pre-filled from Excel (editable)'
+                  : 'Default values (editable)'}
               </p>
 
               <div className={styles.formGroup}>
@@ -806,6 +1887,100 @@ export const LoadTestDashboard: React.FC = () => {
                   onChange={(e) => setLoadConfig({ ...loadConfig, run_time: e.target.value })}
                 />
               </div>
+
+              {/* Phase 1: Multi-user data support fields */}
+              <div className={styles.formGroup}>
+                <label>
+                  Test Data (JSON Array):
+                </label>
+                <textarea
+                  rows={4}
+                  placeholder='[{"username":"user1","password":"pass1"},{"username":"user2","password":"pass2"}]'
+                  value={selectedLoadTestApi.test_data ? JSON.stringify(selectedLoadTestApi.test_data, null, 2) : ''}
+                  onChange={(e) => {
+                    if (!uploadedApis) return;
+                    try {
+                      const parsed = e.target.value ? JSON.parse(e.target.value) : null;
+                      const updatedApis = uploadedApis.map(api =>
+                        api.name === selectedLoadTestApi.name ? { ...api, test_data: parsed } : api
+                      );
+                      setUploadedApis(updatedApis);
+                      setSelectedLoadTestApi({ ...selectedLoadTestApi, test_data: parsed });
+                    } catch (err) {
+                      // Invalid JSON - ignore for now, user might still be typing
+                    }
+                  }}
+                  className={styles.textareaInput}
+                />
+                <span className={styles.hint}>
+                  Optional: Provide array of objects. Use {`{{variable}}`} in payload to substitute values.
+                </span>
+              </div>
+
+              <div className={styles.formGroup}>
+                <label>Data Cycling Mode:</label>
+                <select
+                  value={selectedLoadTestApi.data_mode || 'round_robin'}
+                  onChange={(e) => {
+                    if (!uploadedApis) return;
+                    const mode = e.target.value as 'sequential' | 'random' | 'round_robin';
+                    const updatedApis = uploadedApis.map(api =>
+                      api.name === selectedLoadTestApi.name ? { ...api, data_mode: mode } : api
+                    );
+                    setUploadedApis(updatedApis);
+                    setSelectedLoadTestApi({ ...selectedLoadTestApi, data_mode: mode });
+                  }}
+                >
+                  <option value="round_robin">Round Robin (Recommended)</option>
+                  <option value="sequential">Sequential</option>
+                  <option value="random">Random</option>
+                </select>
+                <span className={styles.hint}>
+                  How to cycle through test data for different virtual users.
+                </span>
+              </div>
+
+              <div className={styles.formRow}>
+                <div className={styles.formGroup}>
+                  <label>Think Time Min (seconds):</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={selectedLoadTestApi.think_time_min ?? 1.0}
+                    onChange={(e) => {
+                      if (!uploadedApis) return;
+                      const value = parseFloat(e.target.value) || 1.0;
+                      const updatedApis = uploadedApis.map(api =>
+                        api.name === selectedLoadTestApi.name ? { ...api, think_time_min: value } : api
+                      );
+                      setUploadedApis(updatedApis);
+                      setSelectedLoadTestApi({ ...selectedLoadTestApi, think_time_min: value });
+                    }}
+                  />
+                </div>
+                <div className={styles.formGroup}>
+                  <label>Think Time Max (seconds):</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={selectedLoadTestApi.think_time_max ?? 3.0}
+                    onChange={(e) => {
+                      if (!uploadedApis) return;
+                      const value = parseFloat(e.target.value) || 3.0;
+                      const updatedApis = uploadedApis.map(api =>
+                        api.name === selectedLoadTestApi.name ? { ...api, think_time_max: value } : api
+                      );
+                      setUploadedApis(updatedApis);
+                      setSelectedLoadTestApi({ ...selectedLoadTestApi, think_time_max: value });
+                    }}
+                  />
+                </div>
+              </div>
+              <span className={styles.hint}>
+                Wait time between requests to simulate realistic user behavior.
+              </span>
 
               <button className={styles.startButton} onClick={handleStartTest}>
                 <Play size={16} /> Start Load Test
@@ -853,16 +2028,15 @@ export const LoadTestDashboard: React.FC = () => {
 
                   <div className={styles.progressStats}>
                     <div>
-                      <strong>Status:</strong> {sequentialTestStatus.status?.toUpperCase() || 'UNKNOWN'}
+                      <strong>Status:</strong> {
+                        sequentialTestStatus.current_api ||
+                        (sequentialTestStatus.apis && sequentialTestStatus.apis[0]) ||
+                        'Starting...'
+                      }
                     </div>
                     <div>
                       <strong>Progress:</strong> {(sequentialTestStatus.current_index || 0) + 1} of {sequentialTestStatus.total_apis || 0}
                     </div>
-                    {sequentialTestStatus.current_api && (
-                      <div>
-                        <strong>Current:</strong> {sequentialTestStatus.current_api}
-                      </div>
-                    )}
                   </div>
                 </div>
               )}

@@ -6,6 +6,7 @@ import asyncio
 import signal
 import time
 import psutil
+import threading
 from typing import Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime
@@ -22,12 +23,14 @@ class LocustManager:
         self.test_ports: Dict[str, int] = {}  # Track port for each test
         self.base_locust_port = 8089  # Starting Locust web port
         self.last_metrics: Dict[str, LoadTestMetrics] = {}  # Store last known metrics for each test
+        self.log_threads: Dict[str, threading.Thread] = {}  # Track log streaming threads
 
     def start_test(
         self,
         test_id: str,
         locustfile_path: str,
-        config: LoadTestConfig
+        config: LoadTestConfig,
+        session_id: str = None
     ) -> bool:
         """
         Start a Locust load test in headless mode.
@@ -60,6 +63,17 @@ class LocustManager:
 
             self.active_processes[test_id] = process
             self.test_start_times[test_id] = datetime.now()
+
+            # Start log streaming thread if session_id provided
+            if session_id:
+                log_thread = threading.Thread(
+                    target=self._stream_logs,
+                    args=(process, test_id, session_id),
+                    daemon=True
+                )
+                log_thread.start()
+                self.log_threads[test_id] = log_thread
+                print(f"📋 Log streaming thread started for {test_id}", flush=True)
 
             # Wait a moment for Locust to start
             time.sleep(2)
@@ -151,6 +165,8 @@ class LocustManager:
                 del self.test_start_times[test_id]
             if test_id in self.test_ports:
                 del self.test_ports[test_id]
+            if test_id in self.log_threads:
+                del self.log_threads[test_id]
             # Note: We keep self.last_metrics[test_id] for report generation
 
             print(f"Locust test {test_id} stopped successfully")
@@ -218,6 +234,45 @@ class LocustManager:
         except Exception as e:
             print(f"Error fetching Locust metrics: {e}", flush=True)
             return self.last_metrics.get(test_id)
+
+    def _stream_logs(self, process: subprocess.Popen, test_id: str, session_id: str):
+        """
+        Stream logs from Locust process to frontend via SSE.
+        Runs in separate thread to avoid blocking main process.
+        """
+        try:
+            from app.core.sse_manager import sse_manager
+
+            for line in iter(process.stdout.readline, ''):
+                if not line:
+                    break
+
+                # Skip empty lines
+                stripped = line.strip()
+                if not stripped:
+                    continue
+
+                # Broadcast to frontend
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                loop.run_until_complete(
+                    sse_manager.broadcast_to_session(
+                        session_id,
+                        'terminal_log',
+                        {
+                            'test_id': test_id,
+                            'log': stripped,
+                            'timestamp': datetime.now().isoformat()
+                        }
+                    )
+                )
+                loop.close()
+
+        except Exception as e:
+            print(f"Error streaming logs for {test_id}: {e}", flush=True)
+        finally:
+            print(f"📋 Log streaming ended for {test_id}", flush=True)
 
     def _parse_stats(self, test_id: str, stats_data: Dict[str, Any]) -> LoadTestMetrics:
         """Parse Locust stats API response into LoadTestMetrics."""

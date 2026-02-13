@@ -56,7 +56,11 @@
 }
 
 .leftPanel {
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 1rem;
+  overflow: hidden;
   padding-right: 0.5rem;
 }
 
@@ -82,6 +86,106 @@
   font-size: 1.125rem;
   color: #111827;
   font-weight: 600;
+}
+
+/* Scrollable API List Card (Top) */
+.apiListCard {
+  flex: 1;
+  overflow-y: auto;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 1rem;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+}
+
+.apiListCard h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  font-size: 1.125rem;
+  color: #111827;
+  font-weight: 600;
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: #9ca3af;
+  text-align: center;
+  padding: 2rem;
+}
+
+.emptyState p:first-child {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.emptyState p:last-child {
+  font-size: 0.875rem;
+}
+
+/* Upload Section with Toggles (Bottom) */
+.uploadSection {
+  flex-shrink: 0;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.uploadSection h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+  font-size: 1.125rem;
+  color: #111827;
+  font-weight: 600;
+}
+
+/* Toggles Row inside upload section */
+.togglesRow {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.toggleItem {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  color: #111827;
+}
+
+/* Scrollbar styling for API list card */
+.apiListCard::-webkit-scrollbar {
+  width: 6px;
+}
+
+.apiListCard::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 3px;
+}
+
+.apiListCard::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+.apiListCard::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
 }
 
 /* Toggle Switch */
@@ -155,7 +259,7 @@ input:disabled + .slider {
 /* Upload Section */
 .uploadZone {
   text-align: center;
-  padding: 1.5rem;
+  padding: 1rem;
   border: 2px dashed #d1d5db;
   border-radius: 8px;
   background: #f9fafb;
@@ -176,12 +280,12 @@ input:disabled + .slider {
   cursor: pointer;
   font-size: 0.9375rem;
   color: #374151;
-  padding: 0.75rem;
+  padding: 0.5rem;
   font-weight: 500;
 }
 
 .hint {
-  margin-top: 0.5rem;
+  margin-top: 0.375rem;
   font-size: 0.8125rem;
   color: #6b7280;
 }
@@ -352,6 +456,75 @@ input:disabled + .slider {
   font-size: 0.8125rem;
   overflow-x: auto;
   margin: 0.5rem 0 0;
+}
+
+/* Editable code block (textarea) */
+.editableCodeBlock {
+  width: 100%;
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 0.75rem;
+  border-radius: 4px;
+  font-size: 0.8125rem;
+  font-family: 'Courier New', monospace;
+  border: 1px solid #475569;
+  margin: 0.5rem 0 0;
+  resize: vertical;
+  transition: border-color 0.2s;
+}
+
+.editableCodeBlock:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.editableCodeBlock:hover {
+  border-color: #64748b;
+}
+
+/* Auth type select */
+.authSelect {
+  width: 100%;
+  padding: 0.5rem;
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #475569;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  margin: 0.5rem 0 0;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.authSelect:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.authSelect:hover {
+  border-color: #64748b;
+}
+
+/* Auth input fields */
+.authInput {
+  width: 100%;
+  padding: 0.5rem;
+  background: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #475569;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  margin: 0.5rem 0 0;
+  transition: border-color 0.2s;
+}
+
+.authInput:focus {
+  outline: none;
+  border-color: #3b82f6;
+}
+
+.authInput:hover {
+  border-color: #64748b;
 }
 
 /* Sequential Actions */
@@ -636,6 +809,362 @@ input:disabled + .slider {
   box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1);
 }
 
+.formGroup select {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.9375rem;
+  background-color: white;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.formGroup select:focus {
+  outline: none;
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1);
+}
+
+.formGroup textarea {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.9375rem;
+  font-family: 'Courier New', monospace;
+  resize: vertical;
+  transition: all 0.2s;
+}
+
+.formGroup textarea:focus {
+  outline: none;
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1);
+}
+
+.formRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+@media (max-width: 768px) {
+  .formRow {
+    grid-template-columns: 1fr;
+  }
+
+  .togglesRow {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .toggleItem {
+    width: 100%;
+  }
+}
+
+/* AI Panel Styles */
+.aiPanel {
+  background: white;
+  border: 2px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.aiPanel h2 {
+  margin-top: 0;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #111827;
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.aiIcon {
+  font-size: 1.25rem;
+}
+
+.aiPrompt {
+  padding: 0.75rem 0;
+}
+
+.aiPrompt p {
+  font-size: 0.9375rem;
+  margin-bottom: 1rem;
+  color: #6b7280;
+  line-height: 1.5;
+}
+
+.aiFeatures {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+}
+
+.aiFeature {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  padding: 0.625rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.8125rem;
+  color: #374151;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  transition: all 0.2s;
+}
+
+.aiFeature:hover {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.aiButton {
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 0.75rem 1.5rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.2s;
+  width: 100%;
+  justify-content: center;
+}
+
+.aiButton:hover:not(:disabled) {
+  background: #2563eb;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 6px rgba(59, 130, 246, 0.3);
+}
+
+.aiButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.aiResults {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 1rem;
+  margin-top: 1rem;
+}
+
+.aiResultsHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.successBadge {
+  background: #d1fae5;
+  color: #065f46;
+  padding: 0.375rem 0.75rem;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.8125rem;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.reanalyzeButton {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 0.625rem 1.25rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 0.875rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  box-shadow: 0 2px 4px rgba(102, 126, 234, 0.3);
+}
+
+.reanalyzeButton:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(102, 126, 234, 0.4);
+}
+
+.reanalyzeButton:active {
+  transform: translateY(0);
+}
+
+.aiSummary {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.aiSummaryItem {
+  background: white;
+  border: 1px solid #e5e7eb;
+  padding: 0.75rem;
+  border-radius: 6px;
+  color: #374151;
+  font-size: 0.875rem;
+}
+
+.aiRecommendations h3 {
+  margin-top: 0;
+  margin-bottom: 0.75rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: #111827;
+}
+
+.recommendationGrid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.recommendationItem {
+  background: white;
+  border: 1px solid #e5e7eb;
+  padding: 0.75rem;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.recommendationItem .label {
+  font-size: 0.75rem;
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.recommendationItem .value {
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+.testDataSection {
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.testDataInfo {
+  background: #d1fae5;
+  border: 1px solid #a7f3d0;
+  padding: 0.75rem;
+  border-radius: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.75rem;
+}
+
+.testDataInfo .label {
+  font-weight: 500;
+  color: #065f46;
+  font-size: 0.875rem;
+}
+
+.testDataInfo .value {
+  font-weight: 700;
+  font-size: 1.125rem;
+  color: #065f46;
+}
+
+.testDataToggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  margin-bottom: 0.5rem;
+}
+
+.testDataToggle .toggleLabel {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #374151;
+}
+
+.testDataHint {
+  font-size: 0.75rem;
+  color: #6b7280;
+  margin: 0;
+  padding-left: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.applyButton {
+  width: 100%;
+  background: #10b981;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 0.75rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 1rem;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.applyButton:hover {
+  background: #059669;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 6px rgba(16, 185, 129, 0.3);
+}
+
+@media (max-width: 768px) {
+  .aiFeatures {
+    grid-template-columns: 1fr;
+  }
+
+  .recommendationGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Buttons */
 .startButton,
 .stopButton {
@@ -678,6 +1207,43 @@ input:disabled + .slider {
   background: #dc2626;
   transform: translateY(-1px);
   box-shadow: 0 4px 6px rgba(239, 68, 68, 0.2);
+}
+
+/* Header Actions (AI Selector + Refresh) */
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.llmSelector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #f1f5f9;
+  border-radius: 8px;
+  color: #64748b;
+}
+
+.llmSelect {
+  background: transparent;
+  border: none;
+  color: #1e293b;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+}
+
+.llmSelect option {
+  background: #ffffff;
+  color: #1e293b;
+}
+
+.llmSelect:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .refreshButton {
@@ -1023,4 +1589,489 @@ input:disabled + .slider {
 .leftPanel::-webkit-scrollbar-thumb:hover,
 .rightPanel::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
+}
+
+/* ========================================
+   Batch AI Analysis Panel (Sequential Mode)
+   ======================================== */
+
+.batchAiPanel {
+  /* No additional wrapper styling needed - already inside .section */
+}
+
+.batchAiPrompt {
+  text-align: center;
+}
+
+.batchAiPrompt p {
+  color: #4b5563;
+  margin-bottom: 1.25rem;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+
+/* Post-Analysis State */
+.batchAiResults {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+/* Batch API List */
+.batchApiList {
+  margin-bottom: 1rem;
+}
+
+.batchApiCard {
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+  transition: all 0.2s;
+}
+
+.batchApiCard:hover {
+  border-color: #3b82f6;
+  box-shadow: 0 2px 4px rgba(59, 130, 246, 0.1);
+}
+
+.batchApiHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.625rem 0.75rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.batchApiHeader:hover {
+  background: #f9fafb;
+}
+
+.batchApiTitle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.batchApiIndex {
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: #3b82f6;
+  min-width: 1.5rem;
+  flex-shrink: 0;
+}
+
+.batchApiInfo {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.batchApiName {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #111827;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.batchApiEndpoint {
+  font-size: 0.7rem;
+  color: #6b7280;
+  font-family: 'Courier New', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 200px;
+}
+
+/* Batch API Details (Expanded Content) */
+.batchApiDetails {
+  padding: 0 1rem 1rem 1rem;
+  border-top: 1px solid #e5e7eb;
+  animation: slideDown 0.2s ease-out;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.batchApiDetails h4 {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #111827;
+  margin: 0.75rem 0 0.5rem 0;
+}
+
+/* Reuse existing recommendation styles */
+.batchApiDetails .aiSummary {
+  background: #f0f9ff;
+  border: 1px solid #bfdbfe;
+  padding: 0.75rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+}
+
+.batchApiDetails .aiSummaryItem {
+  font-size: 0.8125rem;
+  color: #1e40af;
+  margin-bottom: 0.375rem;
+}
+
+.batchApiDetails .aiSummaryItem:last-child {
+  margin-bottom: 0;
+}
+
+.batchApiDetails .aiSummaryItem strong {
+  font-weight: 600;
+  margin-right: 0.375rem;
+}
+
+/* Override recommendation grid for batch */
+.batchApiDetails .recommendationGrid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.batchApiDetails .recommendationItem {
+  background: white;
+  border: 1px solid #e5e7eb;
+  padding: 0.625rem;
+  border-radius: 6px;
+}
+
+.batchApiDetails .recommendationItem .label {
+  font-size: 0.6875rem;
+  color: #6b7280;
+  font-weight: 500;
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.batchApiDetails .recommendationItem .value {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #111827;
+}
+
+/* Test Data Section in Batch */
+.batchApiDetails .testDataSection {
+  margin-top: 0.75rem;
+  padding: 0.625rem;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+}
+
+.batchApiDetails .testDataInfo {
+  background: #d1fae5;
+  border: 1px solid #a7f3d0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.batchApiDetails .testDataInfo .label {
+  font-size: 0.75rem;
+  color: #065f46;
+  font-weight: 500;
+}
+
+.batchApiDetails .testDataInfo .value {
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: #065f46;
+}
+
+.batchApiDetails .testDataHint {
+  font-size: 0.6875rem;
+  color: #059669;
+  margin: 0;
+  padding-left: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Inline Summary - Always visible on same line */
+.batchApiSummary {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: nowrap;
+  align-items: center;
+  margin-left: auto;
+  padding-left: 0.5rem;
+}
+
+.summaryItem {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.summaryIcon {
+  color: #3b82f6;
+  flex-shrink: 0;
+}
+
+.summaryValue {
+  font-weight: 600;
+  color: #111827;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+/* ========================================
+   Batch AI Test Data Toggles
+   ======================================== */
+
+/* Common Toggle for All APIs */
+.batchTestDataToggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+}
+
+.batchTestDataToggle .toggleLabel {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #374151;
+}
+
+/* Robot Icon Toggle Switch */
+.sliderWithRobot {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #cbd5e1;
+  transition: 0.3s;
+  border-radius: 24px;
+}
+
+.sliderWithRobot .robotIcon {
+  position: absolute;
+  font-size: 22px;
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: 0.3s;
+  line-height: 18px;
+}
+
+input:checked + .sliderWithRobot {
+  background-color: #10b981;
+}
+
+input:checked + .sliderWithRobot .robotIcon {
+  transform: translateX(24px);
+}
+
+input:disabled + .sliderWithRobot {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Override Badge */
+.overrideBadge {
+  background: #fef3c7;
+  color: #92400e;
+  padding: 0.125rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  border: 1px solid #fbbf24;
+}
+
+/* Executing API - Windows-Style Progress Indicator */
+@keyframes progressSweep {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+/* High specificity selectors to override other styles */
+.apiListItem.executingApi,
+.selectedApiItem.executingApi {
+  position: relative;
+  background: #ecfdf5 !important; /* Light green tint background */
+  border: 2px solid #10b981 !important;
+  border-left: 4px solid #10b981 !important;
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.2), 0 2px 8px rgba(16, 185, 129, 0.15) !important;
+  transition: none !important;
+  overflow: hidden;
+}
+
+/* Windows-style progress sweep effect */
+.apiListItem.executingApi::before,
+.selectedApiItem.executingApi::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(16, 185, 129, 0.25) 25%,
+    rgba(16, 185, 129, 0.4) 50%,
+    rgba(16, 185, 129, 0.25) 75%,
+    transparent 100%
+  );
+  animation: progressSweep 2s linear infinite;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* ===== SUGGESTIONS FEATURE STYLES ===== */
+
+/* Suggestions Button */
+.suggestionsButton {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  padding: 0.6rem 1.2rem;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: center;
+  transition: transform 0.2s, box-shadow 0.2s;
+  font-weight: 500;
+}
+
+.suggestionsButton:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+}
+
+.suggestionsButton:active {
+  transform: translateY(0);
+}
+
+/* Suggestions Container */
+.suggestionsContainer {
+  margin-bottom: 1rem;
+}
+
+/* Suggestions Textarea */
+.suggestionsTextarea {
+  width: 100%;
+  padding: 0.75rem;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 100px;
+  margin-bottom: 0.5rem;
+  transition: border-color 0.2s;
+}
+
+.suggestionsTextarea:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.suggestionsTextarea::placeholder {
+  color: #999;
+  font-style: italic;
+}
+
+/* Suggestions Warning */
+.suggestionsWarning {
+  font-size: 0.75rem;
+  color: #f57c00;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Suggestions Badge */
+.suggestionsBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  background: #e8f5e9;
+  color: #2e7d32;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  margin-left: 0.5rem;
+}
+
+/* Clear Suggestions Button */
+.clearSuggestionsButton {
+  background: transparent;
+  border: 1px solid #f44336;
+  color: #f44336;
+  padding: 0.4rem 0.8rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.2s;
+  font-weight: 500;
+}
+
+.clearSuggestionsButton:hover {
+  background: #fff5f5;
+  border-color: #d32f2f;
+  color: #d32f2f;
+}
+
+.clearSuggestionsButton:active {
+  transform: scale(0.98);
+}
+
+/* Suggestions Button Group */
+.suggestionsButtonGroup {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
 }

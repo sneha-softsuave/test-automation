@@ -151,7 +151,7 @@ export const LiveCharts: React.FC<LiveChartsProps> = ({ metricsHistory }) => {
     usersChartRef.current?.resetZoom();
   };
 
-  // Common chart options
+  // Common chart options - Locust white theme style
   const commonOptions: ChartOptions<'line'> = {
     responsive: true,
     maintainAspectRatio: false,
@@ -164,6 +164,7 @@ export const LiveCharts: React.FC<LiveChartsProps> = ({ metricsHistory }) => {
           font: {
             size: 12,
           },
+          color: '#374151',
         },
       },
       tooltip: {
@@ -198,25 +199,27 @@ export const LiveCharts: React.FC<LiveChartsProps> = ({ metricsHistory }) => {
       x: {
         grid: {
           display: true,
-          color: 'rgba(255, 255, 255, 0.05)',
+          color: 'rgba(0, 0, 0, 0.1)',
         },
         ticks: {
           maxTicksLimit: 10,
           font: {
             size: 11,
           },
+          color: '#6b7280',
         },
       },
       y: {
         beginAtZero: true,
         grid: {
           display: true,
-          color: 'rgba(255, 255, 255, 0.05)',
+          color: 'rgba(0, 0, 0, 0.1)',
         },
         ticks: {
           font: {
             size: 11,
           },
+          color: '#6b7280',
         },
       },
     },

@@ -27,9 +27,9 @@ class Settings(BaseSettings):
 
     # Anthropic Configuration
     ANTHROPIC_API_KEY: str = ""
-    ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
+    ANTHROPIC_MODEL: str = "claude-sonnet-4-5-20250929"
 
-    # Default LLM provider (groq is cost-effective and fast)
+    # Default LLM provider used if none specified (groq is cost-effective and fast)
     DEFAULT_LLM_PROVIDER: str = "groq"
 
     class Config:

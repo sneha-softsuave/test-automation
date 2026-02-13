@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
+const API_BASE_URL = '';
+
 // Clear corrupted storage on load (one-time fix for quota exceeded)
 try {
   const stored = localStorage.getItem('test-automation-storage');
@@ -85,7 +87,7 @@ export interface ExecutionResult {
   executed_at: string;
 }
 
-type View = 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest' | 'loadtest-reports';
+type View = 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest' | 'loadtest-logs' | 'loadtest-reports' | 'loadtest-insights';
 
 // Execution mode: Multi-Agent (Supervisor + Sub-agents)
 export type ExecutionMode = 'multi-agent';
@@ -143,6 +145,13 @@ export interface LoadTestAPIConfig {
   users?: number;
   spawn_rate?: number;
   run_time?: string;
+  // Phase 1: Multi-user data support
+  test_data?: Array<Record<string, any>>;
+  data_mode?: 'sequential' | 'random' | 'round_robin';
+  think_time_min?: number;
+  think_time_max?: number;
+  user_journey?: string;
+  variable_mapping?: Record<string, string>;
 }
 
 export interface LoadTestConfig {
@@ -192,6 +201,7 @@ interface AppState {
   // LLM Provider
   llmProvider: LLMProvider;
   setLlmProvider: (provider: LLMProvider) => void;
+  initializeLlmProvider: () => Promise<void>;
 
   // Test Suite
   testSuite: TestSuite | null;
@@ -266,8 +276,29 @@ interface AppState {
   loadTestSessionId: string | null;
   setLoadTestSessionId: (id: string | null) => void;
 
+  // Terminal Logs (persists across navigation)
+  terminalLogs: Array<{ timestamp: string; log: string }>;
+  addTerminalLog: (log: { timestamp: string; log: string }) => void;
+  clearTerminalLogs: () => void;
+
+  // AI Suggested Load Test Config
+  aiSuggestedConfig: {
+    users?: number;
+    spawn_rate?: number;
+    run_time?: string;
+    think_time_min?: number;
+    think_time_max?: number;
+  } | null;
+  setAiSuggestedConfig: (config: {
+    users?: number;
+    spawn_rate?: number;
+    run_time?: string;
+    think_time_min?: number;
+    think_time_max?: number;
+  } | null) => void;
+
   // Reset
-  reset: () => void;
+  reset: () => Promise<void>;
 }
 
 export const useStore = create<AppState>()(
@@ -281,9 +312,22 @@ export const useStore = create<AppState>()(
       executionMode: 'multi-agent',
       setExecutionMode: (mode) => set({ executionMode: mode }),
 
-      // LLM Provider (default to openai)
-      llmProvider: 'openai',
+      // LLM Provider (default to groq - cost-effective and fast)
+      llmProvider: 'groq',
       setLlmProvider: (provider) => set({ llmProvider: provider }),
+      initializeLlmProvider: async () => {
+        try {
+          const response = await fetch(`${API_BASE_URL}/api/v1/llm-providers`);
+          if (response.ok) {
+            const config = await response.json();
+            set({ llmProvider: config.default as LLMProvider });
+            console.log(`🤖 Initialized LLM provider from backend: ${config.default}`);
+          }
+        } catch (error) {
+          console.warn('Failed to fetch default LLM provider, using fallback:', error);
+          // Keep default 'groq' as fallback
+        }
+      },
 
       // Test Suite
       testSuite: null,
@@ -372,14 +416,44 @@ export const useStore = create<AppState>()(
       loadTestSessionId: null,
       setLoadTestSessionId: (id) => set({ loadTestSessionId: id }),
 
+      // Terminal Logs
+      terminalLogs: [],
+      addTerminalLog: (log) =>
+        set((state) => {
+          const MAX_LOGS = 1000;
+          const newLogs = [...state.terminalLogs, log];
+          // Keep only last 1000 logs
+          return {
+            terminalLogs: newLogs.length > MAX_LOGS ? newLogs.slice(-MAX_LOGS) : newLogs,
+          };
+        }),
+      clearTerminalLogs: () => set({ terminalLogs: [] }),
+
+      // AI Suggested Load Test Config
+      aiSuggestedConfig: null,
+      setAiSuggestedConfig: (config) => set({ aiSuggestedConfig: config }),
+
       // Reset - also clears localStorage
-      reset: () => {
+      reset: async () => {
         // Clear persisted storage
         localStorage.removeItem('test-automation-storage');
+
+        // Fetch default provider from backend
+        let defaultProvider: LLMProvider = 'groq';
+        try {
+          const response = await fetch(`${API_BASE_URL}/api/v1/llm-providers`);
+          if (response.ok) {
+            const config = await response.json();
+            defaultProvider = config.default as LLMProvider;
+          }
+        } catch (error) {
+          console.warn('Failed to fetch default LLM provider on reset, using fallback');
+        }
+
         set({
           currentView: 'upload',
           executionMode: 'multi-agent',
-          llmProvider: 'openai',
+          llmProvider: defaultProvider,
           testSuite: null,
           rawTestCases: null,
           generatedScript: null,
@@ -411,6 +485,7 @@ export const useStore = create<AppState>()(
         sequentialTestId: state.sequentialTestId,
         loadTestMetrics: state.loadTestMetrics,
         sequentialTestStatus: state.sequentialTestStatus,
+        terminalLogs: state.terminalLogs,
         // screenshots excluded - base64 images exceed localStorage quota
       }),
       // Handle Date serialization on rehydration
