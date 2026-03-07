@@ -224,12 +224,21 @@
   margin-left: 260px;
   padding: 24px;
   min-height: 100vh;
+  height: 100vh;
   background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
 }
 
 .content {
   max-width: 1600px;
   margin: 0 auto;
+  width: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* ===== Mobile Header ===== */

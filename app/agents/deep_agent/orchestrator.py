@@ -199,12 +199,12 @@ class DeepAgentOrchestrator:
         )
 
     def _get_default_model(self, provider: str) -> str:
-        """Get default model for provider."""
+        """Get default model for provider — all models come from settings (config.py / .env)."""
         return {
-            "groq": settings.GROQ_MODEL or "llama-3.1-8b-instant",
-            "openai": settings.OPENAI_MODEL or "gpt-4o-mini",
-            "anthropic": settings.ANTHROPIC_MODEL or "claude-3-haiku-20240307"
-        }.get(provider.lower(), "llama-3.1-8b-instant")
+            "groq": settings.GROQ_MODEL,
+            "openai": settings.OPENAI_MODEL,
+            "anthropic": settings.ANTHROPIC_MODEL,
+        }.get(provider.lower(), settings.GROQ_MODEL)
 
     def _broadcast(self, message: Dict):
         """Send SSE broadcast if function is set."""
@@ -319,6 +319,11 @@ class DeepAgentOrchestrator:
         try:
             import asyncio
 
+            # Pull step control from state (may be None for direct calls)
+            _signal_file = (getattr(self.state, 'step_control_file', None)
+                            or (self.state.get('step_control_file') if isinstance(self.state, dict) else None))
+            _stop_evt = getattr(self.state, 'stop_event', None) or self.state.get('stop_event') if isinstance(self.state, dict) else None
+
             # Run async execute_enhanced
             try:
                 loop = asyncio.get_event_loop()
@@ -330,7 +335,10 @@ class DeepAgentOrchestrator:
                             execute_enhanced(
                                 test_suite=self.state.parsed_suite,
                                 headless=self.state.headless,
-                                timeout=self.state.timeout
+                                keep_browser_open=getattr(self.state, 'keep_browser_open', True),
+                                timeout=self.state.timeout,
+                                stop_event=_stop_evt,
+                                signal_file=_signal_file,
                             )
                         )
                         self.state.execution_results = future.result()
@@ -339,7 +347,10 @@ class DeepAgentOrchestrator:
                         execute_enhanced(
                             test_suite=self.state.parsed_suite,
                             headless=self.state.headless,
-                            timeout=self.state.timeout
+                            keep_browser_open=getattr(self.state, 'keep_browser_open', True),
+                            timeout=self.state.timeout,
+                            stop_event=_stop_evt,
+                            signal_file=_signal_file,
                         )
                     )
             except RuntimeError:
@@ -347,7 +358,10 @@ class DeepAgentOrchestrator:
                     execute_enhanced(
                         test_suite=self.state.parsed_suite,
                         headless=self.state.headless,
-                        timeout=self.state.timeout
+                        keep_browser_open=getattr(self.state, 'keep_browser_open', True),
+                        timeout=self.state.timeout,
+                        stop_event=_stop_evt,
+                        signal_file=_signal_file,
                     )
                 )
 

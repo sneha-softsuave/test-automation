@@ -14,7 +14,7 @@ interface ReportInfo {
 }
 
 export const LoadTestReports: React.FC = () => {
-  const { setCurrentView, addNotification } = useStore();
+  const { setCurrentView, addNotification, lastCompletedTestId } = useStore();
   const [currentReport, setCurrentReport] = useState<ReportInfo | null>(null);
   const [reportHtml, setReportHtml] = useState<string>('');
   const [loading, setLoading] = useState(false);
@@ -74,16 +74,15 @@ export const LoadTestReports: React.FC = () => {
     }
   };
 
+  // Fetch report on mount and when a test completes
   useEffect(() => {
     fetchCurrentReport();
-  }, []);
+  }, [lastCompletedTestId]); // Re-fetch when lastCompletedTestId changes
 
   const handleRefresh = () => {
-    // Clear all report state
+    // Fetch the latest report with cache busting
     setRefreshKey(prev => prev + 1);
-    setReportHtml('');
-    setCurrentReport(null);
-    setError('No test report available. Complete a load test to generate a report.');
+    fetchCurrentReport(true); // Pass true to force cache bust
   };
 
   return (

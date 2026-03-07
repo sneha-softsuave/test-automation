@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # OpenAI Configuration
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
-    OPENAI_MAX_TOKENS: int = 4096
+    OPENAI_MAX_TOKENS: int = 16000
 
     # Groq Configuration
     GROQ_API_KEY: str = ""
@@ -31,6 +31,17 @@ class Settings(BaseSettings):
 
     # Default LLM provider used if none specified (groq is cost-effective and fast)
     DEFAULT_LLM_PROVIDER: str = "groq"
+
+    # Image Analysis (Vision) — OFF by default
+    # When ON: if a selector fails during recording, a screenshot is sent to the
+    # vision model which suggests alternative selectors based on what it sees.
+    IMAGE_ANALYSIS_ENABLED: bool = False
+    GROQ_VISION_MODEL: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    # Dedicated API key for the vision model (separate from the text model key)
+    GROQ_VISION_API_KEY: str = ""
+    OPENAI_VISION_MODEL: str = "gpt-4o-mini"
+    # Which provider to use for vision: "groq" or "openai"
+    VISION_PROVIDER: str = "groq"
 
     class Config:
         env_file = ".env"

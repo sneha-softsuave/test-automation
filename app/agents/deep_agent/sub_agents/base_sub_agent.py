@@ -103,12 +103,12 @@ class BaseSubAgent(ABC):
         self.execution_log = []
 
     def _get_default_model(self, provider: str) -> str:
-        """Get default model for provider."""
+        """Get default model for provider — all models come from settings (config.py / .env)."""
         return {
-            "groq": settings.GROQ_MODEL or "llama-3.1-8b-instant",
-            "openai": settings.OPENAI_MODEL or "gpt-4o-mini",
-            "anthropic": settings.ANTHROPIC_MODEL or "claude-3-haiku-20240307"
-        }.get(provider.lower(), "llama-3.1-8b-instant")
+            "groq": settings.GROQ_MODEL,
+            "openai": settings.OPENAI_MODEL,
+            "anthropic": settings.ANTHROPIC_MODEL,
+        }.get(provider.lower(), settings.GROQ_MODEL)
 
     def log(self, message: str, level: str = "info"):
         """Log a message."""

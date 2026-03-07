@@ -831,3 +831,160 @@ async def execute_enhanced_endpoint(
         import traceback
         print(f"Error: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error in enhanced execution: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Generate test cases from URL + natural language intent
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel as PydanticBaseModel
+
+class GenerateFromUrlRequest(PydanticBaseModel):
+    url: str
+    intent: str
+    app_name: Optional[str] = "My App"
+    test_email: Optional[str] = "test@example.com"
+    test_password: Optional[str] = "password123"
+
+
+@router.post("/generate-from-url")
+async def generate_from_url(
+    request: GenerateFromUrlRequest,
+    llm_provider: Optional[str] = Query(
+        default=None,
+        description="LLM provider: groq, openai, or anthropic"
+    ),
+    model: Optional[str] = Query(
+        default=None,
+        description="Override model name"
+    ),
+    headless: Optional[bool] = Query(
+        default=True,
+        description="Run Playwright in headless mode for crawling"
+    ),
+):
+    """
+    Generate a complete EnhancedTestSuite from a URL + natural language intent.
+
+    1. Playwright crawls the URL and extracts all real page elements + selectors
+    2. LLM receives the page structure + user intent
+    3. LLM generates a complete test suite using real selectors (no guessing)
+
+    **Input:**
+    ```json
+    {
+      "url": "https://myapp.com/login",
+      "intent": "Test the login page with valid and invalid credentials",
+      "app_name": "MyApp",
+      "test_email": "user@test.com",
+      "test_password": "secret123"
+    }
+    ```
+
+    **Returns:** EnhancedTestSuite JSON ready for execution via /execute-enhanced
+    """
+    from app.agents.test_case_generator import TestCaseGeneratorAgent
+    from app.agents.base_agent import LLMProvider as AgentLLMProvider
+    from app.tools.selector_extractor import SelectorExtractor
+
+    provider_name = llm_provider or settings.DEFAULT_LLM_PROVIDER
+    provider_name = validate_llm_provider(provider_name)
+    validate_api_key(provider_name)
+
+    print("\n" + "=" * 60)
+    print("GENERATE FROM URL - Starting")
+    print(f"URL: {request.url}")
+    print(f"Intent: {request.intent[:80]}")
+    print(f"Provider: {provider_name}")
+    print("=" * 60)
+
+    try:
+        # Step 1: Crawl the page
+        print("[1/2] Crawling page with Playwright...")
+        extractor = SelectorExtractor(headless=headless)
+        page_structure = await extractor.extract_selectors(request.url)
+
+        summary = page_structure.get("summary", {})
+        print(f"  Found: {summary.get('inputs', 0)} inputs, "
+              f"{summary.get('buttons', 0)} buttons, "
+              f"{summary.get('headings', 0)} headings, "
+              f"{summary.get('links', 0)} links")
+
+        # Step 2: Generate test cases with LLM
+        print("[2/2] Generating test cases with AI...")
+        provider_enum = AgentLLMProvider(provider_name)
+        agent = TestCaseGeneratorAgent(provider=provider_enum, model=model)
+
+        test_suite = agent.generate(
+            page_structure=page_structure,
+            intent=request.intent,
+            app_name=request.app_name or "My App",
+            base_url=None,  # auto-derived from URL
+            test_email=request.test_email or "test@example.com",
+            test_password=request.test_password or "password123",
+        )
+
+        tc_count = len(test_suite.get("test_cases", []))
+        print(f"  Generated {tc_count} test case(s)")
+        print("=" * 60 + "\n")
+
+        return {
+            "success": True,
+            "message": f"Generated {tc_count} test case(s) from {request.url}",
+            "llm_provider": provider_name,
+            "model": model or getattr(settings, f"{provider_name.upper()}_MODEL", ""),
+            "page_summary": summary,
+            "test_suite": test_suite,
+        }
+
+    except Exception as e:
+        import traceback
+        print(f"Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error generating test cases: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Export EnhancedTestSuite back to Excel format
+# ---------------------------------------------------------------------------
+
+@router.post("/export-to-excel")
+async def export_to_excel(input_data: dict):
+    """
+    Convert an EnhancedTestSuite JSON back to Excel format (.xlsx).
+
+    The exported Excel uses the same column format as the input Excel:
+    T.C.No | Test Case | Test Case Steps | Expected Result | Input data
+
+    Pass the test_suite from /generate-from-url or /parse-enhanced output.
+    """
+    from app.services.excel_export_service import export_test_suite_to_excel
+    from fastapi.responses import Response
+
+    try:
+        # Accept either {test_suite: {...}} wrapper or raw suite
+        if "test_suite" in input_data:
+            suite = input_data["test_suite"]
+        elif "result" in input_data:
+            suite = input_data["result"]
+        else:
+            suite = input_data
+
+        test_cases = suite.get("test_cases", [])
+        if not test_cases:
+            raise HTTPException(status_code=400, detail="No test cases found in input")
+
+        excel_bytes = export_test_suite_to_excel(suite)
+        project_name = suite.get("project", "test_cases").replace(" ", "_")
+
+        return Response(
+            content=excel_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{project_name}.xlsx"'},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        print(f"Error: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Error exporting to Excel: {str(e)}")

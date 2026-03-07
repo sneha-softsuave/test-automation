@@ -77,6 +77,7 @@ def execute_node(state: TestAutomationState) -> Dict[str, Any]:
 
     try:
         headless = state.get("headless", True)
+        keep_browser_open = state.get("keep_browser_open", True)
         timeout = state.get("timeout", 30000)
 
         test_cases = parsed_suite.get("test_cases", [])
@@ -97,6 +98,10 @@ def execute_node(state: TestAutomationState) -> Dict[str, Any]:
                 "headless": headless
             })
 
+        # Pull step control and stop event from state
+        signal_file = state.get("step_control_file")
+        stop_event = state.get("stop_event")
+
         # Run the async execute_enhanced function (SAME as API endpoint)
         # We need to handle async/sync context properly
         try:
@@ -111,7 +116,10 @@ def execute_node(state: TestAutomationState) -> Dict[str, Any]:
                         execute_enhanced(
                             test_suite=parsed_suite,
                             headless=headless,
-                            timeout=timeout
+                            keep_browser_open=keep_browser_open,
+                            timeout=timeout,
+                            stop_event=stop_event,
+                            signal_file=signal_file,
                         )
                     )
                     execution_results = future.result()
@@ -120,7 +128,10 @@ def execute_node(state: TestAutomationState) -> Dict[str, Any]:
                     execute_enhanced(
                         test_suite=parsed_suite,
                         headless=headless,
-                        timeout=timeout
+                        keep_browser_open=keep_browser_open,
+                        timeout=timeout,
+                        stop_event=stop_event,
+                        signal_file=signal_file,
                     )
                 )
         except RuntimeError:
@@ -129,7 +140,10 @@ def execute_node(state: TestAutomationState) -> Dict[str, Any]:
                 execute_enhanced(
                     test_suite=parsed_suite,
                     headless=headless,
-                    timeout=timeout
+                    keep_browser_open=keep_browser_open,
+                    timeout=timeout,
+                    stop_event=stop_event,
+                    signal_file=signal_file,
                 )
             )
 

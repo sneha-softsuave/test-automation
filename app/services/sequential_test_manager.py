@@ -41,7 +41,8 @@ class SequentialTestManager:
         self,
         sequential_test_id: str,
         apis: List[APIConfig],
-        session_id: str
+        session_id: str,
+        llm_provider: str = "groq"
     ) -> bool:
         """
         Start a sequential load test.
@@ -61,6 +62,7 @@ class SequentialTestManager:
             "sequential_test_id": sequential_test_id,
             "apis": [api.name for api in apis],
             "session_id": session_id,
+            "llm_provider": llm_provider,  # Store for AI insights generation
             "status": "running",
             "current_index": 0,
             "start_time": datetime.now(),
@@ -208,13 +210,43 @@ class SequentialTestManager:
 
         if api_results:
             try:
-                print(f"📊 [SEQ] Calling generate_sequential_report...", flush=True)
+                # Get LLM provider from session or default to groq
+                test_info = self.active_sequential_tests.get(sequential_test_id, {})
+                llm_provider = test_info.get("llm_provider", "groq")
+
+                print(f"📊 [SEQ] Calling generate_sequential_report with provider: {llm_provider}...", flush=True)
                 report_filename = load_test_report_generator.generate_sequential_report(
                     sequential_test_id,
                     api_results,
-                    total_duration
+                    total_duration,
+                    llm_provider
                 )
                 print(f"📄 Report generated: {report_filename}", flush=True)
+
+                # Auto-generate AI insights for sequential test (use last API's metrics)
+                try:
+                    print(f"🤖 [SEQ] Auto-generating AI insights for sequential test: {sequential_test_id}", flush=True)
+
+                    # Use the last completed API's metrics as representative
+                    last_result = api_results[-1]
+
+                    # Import the background task function
+                    from app.api.routes.load_test import generate_ai_insights_background
+
+                    asyncio.create_task(
+                        generate_ai_insights_background(
+                            test_id=sequential_test_id,
+                            llm_provider=llm_provider,
+                            metrics=last_result.get('metrics', {}),
+                            config=last_result.get('config', {}),
+                            api={'endpoint': last_result.get('endpoint', '/'), 'method': last_result.get('method', 'GET')},
+                            regenerate_report=True
+                        )
+                    )
+                    print(f"✅ [SEQ] AI insights generation started in background", flush=True)
+                except Exception as e:
+                    print(f"⚠️ Failed to start AI insights generation: {e}", flush=True)
+
             except Exception as e:
                 print(f"⚠️ Failed to generate report: {e}", flush=True)
                 import traceback
@@ -227,7 +259,11 @@ class SequentialTestManager:
             "sequential_test_completed",
             {
                 "sequential_test_id": sequential_test_id,
+                "status": "completed",
+                "current_index": len(apis) - 1,
                 "total_apis": len(apis),
+                "current_api": apis[-1].name if apis else None,
+                "apis": [a.name for a in apis],
                 "message": "All APIs completed"
             }
         )

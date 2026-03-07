@@ -154,6 +154,19 @@ export interface ScreenshotHistoryItem {
 
 export type ActiveAgent = 'Supervisor' | 'Parser' | 'Executor' | 'Validator' | 'Reporter' | null;
 
+export interface LiveExcelRow {
+  testId: string;
+  tcNo: number;
+  testName: string;
+  stepsText: string;
+  expectedResult: string;
+  inputData: string;
+  status: 'pending' | 'running' | 'passed' | 'failed';
+  currentStep: number;   // 0 = none active
+  totalSteps: number;
+  error: string | null;
+}
+
 export interface UseExecutionWebSocketReturn {
   isConnected: boolean;
   sessionId: string;
@@ -171,13 +184,14 @@ export interface UseExecutionWebSocketReturn {
   };
   browserState: BrowserState;
   screenshots: ScreenshotHistoryItem[];
+  liveExcelRows: LiveExcelRow[];
   connect: () => void;
   disconnect: () => void;
   clearLogs: () => void;
   addLog: (log: Omit<ExecutionLog, 'id' | 'timestamp'>) => void;
 }
 
-export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
+export const useExecutionWebSocket = (fixedSessionId?: string): UseExecutionWebSocketReturn => {
   const [isConnected, setIsConnected] = useState(false);
   const [logs, setLogs] = useState<ExecutionLog[]>([]);
   const [currentTest, setCurrentTest] = useState<string | null>(null);
@@ -199,9 +213,13 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
     currentStep: 0,
     status: 'idle',
   });
+  const [liveExcelRows, setLiveExcelRows] = useState<LiveExcelRow[]>([]);
 
   const eventSourceRef = useRef<EventSource | null>(null);
-  const sessionIdRef = useRef<string>(`session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+  // Use the provided fixed session ID (for persistence) or generate a new one
+  const sessionIdRef = useRef<string>(
+    fixedSessionId ?? `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  );
 
   const addLog = useCallback((log: Omit<ExecutionLog, 'id' | 'timestamp'>) => {
     setLogs((prev) => [
@@ -525,6 +543,11 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
             passedTests: data.status === 'PASSED' ? prev.passedTests + 1 : prev.passedTests,
             failedTests: data.status === 'FAILED' ? prev.failedTests + 1 : prev.failedTests,
           }));
+          setLiveExcelRows(prev => prev.map(r =>
+            r.testId === data.test_id
+              ? { ...r, status: data.status === 'PASSED' ? 'passed' : 'failed', currentStep: 0 }
+              : r
+          ));
           addLog({
             type: 'test_completed',
             testId: data.test_id,
@@ -532,6 +555,21 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
             agent: eventAgent || 'Executor',
             message: data.message || `Test ${data.status}: ${data.test_name}`,
           });
+          break;
+
+        case 'excel_row_init':
+          setLiveExcelRows(prev => [...prev, {
+            testId: data.test_id,
+            tcNo: data.tc_no,
+            testName: data.test_name,
+            stepsText: data.steps_text,
+            expectedResult: data.expected_result,
+            inputData: data.input_data,
+            status: 'running',
+            currentStep: 0,
+            totalSteps: data.total_steps,
+            error: null,
+          }]);
           break;
 
         case 'step_started':
@@ -544,6 +582,9 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
             currentStep: data.step_number,
             status: 'running',
           }));
+          setLiveExcelRows(prev => prev.map(r =>
+            r.testId === data.test_id ? { ...r, currentStep: data.step_number } : r
+          ));
           addLog({
             type: 'step_started',
             testId: data.test_id,
@@ -566,6 +607,11 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
             ...prev,
             completedSteps: prev.completedSteps + 1,
           }));
+          if (data.status === 'FAILED' && data.error) {
+            setLiveExcelRows(prev => prev.map(r =>
+              r.testId === data.test_id ? { ...r, error: data.error } : r
+            ));
+          }
           addLog({
             type: 'step_completed',
             testId: data.test_id,
@@ -732,6 +778,7 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
   const clearLogs = useCallback(() => {
     setLogs([]);
     setScreenshots([]);
+    setLiveExcelRows([]);
     setProgress({
       totalTests: 0,
       totalSteps: 0,
@@ -768,6 +815,7 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
     progress,
     browserState,
     screenshots,
+    liveExcelRows,
     connect,
     disconnect,
     addLog,

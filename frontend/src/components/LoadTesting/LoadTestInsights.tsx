@@ -7,14 +7,18 @@ export const LoadTestInsights: React.FC = () => {
   const {
     activeLoadTestId,
     sequentialTestId,
+    lastCompletedTestId,
     llmProvider,
     setCurrentView,
     addNotification,
     setAiSuggestedConfig
   } = useStore();
 
-  // Determine which test ID to use (sequential takes priority if available)
-  const testId = sequentialTestId || activeLoadTestId;
+  // Determine which test ID to use
+  // Priority: 1) lastCompletedTestId (if a test is completed and new one is running)
+  //           2) sequentialTestId (if sequential test is active)
+  //           3) activeLoadTestId (if single test is active)
+  const testId = lastCompletedTestId || sequentialTestId || activeLoadTestId;
 
   const handleRetestWithSuggestion = (suggestedConfig: any) => {
     console.log('handleRetestWithSuggestion called with:', suggestedConfig);

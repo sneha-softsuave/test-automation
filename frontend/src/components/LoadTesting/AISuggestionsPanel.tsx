@@ -77,17 +77,37 @@ export const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
     apiSuggestions: true
   });
 
+  // Track ongoing request to prevent duplicates
+  const abortControllerRef = React.useRef<AbortController | null>(null);
+
+  // Fetch analysis when testId or llmProvider changes
   useEffect(() => {
-    fetchAnalysis();
+    // Cancel any ongoing request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    // Create new AbortController for this request
+    abortControllerRef.current = new AbortController();
+
+    fetchAnalysis(abortControllerRef.current.signal);
+
+    // Cleanup: abort request if component unmounts or deps change
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
   }, [testId, llmProvider]);
 
-  const fetchAnalysis = async () => {
+  const fetchAnalysis = async (signal?: AbortSignal) => {
     setLoading(true);
     setError(null);
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/api/v1/load-test/analysis/${testId}?llm_provider=${llmProvider}`
+        `${API_BASE_URL}/api/v1/load-test/analysis/${testId}?llm_provider=${llmProvider}`,
+        { signal }
       );
 
       if (!response.ok) {
@@ -98,6 +118,12 @@ export const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
       const data = await response.json();
       setAnalysis(data);
     } catch (err) {
+      // Ignore abort errors (these are intentional cancellations)
+      if (err instanceof Error && err.name === 'AbortError') {
+        console.log('AI analysis request was cancelled');
+        return;
+      }
+
       console.error('Failed to fetch AI analysis:', err);
       setError(err instanceof Error ? err.message : 'Failed to load AI analysis');
     } finally {
@@ -120,7 +146,14 @@ export const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
         <div className={styles.errorIcon}>⚠️</div>
         <h3>Failed to Generate AI Insights</h3>
         <p>{error}</p>
-        <button className={styles.retryButton} onClick={fetchAnalysis}>
+        <button
+          className={styles.retryButton}
+          onClick={() => {
+            const controller = new AbortController();
+            abortControllerRef.current = controller;
+            fetchAnalysis(controller.signal);
+          }}
+        >
           Try Again
         </button>
       </div>

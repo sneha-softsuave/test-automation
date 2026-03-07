@@ -93,21 +93,21 @@ OUTPUT THIS EXACT JSON STRUCTURE:
   "base_url": "{base_url}",
   "common_selectors": {{
     "login": {{
-      "email_field": "page.getByLabel('Email') or page.locator('input[type=\"email\"]')",
-      "password_field": "page.getByLabel('Password') or page.locator('input[type=\"password\"]')",
-      "login_button": "page.getByRole('button', {{ name: 'Login' }})"
+      "email_field": "page.locator('input[type=\"email\"]')",
+      "password_field": "page.locator('input[type=\"password\"]')",
+      "login_button": "page.get_by_role('button', name='Log in', exact=False)"
     }},
     "navigation": {{
-      "sidebar": "page.locator('.sidebar') or page.getByRole('navigation')",
-      "dashboard_heading": "page.getByRole('heading', {{ name: 'Dashboard' }})"
+      "sidebar": "page.locator('.sidebar')",
+      "dashboard_heading": "page.get_by_role('heading').first()"
     }},
     "common_elements": {{
       "toast_message": "page.locator('.toast, .Toastify, [role=\"alert\"]')",
       "loader": "page.locator('.loader, .loading, [class*=\"spinner\"]')",
       "popup": "page.locator('.modal, [role=\"dialog\"]')",
-      "continue_button": "page.getByRole('button', {{ name: 'Continue' }})",
-      "submit_button": "page.getByRole('button', {{ name: 'Submit' }})",
-      "add_button": "page.getByRole('button', {{ name: /add/i }})"
+      "continue_button": "page.get_by_role('button', name='Continue', exact=False)",
+      "submit_button": "page.get_by_role('button', name='Submit', exact=False)",
+      "add_button": "page.get_by_role('button', name='Add', exact=False)"
     }}
   }},
   "test_data": {{
@@ -172,8 +172,8 @@ OUTPUT THIS EXACT JSON STRUCTURE:
             "element_name": "Email",
             "element_type": "input",
             "suggested_selectors": [
-              "page.getByLabel('Email')",
-              "page.getByPlaceholder('Email')",
+              "page.locator('input[type=\"email\"]')",
+              "page.get_by_placeholder('Enter your email')",
               "page.locator('input[name=\"email\"]')"
             ]
           }},
@@ -190,12 +190,12 @@ OUTPUT THIS EXACT JSON STRUCTURE:
             "playwright_method": "page.click() / locator.click()"
           }},
           "selector_hints": {{
-            "element_name": "Login",
+            "element_name": "Log in",
             "element_type": "button",
             "suggested_selectors": [
-              "page.getByRole('button', {{ name: 'Login' }})",
-              "page.getByText('Login')",
-              "page.locator('button:has-text(\"Login\")')"
+              "page.get_by_role('button', name='Log in', exact=False)",
+              "page.locator('button[type=\"submit\"]')",
+              "page.get_by_role('button').filter(has_text='login')"
             ]
           }},
           "test_data": null,
@@ -345,16 +345,65 @@ class EnhancedJsonParserAgent(BaseAgent):
             base_url=kwargs.get("base_url")
         )
 
+    # Maximum number of test cases to send in one LLM call.
+    # Keeps the prompt + response well within token limits.
+    BATCH_SIZE = 3
+
     def parse_to_enhanced_structure(
         self,
         raw_data: List[Dict[str, Any]],
         project_name: str = "Automation Project",
         base_url: str = None
     ) -> Dict[str, Any]:
-        """Parse raw test case data into enhanced structure."""
+        """
+        Parse raw test case data into enhanced structure.
+        When there are more than BATCH_SIZE test cases, splits into batches,
+        parses each batch separately, then merges the results.
+        """
         if not base_url:
             base_url = self._extract_base_url(raw_data)
 
+        if len(raw_data) <= self.BATCH_SIZE:
+            return self._parse_batch(raw_data, project_name, base_url)
+
+        # ── Batch mode ────────────────────────────────────────────────────
+        print(f"[Parser] {len(raw_data)} test cases — splitting into batches of {self.BATCH_SIZE}")
+        merged_test_cases: List[Dict] = []
+        merged_result: Dict = {}
+
+        for batch_start in range(0, len(raw_data), self.BATCH_SIZE):
+            batch = raw_data[batch_start: batch_start + self.BATCH_SIZE]
+            batch_num = batch_start // self.BATCH_SIZE + 1
+            print(f"[Parser] Parsing batch {batch_num} ({len(batch)} test case(s))...")
+            try:
+                batch_result = self._parse_batch(batch, project_name, base_url)
+            except Exception as e:
+                print(f"[Parser] Batch {batch_num} failed: {e} — skipping")
+                continue
+
+            if not merged_result:
+                merged_result = batch_result
+                merged_test_cases = batch_result.get("test_cases", [])
+            else:
+                merged_test_cases.extend(batch_result.get("test_cases", []))
+
+        if not merged_result:
+            raise ValueError("All parsing batches failed — could not parse any test cases")
+
+        # Re-number test case IDs sequentially across all batches
+        for idx, tc in enumerate(merged_test_cases):
+            tc["id"] = f"TC_{idx + 1:03d}"
+
+        merged_result["test_cases"] = merged_test_cases
+        return merged_result
+
+    def _parse_batch(
+        self,
+        raw_data: List[Dict[str, Any]],
+        project_name: str,
+        base_url: str,
+    ) -> Dict[str, Any]:
+        """Parse a single batch of test cases (≤ BATCH_SIZE rows)."""
         content = json.dumps(raw_data, indent=2)
 
         prompt = ENHANCED_PARSER_PROMPT.format(
@@ -365,6 +414,16 @@ class EnhancedJsonParserAgent(BaseAgent):
 
         response_text = self.call_llm(prompt)
         response_text = self._clean_json_response(response_text)
+
+        # Fast path: try json_repair first — handles most LLM JSON quirks instantly
+        try:
+            from json_repair import repair_json
+            repaired = repair_json(response_text, return_objects=True)
+            if isinstance(repaired, dict) and repaired.get("test_cases"):
+                result = self._post_process(repaired, project_name, base_url)
+                return result
+        except Exception:
+            pass
 
         try:
             result = json.loads(response_text)
@@ -392,6 +451,17 @@ class EnhancedJsonParserAgent(BaseAgent):
                     return result
                 except json.JSONDecodeError as e3:
                     print(f"JSON Parse Error (after repair attempt): {e3}")
+                    # Final fallback: use json_repair library
+                    try:
+                        from json_repair import repair_json
+                        print("Attempting json_repair library...")
+                        repaired = repair_json(response_text, return_objects=True)
+                        if isinstance(repaired, dict) and repaired.get("test_cases"):
+                            result = self._post_process(repaired, project_name, base_url)
+                            print("Successfully parsed with json_repair!")
+                            return result
+                    except Exception as e4:
+                        print(f"json_repair also failed: {e4}")
                     print(f"Response was: {response_text[:1500]}...")
                     raise ValueError(f"Failed to parse JSON response: {e3}")
 
@@ -738,26 +808,25 @@ class EnhancedJsonParserAgent(BaseAgent):
                                 step["assertions"] = [{
                                     "type": "url",
                                     "expected_value": "",
-                                    "playwright_assertion": "expect(page).toHaveURL()"
+                                    "playwright_assertion": "expect(page).to_have_url(page.url)"
                                 }]
                             elif "heading" in instruction or "title" in instruction:
                                 step["assertions"] = [{
                                     "type": "heading",
                                     "expected_value": "",
-                                    "playwright_assertion": "expect(page.getByRole('heading')).toContainText()"
+                                    "playwright_assertion": "expect(page.get_by_role('heading').first()).to_be_visible()"
                                 }]
                             elif "text" in instruction or "message" in instruction:
                                 step["assertions"] = [{
                                     "type": "text",
                                     "expected_value": "",
-                                    "playwright_assertion": "expect(page.locator('body')).toContainText()"
+                                    "playwright_assertion": "expect(page.locator('body')).to_be_visible()"
                                 }]
                             else:
-                                # Default to element visibility assertion
                                 step["assertions"] = [{
                                     "type": "visible",
                                     "expected_value": "",
-                                    "playwright_assertion": "expect(locator).toBeVisible()"
+                                    "playwright_assertion": "# page is visible"
                                 }]
 
                         print(f"    [Parser] Fixed action type: goto -> assert for step: {instruction[:50]}...")

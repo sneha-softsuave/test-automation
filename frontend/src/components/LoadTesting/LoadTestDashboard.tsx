@@ -5,13 +5,15 @@ import { useLoadTestSSE } from '../../hooks/useLoadTestSSE';
 import { LiveCharts } from './LiveCharts';
 import type { MetricsHistoryPoint } from './LiveCharts';
 import styles from './LoadTestDashboard.module.css';
-import { Upload, Play, Square, Zap, Users, TrendingUp, Clock, AlertCircle, BarChart3, Grid3x3, Wrench, CheckCircle, Loader, ChevronDown, ChevronRight, RefreshCw, Brain } from 'lucide-react';
+import { Upload, Play, Square, Zap, Users, TrendingUp, Clock, AlertCircle, BarChart3, Grid3x3, Wrench, CheckCircle, Loader, ChevronDown, ChevronRight, RefreshCw, Brain, Activity, Gauge, Server, Network, FileUp, MousePointerClick, Settings, Rocket } from 'lucide-react';
 
 // Use relative URL to leverage Vite proxy
 const API_BASE_URL = '';
 
 export const LoadTestDashboard: React.FC = () => {
   const {
+    uploadId,
+    setUploadId,
     uploadedApis,
     setUploadedApis,
     selectedLoadTestApi,
@@ -22,6 +24,8 @@ export const LoadTestDashboard: React.FC = () => {
     setIsLoadTesting,
     activeLoadTestId,
     setActiveLoadTestId,
+    lastCompletedTestId,
+    setLastCompletedTestId,
     addNotification,
     autoExecuteMode,
     setAutoExecuteMode,
@@ -37,15 +41,10 @@ export const LoadTestDashboard: React.FC = () => {
     setLlmProvider,
     aiSuggestedConfig,
     setAiSuggestedConfig,
+    addTerminalLog,
   } = useStore();
-
-  const [uploadId, setUploadId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
-  const [loadConfig, setLoadConfig] = useState<LoadTestConfig>({
-    users: 10,
-    spawn_rate: 2,
-    run_time: '5m',
-  });
+  const [loadConfig, setLoadConfig] = useState<LoadTestConfig>({ users: 10, spawn_rate: 2, run_time: '5m' });
   const [viewMode, setViewMode] = useState<'cards' | 'charts'>('cards');
   const [metricsHistory, setMetricsHistory] = useState<MetricsHistoryPoint[]>([]);
   const [expandedApi, setExpandedApi] = useState<string | null>(null);
@@ -67,8 +66,15 @@ export const LoadTestDashboard: React.FC = () => {
   const [showBatchSuggestionsInput, setShowBatchSuggestionsInput] = useState(false);
   const [customBatchSuggestions, setCustomBatchSuggestions] = useState('');
 
-  // Track if AI config has been applied to prevent re-applying
-  const aiConfigAppliedRef = React.useRef(false);
+  // Test Data Expansion states
+  const [showTestDataSingle, setShowTestDataSingle] = useState(false); // For single API mode
+  const [expandedTestDataBatch, setExpandedTestDataBatch] = useState<Record<string, boolean>>({}); // For batch mode (per API)
+
+  // Batch edit state — per-API overrides for sequential mode
+  // Key: api.name, Value: partial edits merged on top of the Excel config
+  const [batchExpandedEdit, setBatchExpandedEdit] = useState<Record<string, boolean>>({}); // collapsed by default
+  type BatchEditFields = { users: string; spawn_rate: string; run_time: string; payload: string; headers: string };
+  const [batchEditValues, setBatchEditValues] = useState<Record<string, BatchEditFields>>({}); // per-API edited values
 
   // Create or retrieve persistent session ID
   React.useEffect(() => {
@@ -80,90 +86,6 @@ export const LoadTestDashboard: React.FC = () => {
       console.log('Using existing session ID:', loadTestSessionId);
     }
   }, []);
-
-  // Apply AI suggested config when available
-  React.useEffect(() => {
-    console.log('=== AI Config Application useEffect ===');
-    console.log('aiSuggestedConfig:', aiSuggestedConfig);
-    console.log('selectedLoadTestApi:', selectedLoadTestApi);
-    console.log('aiConfigAppliedRef.current:', aiConfigAppliedRef.current);
-    console.log('loadConfig before:', loadConfig);
-
-    if (aiSuggestedConfig && !aiConfigAppliedRef.current) {
-      console.log('✅ Applying AI suggested config:', aiSuggestedConfig);
-
-      // Mark as applied to prevent re-applying
-      aiConfigAppliedRef.current = true;
-
-      // Update load config (users, spawn_rate, run_time)
-      const newLoadConfig = {
-        users: aiSuggestedConfig.users ?? 10,
-        spawn_rate: aiSuggestedConfig.spawn_rate ?? 2,
-        run_time: aiSuggestedConfig.run_time ?? '5m',
-      };
-      console.log('📝 Setting new load config:', newLoadConfig);
-      console.log('   - Users:', aiSuggestedConfig.users, '→', newLoadConfig.users);
-      console.log('   - Spawn Rate:', aiSuggestedConfig.spawn_rate, '→', newLoadConfig.spawn_rate);
-      console.log('   - Run Time:', aiSuggestedConfig.run_time, '→', newLoadConfig.run_time);
-      setLoadConfig(newLoadConfig);
-
-      // Update think_time in selectedLoadTestApi if provided
-      if (selectedLoadTestApi && (aiSuggestedConfig.think_time_min !== undefined || aiSuggestedConfig.think_time_max !== undefined)) {
-        console.log('📝 Updating think_time values in selectedLoadTestApi');
-        console.log('   - Think Time Min:', aiSuggestedConfig.think_time_min);
-        console.log('   - Think Time Max:', aiSuggestedConfig.think_time_max);
-        const updatedApi = {
-          ...selectedLoadTestApi,
-          think_time_min: aiSuggestedConfig.think_time_min ?? selectedLoadTestApi.think_time_min,
-          think_time_max: aiSuggestedConfig.think_time_max ?? selectedLoadTestApi.think_time_max,
-        };
-        setSelectedLoadTestApi(updatedApi);
-
-        // Also update in uploadedApis array
-        if (uploadedApis) {
-          setUploadedApis(
-            uploadedApis.map((api) =>
-              api.name === selectedLoadTestApi.name ? updatedApi : api
-            )
-          );
-        }
-      } else {
-        console.log('⚠️ No selectedLoadTestApi or no think_time values to update');
-        console.log('   - selectedLoadTestApi exists:', !!selectedLoadTestApi);
-        console.log('   - think_time_min:', aiSuggestedConfig.think_time_min);
-        console.log('   - think_time_max:', aiSuggestedConfig.think_time_max);
-      }
-
-      // Show success notification
-      addNotification('success', `✨ AI-suggested values applied: ${newLoadConfig.users} users, ${newLoadConfig.spawn_rate}/s spawn rate`);
-
-      // Scroll to the configuration section
-      setTimeout(() => {
-        const configSection = document.getElementById('load-test-config');
-        if (configSection) {
-          console.log('📜 Scrolling to config section');
-          configSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        } else {
-          console.log('⚠️ Config section not found in DOM');
-        }
-      }, 300);
-
-      // Clear the suggested config and reset the ref after a delay
-      setTimeout(() => {
-        console.log('🧹 Clearing aiSuggestedConfig');
-        setAiSuggestedConfig(null);
-        aiConfigAppliedRef.current = false;
-      }, 1000);
-    } else {
-      if (!aiSuggestedConfig) {
-        console.log('⏭️ No aiSuggestedConfig - skipping');
-      }
-      if (aiConfigAppliedRef.current) {
-        console.log('⏭️ Already applied - skipping');
-      }
-    }
-    console.log('=== End AI Config Application ===');
-  }, [aiSuggestedConfig, selectedLoadTestApi, uploadedApis]);
 
   // SSE connection for real-time metrics - uses persistent session ID
   const { messages } = useLoadTestSSE(loadTestSessionId || '', !!loadTestSessionId);
@@ -199,6 +121,10 @@ export const LoadTestDashboard: React.FC = () => {
       case 'load_test_completed':
         setLoadTestMetrics(latestMessage.data);
         setIsLoadTesting(false);
+        // Set the last completed test ID for reports/insights
+        if (activeLoadTestId) {
+          setLastCompletedTestId(activeLoadTestId);
+        }
         addNotification('success', 'Load test completed');
         break;
       case 'load_test_stopped':
@@ -209,17 +135,25 @@ export const LoadTestDashboard: React.FC = () => {
         setIsLoadTesting(false);
         addNotification('error', latestMessage.data.error || 'Load test error');
         break;
+      case 'terminal_log':
+        // Capture terminal logs as soon as they arrive
+        if (latestMessage.data?.log) {
+          addTerminalLog({
+            timestamp: latestMessage.data.timestamp || new Date().toISOString(),
+            log: latestMessage.data.log
+          });
+        }
+        break;
       // Sequential test events
       case 'sequential_test_started':
         setSequentialTestStatus(latestMessage.data);
         addNotification('success', 'Sequential test started');
         break;
       case 'sequential_api_started':
-        if (latestMessage.data) {
-          // Update sequential status with current API info
-          setSequentialTestStatus(latestMessage.data);
-          addNotification('info', `Starting: ${latestMessage.data.current_api || 'API'}`);
-        }
+        // sequential_status_update fires right before this with the correct full payload.
+        // Don't overwrite it — this event uses different field names (api_index/api_name)
+        // that don't match SequentialTestStatus shape.
+        addNotification('info', `Starting: ${latestMessage.data?.api_name || latestMessage.data?.current_api || 'API'}`);
         break;
       case 'sequential_api_metrics':
         setLoadTestMetrics(latestMessage.data);
@@ -246,6 +180,10 @@ export const LoadTestDashboard: React.FC = () => {
       case 'sequential_test_completed':
         setSequentialTestStatus(latestMessage.data);
         setIsLoadTesting(false);
+        // Set the last completed test ID for reports/insights
+        if (sequentialTestId) {
+          setLastCompletedTestId(sequentialTestId);
+        }
         setSequentialTestId(null); // Clear ID on completion
         addNotification('success', 'Sequential test completed');
         break;
@@ -273,10 +211,42 @@ export const LoadTestDashboard: React.FC = () => {
     }
   }, [messages]);
 
-  // Pre-fill form with Excel values when API is selected (manual mode)
+  // Track if AI config was applied so pre-fill effect skips its first run
+  const aiAppliedAtMount = React.useRef(false);
+
+  // useLayoutEffect runs synchronously before paint and before useEffect.
+  // Apply AI suggested config here so it wins over the pre-fill useEffect.
+  React.useLayoutEffect(() => {
+    if (!aiSuggestedConfig) return;
+    aiAppliedAtMount.current = true;
+    setLoadConfig({
+      users: aiSuggestedConfig.users ?? 10,
+      spawn_rate: aiSuggestedConfig.spawn_rate ?? 2,
+      run_time: aiSuggestedConfig.run_time ?? '5m',
+    });
+    setAiSuggestedConfig(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // After AI config is applied, show notification
   React.useEffect(() => {
+    if (aiAppliedAtMount.current) {
+      addNotification('success', `✨ AI-suggested values applied`);
+      setTimeout(() => {
+        document.getElementById('load-test-config')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 300);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Pre-fill form with Excel values when API is selected (manual mode).
+  // Skipped on the first run if AI config was applied at mount.
+  React.useEffect(() => {
+    if (aiAppliedAtMount.current) {
+      aiAppliedAtMount.current = false;
+      return;
+    }
     if (!autoExecuteMode && selectedLoadTestApi) {
-      // Pre-fill with Excel values if they exist, otherwise use defaults
       setLoadConfig({
         users: selectedLoadTestApi.users || 10,
         spawn_rate: selectedLoadTestApi.spawn_rate || 2,
@@ -369,6 +339,7 @@ export const LoadTestDashboard: React.FC = () => {
           selected_api: selectedLoadTestApi, // Send full API object with user edits
           config: loadConfig,
           session_id: loadTestSessionId,
+          llm_provider: llmProvider, // Send LLM provider for auto AI insights
         }),
       });
 
@@ -426,6 +397,31 @@ export const LoadTestDashboard: React.FC = () => {
       return;
     }
 
+    // Build edited API configs to send to backend
+    const selectedApisConfig = uploadedApis
+      ?.filter(api => selectedApis.includes(api.name))
+      .map(api => {
+        const edits = batchEditValues[api.name];
+        if (!edits) return api;
+        // Parse edited JSON fields safely
+        let parsedPayload = api.payload;
+        if (edits.payload.trim()) {
+          try { parsedPayload = JSON.parse(edits.payload); } catch { /* keep original */ }
+        }
+        let parsedHeaders = api.headers;
+        if (edits.headers.trim()) {
+          try { parsedHeaders = JSON.parse(edits.headers); } catch { /* keep original */ }
+        }
+        return {
+          ...api,
+          users: Number(edits.users) || api.users || 10,
+          spawn_rate: Number(edits.spawn_rate) || api.spawn_rate || 2,
+          run_time: edits.run_time || api.run_time || '5m',
+          payload: parsedPayload,
+          headers: parsedHeaders,
+        };
+      }) ?? [];
+
     try {
       const response = await fetch(`${API_BASE_URL}/api/v1/load-test/start-sequential`, {
         method: 'POST',
@@ -433,7 +429,9 @@ export const LoadTestDashboard: React.FC = () => {
         body: JSON.stringify({
           upload_id: uploadId,
           selected_api_names: selectedApis,
+          selected_apis_config: selectedApisConfig,
           session_id: loadTestSessionId,
+          llm_provider: llmProvider,
         }),
       });
 
@@ -544,13 +542,36 @@ export const LoadTestDashboard: React.FC = () => {
     addNotification('success', 'Load test page refreshed');
   };
 
+  // Seed batch edit values for an API from its Excel config (called when API is checked)
+  const seedBatchEditValues = (api: typeof uploadedApis extends (infer T)[] | null ? T : never) => {
+    if (!api) return;
+    setBatchEditValues(prev => ({
+      ...prev,
+      [api.name]: {
+        users: String(api.users ?? 10),
+        spawn_rate: String(api.spawn_rate ?? 2),
+        run_time: api.run_time ?? '5m',
+        payload: api.payload ? JSON.stringify(api.payload, null, 2) : '',
+        headers: api.headers && Object.keys(api.headers).length > 0
+          ? JSON.stringify(api.headers, null, 2)
+          : '',
+      },
+    }));
+  };
+
   const handleApiSelect = (apiName: string) => {
     if (autoExecuteMode) {
       // Checkbox behavior for auto mode
       if (selectedApis.includes(apiName)) {
         setSelectedApis(selectedApis.filter((name) => name !== apiName));
+        // Clean up edit state for deselected API
+        setBatchEditValues(prev => { const n = { ...prev }; delete n[apiName]; return n; });
+        setBatchExpandedEdit(prev => { const n = { ...prev }; delete n[apiName]; return n; });
       } else {
         setSelectedApis([...selectedApis, apiName]);
+        // Seed edit values from Excel config
+        const api = uploadedApis?.find(a => a.name === apiName);
+        if (api) seedBatchEditValues(api);
       }
     } else {
       // Radio behavior for manual mode
@@ -819,6 +840,19 @@ export const LoadTestDashboard: React.FC = () => {
   const testsRun = 0; // TODO: Track from history
   const totalRequests = loadTestMetrics?.total_requests || 0;
 
+  // Determine current step for breadcrumb highlighting
+  const getCurrentStep = () => {
+    if (isLoadTesting) return 4; // Run Load Test
+    if (selectedLoadTestApi || selectedApis.length > 0) return 3; // Configure
+    if (uploadedApis && uploadedApis.length > 0) return 2; // Select API
+    return 1; // Upload Excel
+  };
+
+  const currentStep = getCurrentStep();
+
+  // Check if test has completed (has metrics but not currently running)
+  const testCompleted = !isLoadTesting && (loadTestMetrics !== null || lastCompletedTestId !== null);
+
   return (
     <div className={styles.dashboard}>
       {/* Header */}
@@ -827,7 +861,28 @@ export const LoadTestDashboard: React.FC = () => {
           <Zap size={32} className={styles.icon} />
           <div>
             <h1>Load Test Dashboard</h1>
-            <p>Upload Excel → Select API → Configure → Run Load Test</p>
+            {/* Dynamic Breadcrumb */}
+            <div className={styles.breadcrumb}>
+              <div className={`${styles.breadcrumbStep} ${!testCompleted && currentStep === 1 ? styles.active : ''} ${currentStep > 1 || testCompleted ? styles.completed : ''}`}>
+                <FileUp size={14} />
+                <span>Upload Excel</span>
+              </div>
+              <span className={`${styles.breadcrumbArrow} ${testCompleted ? styles.completed : ''}`}>→</span>
+              <div className={`${styles.breadcrumbStep} ${!testCompleted && currentStep === 2 ? styles.active : ''} ${currentStep > 2 || testCompleted ? styles.completed : ''}`}>
+                <MousePointerClick size={14} />
+                <span>Select API</span>
+              </div>
+              <span className={`${styles.breadcrumbArrow} ${testCompleted ? styles.completed : ''}`}>→</span>
+              <div className={`${styles.breadcrumbStep} ${!testCompleted && currentStep === 3 ? styles.active : ''} ${currentStep > 3 || testCompleted ? styles.completed : ''}`}>
+                <Settings size={14} />
+                <span>Configure</span>
+              </div>
+              <span className={`${styles.breadcrumbArrow} ${testCompleted ? styles.completed : ''}`}>→</span>
+              <div className={`${styles.breadcrumbStep} ${!testCompleted && currentStep === 4 ? styles.active : ''} ${testCompleted ? styles.completed : ''}`}>
+                <Rocket size={14} />
+                <span>Run Load Test</span>
+              </div>
+            </div>
           </div>
         </div>
         <div className={styles.headerActions}>
@@ -864,10 +919,23 @@ export const LoadTestDashboard: React.FC = () => {
           {/* Scrollable API List Card (Top) */}
           <section className={styles.apiListCard}>
             {!uploadedApis || uploadedApis.length === 0 ? (
-              // Empty state
+              // Empty state with load test animation
               <div className={styles.emptyState}>
-                <p>No APIs loaded yet</p>
-                <p>Upload an Excel file to see your APIs</p>
+                <div className={styles.loadTestVisual}>
+                  <div className={styles.loadTestOrbit}>
+                    <div className={styles.orbitRing} />
+                    <div className={styles.orbitRing} style={{ animationDelay: '-2s' }} />
+                    <div className={styles.orbitCenter}>
+                      <Zap size={32} />
+                    </div>
+                    <div className={styles.orbitDot} style={{ animationDelay: '0s' }}><Activity size={14} /></div>
+                    <div className={styles.orbitDot} style={{ animationDelay: '-2s' }}><Gauge size={14} /></div>
+                    <div className={styles.orbitDot} style={{ animationDelay: '-4s' }}><Server size={14} /></div>
+                    <div className={styles.orbitDot} style={{ animationDelay: '-6s' }}><Network size={14} /></div>
+                  </div>
+                </div>
+                <p className={styles.emptyTitle}>No APIs loaded yet</p>
+                <p className={styles.emptySubtitle}>Upload an Excel file to see your APIs</p>
               </div>
             ) : (
               // API list (existing logic)
@@ -1442,6 +1510,46 @@ export const LoadTestDashboard: React.FC = () => {
                     </button>
                   </div>
 
+                  {/* Add Custom Suggestions after analysis */}
+                  <div className={styles.postAnalysisSuggestions}>
+                    <button
+                      className={styles.suggestionsButton}
+                      onClick={() => setShowBatchSuggestionsInput(!showBatchSuggestionsInput)}
+                    >
+                      💡 {showBatchSuggestionsInput ? 'Hide Suggestions' : 'Add Custom Suggestions'}
+                    </button>
+
+                    {showBatchSuggestionsInput && (
+                      <div className={styles.suggestionsContainer}>
+                        <textarea
+                          className={styles.suggestionsTextarea}
+                          rows={5}
+                          placeholder="Enter new suggestions for re-analysis (e.g., 'Generate test data with email addresses only from @gmail.com domain', 'Use maximum 500 users for all APIs', 'Set spawn rate to 50/s')"
+                          value={customBatchSuggestions}
+                          onChange={(e) => setCustomBatchSuggestions(e.target.value)}
+                        />
+                        <div className={styles.suggestionsWarning}>
+                          ⚠️ Do not include sensitive data like passwords or API keys
+                        </div>
+                        {customBatchSuggestions.trim() && (
+                          <div className={styles.suggestionsButtonGroup}>
+                            <button
+                              className={styles.clearSuggestionsButton}
+                              onClick={() => setCustomBatchSuggestions('')}
+                            >
+                              Clear Suggestions
+                            </button>
+                          </div>
+                        )}
+                        {customBatchSuggestions.trim() && (
+                          <div className={styles.suggestionsHint}>
+                            💡 Click "Analyze Again" to re-run analysis with these suggestions
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
                   {/* Common Toggle for AI Test Data */}
                   <div className={styles.batchTestDataToggle}>
                     <span className={styles.toggleLabel}>
@@ -1545,12 +1653,49 @@ export const LoadTestDashboard: React.FC = () => {
                                 {/* Test Data Section */}
                                 {result.recommendations.test_data && result.recommendations.test_data.length > 0 && (
                                   <div className={styles.testDataSection}>
-                                    <div className={styles.testDataInfo}>
-                                      <span className={styles.label}>Generated Test Data:</span>
-                                      <span className={styles.value}>
-                                        {result.recommendations.test_data.length} entries
-                                      </span>
+                                    <div
+                                      className={styles.testDataInfo}
+                                      onClick={() => {
+                                        setExpandedTestDataBatch(prev => ({
+                                          ...prev,
+                                          [result.api_name]: !prev[result.api_name]
+                                        }));
+                                      }}
+                                      style={{ cursor: 'pointer' }}
+                                    >
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <span className={styles.expandArrow}>
+                                          {expandedTestDataBatch[result.api_name] ? '▼' : '▶'}
+                                        </span>
+                                        <span className={styles.label}>Generated Test Data:</span>
+                                        <span className={styles.value}>
+                                          {result.recommendations.test_data.length} entries
+                                        </span>
+                                      </div>
                                     </div>
+
+                                    {expandedTestDataBatch[result.api_name] && (
+                                      <div className={styles.testDataPreview}>
+                                        <div className={styles.textareaWrapper}>
+                                          <textarea
+                                            className={styles.testDataTextarea}
+                                            value={JSON.stringify(result.recommendations.test_data, null, 2)}
+                                            readOnly
+                                            rows={10}
+                                          />
+                                          <button
+                                            className={styles.copyIcon}
+                                            onClick={() => {
+                                              navigator.clipboard.writeText(JSON.stringify(result.recommendations.test_data, null, 2));
+                                              addNotification('success', `Test data for ${result.api_name} copied to clipboard`);
+                                            }}
+                                            title="Copy to clipboard"
+                                          >
+                                            📋
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
 
                                     {/* Individual API Toggle */}
                                     <div className={styles.testDataToggle}>
@@ -1608,45 +1753,123 @@ export const LoadTestDashboard: React.FC = () => {
             <div className={styles.autoPreviewSection}>
               <h2>Ready to Start Sequential Test</h2>
               <p className={styles.configSubtitle}>
-                {selectedApis.length} API{selectedApis.length > 1 ? 's' : ''} will be tested sequentially using configuration from Excel
+                {selectedApis.length} API{selectedApis.length > 1 ? 's' : ''} will be tested sequentially — click any row to edit its config
               </p>
 
               <div className={styles.selectedApisList}>
                 {uploadedApis?.filter(api => selectedApis.includes(api.name)).map((api, index) => {
-                  // Check if this API is currently executing in sequential mode
                   const isExecuting = sequentialTestStatus?.status === 'running' && (
                     sequentialTestStatus.current_api === api.name ||
-                    // If current_api is not set yet, check if this is the first API (index 0)
                     (!sequentialTestStatus.current_api && index === 0)
                   );
+                  const isExpanded = !!batchExpandedEdit[api.name];
+                  const edits = batchEditValues[api.name] ?? {
+                    users: String(api.users ?? 10),
+                    spawn_rate: String(api.spawn_rate ?? 2),
+                    run_time: api.run_time ?? '5m',
+                    payload: api.payload ? JSON.stringify(api.payload, null, 2) : '',
+                    headers: api.headers && Object.keys(api.headers).length > 0
+                      ? JSON.stringify(api.headers, null, 2) : '',
+                  };
+                  const setField = (field: keyof typeof edits, value: string) =>
+                    setBatchEditValues(prev => ({
+                      ...prev,
+                      [api.name]: { ...edits, [field]: value },
+                    }));
 
                   return (
-                  <div
-                    key={api.name}
-                    className={`${styles.selectedApiItem} ${isExecuting ? styles.executingApi : ''}`}
-                  >
-                    <div className={styles.apiNumber}>{index + 1}</div>
-                    <div className={styles.apiItemContent}>
-                      <div className={`${styles.methodBadge} ${styles[api.method.toLowerCase()]}`}>
-                        {api.method}
-                      </div>
-                      <div className={styles.apiItemInfo}>
-                        <div className={styles.apiItemName}>{api.name}</div>
-                        <div className={styles.apiItemEndpoint}>{api.endpoint}</div>
-                      </div>
-                      <div className={styles.apiItemConfig}>
-                        <span className={styles.configItem}>
-                          <Users size={14} /> {api.users || 10}
+                    <div key={api.name} className={`${styles.batchEditCard} ${isExecuting ? styles.executingApi : ''}`}>
+                      {/* Collapsed header — always visible */}
+                      <button
+                        className={styles.batchEditCardHeader}
+                        onClick={() => setBatchExpandedEdit(prev => ({ ...prev, [api.name]: !prev[api.name] }))}
+                      >
+                        <div className={styles.apiNumber}>{index + 1}</div>
+                        <div className={`${styles.methodBadge} ${styles[api.method.toLowerCase()]}`}>
+                          {api.method}
+                        </div>
+                        <div className={styles.apiItemInfo}>
+                          <div className={styles.apiItemName}>{api.name}</div>
+                          <div className={styles.apiItemEndpoint}>{api.endpoint}</div>
+                        </div>
+                        <div className={styles.apiItemConfig}>
+                          <span className={styles.configItem}><Users size={13} /> {edits.users}</span>
+                          <span className={styles.configItem}><TrendingUp size={13} /> {edits.spawn_rate}/s</span>
+                          <span className={styles.configItem}><Clock size={13} /> {edits.run_time}</span>
+                        </div>
+                        <span className={styles.batchEditChevron}>
+                          {isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                         </span>
-                        <span className={styles.configItem}>
-                          <TrendingUp size={14} /> {api.spawn_rate || 2}/s
-                        </span>
-                        <span className={styles.configItem}>
-                          <Clock size={14} /> {api.run_time || '5m'}
-                        </span>
-                      </div>
+                      </button>
+
+                      {/* Expanded editor */}
+                      {isExpanded && (
+                        <div className={styles.batchEditBody}>
+                          <div className={styles.batchEditRow}>
+                            <label className={styles.batchEditLabel}>
+                              <Users size={13} /> Number of Users
+                            </label>
+                            <input
+                              type="number"
+                              className={styles.batchEditInput}
+                              value={edits.users}
+                              min={1}
+                              onChange={e => setField('users', e.target.value)}
+                            />
+                          </div>
+                          <div className={styles.batchEditRow}>
+                            <label className={styles.batchEditLabel}>
+                              <TrendingUp size={13} /> Spawn Rate (users/sec)
+                            </label>
+                            <input
+                              type="number"
+                              className={styles.batchEditInput}
+                              value={edits.spawn_rate}
+                              min={0.1}
+                              step={0.1}
+                              onChange={e => setField('spawn_rate', e.target.value)}
+                            />
+                          </div>
+                          <div className={styles.batchEditRow}>
+                            <label className={styles.batchEditLabel}>
+                              <Clock size={13} /> Run Time (e.g. 5m, 1h, 30s)
+                            </label>
+                            <input
+                              type="text"
+                              className={styles.batchEditInput}
+                              value={edits.run_time}
+                              onChange={e => setField('run_time', e.target.value)}
+                            />
+                          </div>
+                          {(api.method === 'POST' || api.method === 'PUT' || api.method === 'PATCH') && (
+                            <div className={styles.batchEditRow}>
+                              <label className={styles.batchEditLabel}>
+                                Payload (JSON)
+                              </label>
+                              <textarea
+                                className={styles.batchEditTextarea}
+                                rows={5}
+                                value={edits.payload}
+                                placeholder='{"key": "value"}'
+                                onChange={e => setField('payload', e.target.value)}
+                              />
+                            </div>
+                          )}
+                          <div className={styles.batchEditRow}>
+                            <label className={styles.batchEditLabel}>
+                              Headers (JSON)
+                            </label>
+                            <textarea
+                              className={styles.batchEditTextarea}
+                              rows={3}
+                              value={edits.headers}
+                              placeholder='{"Authorization": "Bearer token"}'
+                              onChange={e => setField('headers', e.target.value)}
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
                   );
                 })}
               </div>
@@ -1659,7 +1882,7 @@ export const LoadTestDashboard: React.FC = () => {
                   <strong>Execution:</strong> Sequential (one after another)
                 </div>
                 <div className={styles.summaryItem}>
-                  <strong>Config Source:</strong> Excel (or defaults)
+                  <strong>Config Source:</strong> Excel (editable above)
                 </div>
               </div>
 
@@ -1761,6 +1984,46 @@ export const LoadTestDashboard: React.FC = () => {
                     </button>
                   </div>
 
+                  {/* Add Custom Suggestions after analysis */}
+                  <div className={styles.postAnalysisSuggestions}>
+                    <button
+                      className={styles.suggestionsButton}
+                      onClick={() => setShowSuggestionsInput(!showSuggestionsInput)}
+                    >
+                      💡 {showSuggestionsInput ? 'Hide Suggestions' : 'Add Custom Suggestions'}
+                    </button>
+
+                    {showSuggestionsInput && (
+                      <div className={styles.suggestionsContainer}>
+                        <textarea
+                          className={styles.suggestionsTextarea}
+                          rows={5}
+                          placeholder="Enter new suggestions for re-analysis (e.g., 'Generate test data with email addresses only from @gmail.com domain', 'Use maximum 500 users', 'Set spawn rate to 50/s')"
+                          value={customSuggestions}
+                          onChange={(e) => setCustomSuggestions(e.target.value)}
+                        />
+                        <div className={styles.suggestionsWarning}>
+                          ⚠️ Do not include sensitive data like passwords or API keys
+                        </div>
+                        {customSuggestions.trim() && (
+                          <div className={styles.suggestionsButtonGroup}>
+                            <button
+                              className={styles.clearSuggestionsButton}
+                              onClick={() => setCustomSuggestions('')}
+                            >
+                              Clear Suggestions
+                            </button>
+                          </div>
+                        )}
+                        {customSuggestions.trim() && (
+                          <div className={styles.suggestionsHint}>
+                            💡 Click "Analyze Again" to re-run analysis with these suggestions
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
                   <div className={styles.aiSummary}>
                     <div className={styles.aiSummaryItem}>
                       <strong>API Type:</strong> {aiRecommendations.api_type}
@@ -1795,10 +2058,42 @@ export const LoadTestDashboard: React.FC = () => {
 
                     {aiRecommendations.recommendations.test_data && aiRecommendations.recommendations.test_data.length > 0 && (
                       <div className={styles.testDataSection}>
-                        <div className={styles.testDataInfo}>
-                          <span className={styles.label}>Generated Test Data:</span>
-                          <span className={styles.value}>{aiRecommendations.recommendations.test_data.length} entries</span>
+                        <div
+                          className={styles.testDataInfo}
+                          onClick={() => setShowTestDataSingle(!showTestDataSingle)}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <span className={styles.expandArrow}>
+                              {showTestDataSingle ? '▼' : '▶'}
+                            </span>
+                            <span className={styles.label}>Generated Test Data:</span>
+                            <span className={styles.value}>{aiRecommendations.recommendations.test_data.length} entries</span>
+                          </div>
                         </div>
+
+                        {showTestDataSingle && (
+                          <div className={styles.testDataPreview}>
+                            <div className={styles.textareaWrapper}>
+                              <textarea
+                                className={styles.testDataTextarea}
+                                value={JSON.stringify(aiRecommendations.recommendations.test_data, null, 2)}
+                                readOnly
+                                rows={10}
+                              />
+                              <button
+                                className={styles.copyIcon}
+                                onClick={() => {
+                                  navigator.clipboard.writeText(JSON.stringify(aiRecommendations.recommendations.test_data, null, 2));
+                                  addNotification('success', 'Test data copied to clipboard');
+                                }}
+                                title="Copy to clipboard"
+                              >
+                                📋
+                              </button>
+                            </div>
+                          </div>
+                        )}
 
                         <div className={styles.testDataToggle}>
                           <span className={styles.toggleLabel}>
@@ -2021,7 +2316,12 @@ export const LoadTestDashboard: React.FC = () => {
                     <div
                       className={styles.progressFill}
                       style={{
-                        width: `${(((sequentialTestStatus.current_index || 0) + 1) / (sequentialTestStatus.total_apis || 1)) * 100}%`
+                        width: sequentialTestStatus.status === 'completed'
+                          ? '100%'
+                          : `${Math.min(
+                              (((sequentialTestStatus.current_index || 0) + 1) / (sequentialTestStatus.total_apis || 1)) * 100,
+                              100
+                            )}%`
                       }}
                     />
                   </div>
@@ -2029,13 +2329,18 @@ export const LoadTestDashboard: React.FC = () => {
                   <div className={styles.progressStats}>
                     <div>
                       <strong>Status:</strong> {
-                        sequentialTestStatus.current_api ||
-                        (sequentialTestStatus.apis && sequentialTestStatus.apis[0]) ||
+                        sequentialTestStatus.status === 'completed' ? 'Completed' :
+                        sequentialTestStatus.status === 'stopped' ? 'Stopped' :
+                        sequentialTestStatus.current_api ? `Running: ${sequentialTestStatus.current_api}` :
                         'Starting...'
                       }
                     </div>
                     <div>
-                      <strong>Progress:</strong> {(sequentialTestStatus.current_index || 0) + 1} of {sequentialTestStatus.total_apis || 0}
+                      <strong>Progress:</strong> {
+                        sequentialTestStatus.status === 'completed'
+                          ? `${sequentialTestStatus.total_apis || 0} of ${sequentialTestStatus.total_apis || 0}`
+                          : `${(sequentialTestStatus.current_index || 0) + 1} of ${sequentialTestStatus.total_apis || 0}`
+                      }
                     </div>
                   </div>
                 </div>

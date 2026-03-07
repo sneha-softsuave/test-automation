@@ -87,7 +87,9 @@ export interface ExecutionResult {
   executed_at: string;
 }
 
-type View = 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest' | 'loadtest-logs' | 'loadtest-reports' | 'loadtest-insights';
+type View = 'generate' | 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest' | 'loadtest-logs' | 'loadtest-reports' | 'loadtest-insights' | 'settings' | 'projects' | 'project-workspace';
+
+export interface ProjectSummary { name: string; test_count: number; }
 
 // Execution mode: Multi-Agent (Supervisor + Sub-agents)
 export type ExecutionMode = 'multi-agent';
@@ -249,6 +251,8 @@ interface AppState {
   removeNotification: (id: string) => void;
 
   // Load Test State
+  uploadId: string | null;
+  setUploadId: (id: string | null) => void;
   uploadedApis: LoadTestAPIConfig[] | null;
   setUploadedApis: (apis: LoadTestAPIConfig[] | null) => void;
   selectedLoadTestApi: LoadTestAPIConfig | null;
@@ -259,6 +263,10 @@ interface AppState {
   setIsLoadTesting: (testing: boolean) => void;
   activeLoadTestId: string | null;
   setActiveLoadTestId: (id: string | null) => void;
+
+  // Last completed test (for reports/insights display)
+  lastCompletedTestId: string | null;
+  setLastCompletedTestId: (id: string | null) => void;
 
   // Auto-Execute Mode
   autoExecuteMode: boolean;
@@ -297,9 +305,208 @@ interface AppState {
     think_time_max?: number;
   } | null) => void;
 
+  // Settings State
+  healthCheckEnabled: boolean;
+  setHealthCheckEnabled: (enabled: boolean) => void;
+  healthCheckInterval: number;  // in minutes (default: 120 = 2 hours)
+  setHealthCheckInterval: (interval: number) => void;
+  lastHealthCheck: Date | null;
+  setLastHealthCheck: (date: Date | null) => void;
+
+  // Application Settings
+  useDefaultLandingPage: boolean;
+  setUseDefaultLandingPage: (enabled: boolean) => void;
+  defaultLandingPage: 'upload' | 'loadtest';  // 'upload' = Functional Test
+  setDefaultLandingPage: (page: 'upload' | 'loadtest') => void;
+
+  // Browser Behaviour Settings
+  keepBrowserOpenAgent: boolean;  // Functional Test Agent: default false (close between test cases)
+  setKeepBrowserOpenAgent: (enabled: boolean) => void;
+
+  // Image Analysis (Vision) Settings
+  imageAnalysisEnabled: boolean;
+  setImageAnalysisEnabled: (enabled: boolean) => void;
+
+  // Projects
+  selectedProjectName: string | null;
+  setSelectedProjectName: (name: string | null) => void;
+
+  // Per-project workspace
+  activeProjectSection: 'generate' | 'history' | 'suite' | 'execute';
+  setActiveProjectSection: (s: 'generate' | 'history' | 'suite' | 'execute') => void;
+  projectActiveSuites: Record<string, TestSuite>;
+  setProjectActiveSuite: (projectName: string, suite: TestSuite) => void;
+  clearProjectActiveSuite: (projectName: string) => void;
+  projectExecutionResults: Record<string, ExecutionResult>;
+  setProjectExecutionResult: (projectName: string, result: ExecutionResult) => void;
+
   // Reset
   reset: () => Promise<void>;
 }
+
+// ─── Agent Chat Session State ───────────────────────────────────────────────
+// Persists to sessionStorage: survives navigation but clears on browser refresh.
+
+export interface AgentMessage {
+  id: string;
+  type: 'user' | 'agent' | 'system';
+  content: string;
+  timestamp: string; // ISO string (Date not JSON-serializable directly)
+  status?: 'thinking' | 'complete' | 'error';
+  testCases?: unknown[];
+}
+
+export interface AgentExecutionLog {
+  id: string;
+  timestamp: string; // ISO string
+  type: string;
+  testId?: string;
+  step?: number;
+  status?: string;
+  message: string;
+  level?: string;
+  agent?: string;
+  subAgent?: string;
+  phase?: string;
+  method?: string;
+  url?: string;
+  payload?: Record<string, unknown>;
+  response?: Record<string, unknown>;
+  attempt?: number;
+  maxRetries?: number;
+}
+
+export interface AgentProgressState {
+  totalTests: number;
+  totalSteps: number;
+  completedTests: number;
+  completedSteps: number;
+  passedTests: number;
+  failedTests: number;
+}
+
+export interface AgentChatSessionState {
+  // Chat messages
+  agentMessages: AgentMessage[];
+  setAgentMessages: (msgs: AgentMessage[]) => void;
+  addAgentMessage: (msg: AgentMessage) => void;
+
+  // Execution state
+  agentIsExecuting: boolean;
+  setAgentIsExecuting: (v: boolean) => void;
+  agentIsProcessing: boolean;
+  setAgentIsProcessing: (v: boolean) => void;
+
+  // Live log state
+  agentShowLiveLog: boolean;
+  setAgentShowLiveLog: (v: boolean) => void;
+
+  // SSE logs
+  agentLogs: AgentExecutionLog[];
+  setAgentLogs: (logs: AgentExecutionLog[]) => void;
+  addAgentLog: (log: AgentExecutionLog) => void;
+  clearAgentLogs: () => void;
+
+  // Progress
+  agentProgress: AgentProgressState;
+  setAgentProgress: (p: AgentProgressState) => void;
+  updateAgentProgress: (partial: Partial<AgentProgressState>) => void;
+
+  // Current test/step (transient — reset on reconnect)
+  agentCurrentTest: string | null;
+  setAgentCurrentTest: (t: string | null) => void;
+  agentCurrentStep: number | null;
+  setAgentCurrentStep: (s: number | null) => void;
+
+  // Session ID — generated once per browser session
+  agentSessionId: string;
+
+  // Clear all execution state
+  clearAgentSession: () => void;
+}
+
+const generateSessionId = () =>
+  `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+const INITIAL_MESSAGES: AgentMessage[] = [
+  {
+    id: '1',
+    type: 'agent',
+    content:
+      "Hello! I'm your Test Automation Agent. Upload an Excel or JSON file with your test cases, and I'll help you understand and execute them.\n\n**After uploading, you can:**\n\n**Ask questions:**\n• \"What does test 1 do?\"\n• \"Explain the login test steps\"\n• \"How many tests are there?\"\n\n**Run tests:**\n• **\"execute test 2\"** - Run a specific test\n• **\"run test 1, 3, 5\"** - Run multiple tests\n• **\"execute all\"** - Run all tests",
+    timestamp: new Date().toISOString(),
+    status: 'complete',
+  },
+];
+
+const INITIAL_PROGRESS: AgentProgressState = {
+  totalTests: 0,
+  totalSteps: 0,
+  completedTests: 0,
+  completedSteps: 0,
+  passedTests: 0,
+  failedTests: 0,
+};
+
+// Plain in-memory store (no persistence middleware).
+// State lives in JS memory → survives SPA navigation (component unmount/remount)
+// but is wiped on browser refresh (F5 / Ctrl+R) exactly as intended.
+export const useAgentChatStore = create<AgentChatSessionState>()((set) => ({
+  agentMessages: INITIAL_MESSAGES,
+  setAgentMessages: (msgs) => set({ agentMessages: msgs }),
+  addAgentMessage: (msg) =>
+    set((s) => ({ agentMessages: [...s.agentMessages, msg] })),
+
+  agentIsExecuting: false,
+  setAgentIsExecuting: (v) => set({ agentIsExecuting: v }),
+  agentIsProcessing: false,
+  setAgentIsProcessing: (v) => set({ agentIsProcessing: v }),
+
+  agentShowLiveLog: false,
+  setAgentShowLiveLog: (v) => set({ agentShowLiveLog: v }),
+
+  agentLogs: [],
+  setAgentLogs: (logs) => set({ agentLogs: logs }),
+  addAgentLog: (log) =>
+    set((s) => {
+      const MAX = 500;
+      const next = [...s.agentLogs, log];
+      return { agentLogs: next.length > MAX ? next.slice(-MAX) : next };
+    }),
+  clearAgentLogs: () =>
+    set({
+      agentLogs: [],
+      agentProgress: INITIAL_PROGRESS,
+      agentCurrentTest: null,
+      agentCurrentStep: null,
+    }),
+
+  agentProgress: INITIAL_PROGRESS,
+  setAgentProgress: (p) => set({ agentProgress: p }),
+  updateAgentProgress: (partial) =>
+    set((s) => ({ agentProgress: { ...s.agentProgress, ...partial } })),
+
+  agentCurrentTest: null,
+  setAgentCurrentTest: (t) => set({ agentCurrentTest: t }),
+  agentCurrentStep: null,
+  setAgentCurrentStep: (s) => set({ agentCurrentStep: s }),
+
+  agentSessionId: generateSessionId(),
+
+  clearAgentSession: () =>
+    set({
+      agentMessages: INITIAL_MESSAGES,
+      agentIsExecuting: false,
+      agentIsProcessing: false,
+      agentShowLiveLog: false,
+      agentLogs: [],
+      agentProgress: INITIAL_PROGRESS,
+      agentCurrentTest: null,
+      agentCurrentStep: null,
+    }),
+}));
+
+// ─── Main App Store ──────────────────────────────────────────────────────────
 
 export const useStore = create<AppState>()(
   persist(
@@ -320,8 +527,13 @@ export const useStore = create<AppState>()(
           const response = await fetch(`${API_BASE_URL}/api/v1/llm-providers`);
           if (response.ok) {
             const config = await response.json();
-            set({ llmProvider: config.default as LLMProvider });
-            console.log(`🤖 Initialized LLM provider from backend: ${config.default}`);
+            const provider = config.default_provider as LLMProvider;
+            if (provider && ['groq', 'openai', 'anthropic'].includes(provider)) {
+              set({ llmProvider: provider });
+              console.log(`🤖 Initialized LLM provider from backend: ${provider}`);
+            } else {
+              console.warn(`Unknown provider from backend: ${provider}, keeping default`);
+            }
           }
         } catch (error) {
           console.warn('Failed to fetch default LLM provider, using fallback:', error);
@@ -389,6 +601,8 @@ export const useStore = create<AppState>()(
         })),
 
       // Load Test State
+      uploadId: null,
+      setUploadId: (id) => set({ uploadId: id }),
       uploadedApis: null,
       setUploadedApis: (apis) => set({ uploadedApis: apis }),
       selectedLoadTestApi: null,
@@ -399,6 +613,10 @@ export const useStore = create<AppState>()(
       setIsLoadTesting: (testing) => set({ isLoadTesting: testing }),
       activeLoadTestId: null,
       setActiveLoadTestId: (id) => set({ activeLoadTestId: id }),
+
+      // Last completed test
+      lastCompletedTestId: null,
+      setLastCompletedTestId: (id) => set({ lastCompletedTestId: id }),
 
       // Auto-Execute Mode
       autoExecuteMode: false,
@@ -432,6 +650,56 @@ export const useStore = create<AppState>()(
       // AI Suggested Load Test Config
       aiSuggestedConfig: null,
       setAiSuggestedConfig: (config) => set({ aiSuggestedConfig: config }),
+
+      // Settings State
+      healthCheckEnabled: true,
+      setHealthCheckEnabled: (enabled) => set({ healthCheckEnabled: enabled }),
+      healthCheckInterval: 120,  // 2 hours default
+      setHealthCheckInterval: (interval) => set({ healthCheckInterval: interval }),
+      lastHealthCheck: null,
+      setLastHealthCheck: (date) => set({ lastHealthCheck: date }),
+
+      // Application Settings
+      useDefaultLandingPage: false,
+      setUseDefaultLandingPage: (enabled) => set({ useDefaultLandingPage: enabled }),
+      defaultLandingPage: 'upload',  // Default to Functional Test
+      setDefaultLandingPage: (page) => set({ defaultLandingPage: page }),
+
+      // Browser Behaviour Settings
+      keepBrowserOpenAgent: false,  // default OFF: browser closes between test cases
+      setKeepBrowserOpenAgent: (enabled) => set({ keepBrowserOpenAgent: enabled }),
+
+      // Projects
+      selectedProjectName: null,
+      setSelectedProjectName: (name) => set({ selectedProjectName: name }),
+
+      // Per-project workspace
+      activeProjectSection: 'generate',
+      setActiveProjectSection: (s) => set({ activeProjectSection: s }),
+      projectActiveSuites: {},
+      setProjectActiveSuite: (projectName, suite) =>
+        set((state) => ({ projectActiveSuites: { ...state.projectActiveSuites, [projectName]: suite } })),
+      clearProjectActiveSuite: (projectName) =>
+        set((state) => {
+          const updated = { ...state.projectActiveSuites };
+          delete updated[projectName];
+          return { projectActiveSuites: updated };
+        }),
+      projectExecutionResults: {},
+      setProjectExecutionResult: (projectName, result) =>
+        set((state) => ({ projectExecutionResults: { ...state.projectExecutionResults, [projectName]: result } })),
+
+      // Image Analysis (Vision) Settings — OFF by default
+      imageAnalysisEnabled: false,
+      setImageAnalysisEnabled: (enabled) => {
+        set({ imageAnalysisEnabled: enabled });
+        // Sync to backend so the server-side toggle is also updated
+        fetch('/api/v1/image-analysis/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled }),
+        }).catch(() => { /* ignore network errors */ });
+      },
 
       // Reset - also clears localStorage
       reset: async () => {
@@ -486,6 +754,17 @@ export const useStore = create<AppState>()(
         loadTestMetrics: state.loadTestMetrics,
         sequentialTestStatus: state.sequentialTestStatus,
         terminalLogs: state.terminalLogs,
+        // Settings state persistence
+        healthCheckEnabled: state.healthCheckEnabled,
+        healthCheckInterval: state.healthCheckInterval,
+        lastHealthCheck: state.lastHealthCheck,
+        // Application settings
+        useDefaultLandingPage: state.useDefaultLandingPage,
+        defaultLandingPage: state.defaultLandingPage,
+        // Browser behaviour settings
+        keepBrowserOpenAgent: state.keepBrowserOpenAgent,
+        // Image analysis settings
+        imageAnalysisEnabled: state.imageAnalysisEnabled,
         // screenshots excluded - base64 images exceed localStorage quota
       }),
       // Handle Date serialization on rehydration
@@ -495,6 +774,10 @@ export const useStore = create<AppState>()(
             ...s,
             timestamp: new Date(s.timestamp),
           }));
+        }
+        // Restore lastHealthCheck as Date object
+        if (state?.lastHealthCheck) {
+          state.lastHealthCheck = new Date(state.lastHealthCheck);
         }
       },
     }

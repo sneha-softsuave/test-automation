@@ -19,7 +19,18 @@ WAIT_TIMEOUT = int(os.getenv("WAIT_TIMEOUT", "10000"))  # Wait operations timeou
 NAVIGATION_TIMEOUT = int(os.getenv("NAVIGATION_TIMEOUT", "30000"))  # Navigation timeout
 
 
-def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue, update_queue=None):
+class _StepControlSignal(Exception):
+    """
+    Raised inside _execute_action_sync when the user clicks Next or Skip
+    during a navigation/loader wait loop.
+    .action is either 'next' (mark step complete) or 'skip' (mark step skipped).
+    """
+    def __init__(self, action: str):
+        self.action = action  # 'next' or 'skip'
+        super().__init__(f"Step control: {action}")
+
+
+def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue, update_queue=None, signal_file=None, initial_storage_state=None, keep_browser_open: bool = True):
     """
     Run Playwright tests in a separate process.
     This avoids Windows asyncio subprocess limitations.
@@ -64,6 +75,7 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
     results = []
     passed = 0
     failed = 0
+    shared_storage_state = initial_storage_state  # None on first run
 
     try:
         print("Starting Playwright...")
@@ -73,20 +85,36 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
         })
 
         with sync_playwright() as p:
-            print("Launching browser...")
-            # slow_mo adds delay between actions so you can see the execution
-            browser = p.chromium.launch(headless=headless, slow_mo=500)
-            print(f"Browser launched successfully (headless={headless}, slow_mo=500ms)")
+            def _launch_browser():
+                print("Launching browser...")
+                b = p.chromium.launch(headless=headless, slow_mo=500)
+                print(f"Browser launched successfully (headless={headless}, slow_mo=500ms)")
+                send_update("browser_status", {
+                    "message": "Browser launched successfully",
+                    "status": "ready",
+                    "headless": headless
+                })
+                return b
 
-            send_update("browser_status", {
-                "message": "Browser launched successfully",
-                "status": "ready",
-                "headless": headless
-            })
+            def _close_browser(b):
+                b.close()
+                print("Browser closed successfully")
+                send_update("browser_status", {
+                    "message": "Browser closed",
+                    "status": "closed"
+                })
+
+            # keep_browser_open=True  → one browser for all test cases (current behaviour)
+            # keep_browser_open=False → fresh browser per test case
+            browser = _launch_browser() if keep_browser_open else None
 
             for idx, test_case in enumerate(test_cases):
                 test_id = test_case.get("id", f"TC_{idx+1}")
                 test_name = test_case.get("name", "Test Case")
+
+                # Per-test-case browser lifecycle when keep_browser_open is OFF
+                if not keep_browser_open:
+                    browser = _launch_browser()
 
                 # Send test started update
                 send_update("test_started", {
@@ -104,9 +132,15 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
                     suite_test_data=test_data,
                     timeout=timeout,
                     sync_expect=sync_expect,
-                    send_update=send_update
+                    send_update=send_update,
+                    signal_file=signal_file,
+                    initial_storage_state=shared_storage_state,
                 )
                 results.append(result)
+
+                # Carry forward auth state (cookies + localStorage) to next test
+                if result.get("final_storage_state") is not None:
+                    shared_storage_state = result["final_storage_state"]
 
                 if result["status"] == "PASSED":
                     passed += 1
@@ -130,13 +164,14 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
                         "failed_count": failed
                     })
 
-            browser.close()
-            print("Browser closed successfully")
+                # Close browser after each test case when keep_browser_open is OFF
+                if not keep_browser_open:
+                    _close_browser(browser)
+                    browser = None
 
-            send_update("browser_status", {
-                "message": "Browser closed",
-                "status": "closed"
-            })
+            # Close the shared browser when keep_browser_open is ON
+            if keep_browser_open and browser:
+                _close_browser(browser)
 
         final_result = {
             "project": test_suite.get("project", "Unknown"),
@@ -145,7 +180,8 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
             "passed": passed,
             "failed": failed,
             "results": results,
-            "executed_at": datetime.now().isoformat()
+            "executed_at": datetime.now().isoformat(),
+            "final_storage_state": shared_storage_state,
         }
 
         # Send execution completed update
@@ -184,6 +220,22 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
     result_queue.put(final_result)
 
 
+def _check_step_control(signal_file) -> str | None:
+    """Read and clear the step-control signal file. Returns 'next', 'skip', or None."""
+    if not signal_file:
+        return None
+    try:
+        with open(signal_file, 'r') as f:
+            val = f.read().strip()
+        if val in ("next", "skip"):
+            # Clear the file immediately so the signal is consumed
+            open(signal_file, 'w').close()
+            return val
+    except Exception:
+        pass
+    return None
+
+
 def _execute_single_test_sync(
     browser,
     test_case: Dict[str, Any],
@@ -191,7 +243,9 @@ def _execute_single_test_sync(
     suite_test_data: Dict,
     timeout: int,
     sync_expect,
-    send_update=None
+    send_update=None,
+    signal_file=None,
+    initial_storage_state=None,
 ) -> Dict[str, Any]:
     """Execute a single test case from enhanced format (sync version)."""
     test_id = test_case.get("id", "TC_001")
@@ -229,6 +283,26 @@ def _execute_single_test_sync(
     print(f"\n--- Test: {test_id} - {test_name} ---")
     print(f"Total Steps: {len(steps)}")
 
+    # Emit live Excel row data for frontend grid
+    try:
+        from app.services.excel_export_service import (
+            _steps_to_text, _steps_to_input_data, _expected_results_text
+        )
+        try:
+            tc_no = int("".join(filter(str.isdigit, test_id)))
+        except Exception:
+            tc_no = 0
+        step_update("excel_row_init", {
+            "tc_no": tc_no,
+            "test_name": test_name,
+            "steps_text": _steps_to_text(steps),
+            "expected_result": _expected_results_text(test_case),
+            "input_data": _steps_to_input_data(steps, suite_test_data or {}),
+            "total_steps": len(steps),
+        })
+    except Exception:
+        pass  # Never block execution for view-layer side effects
+
     result = {
         "test_id": test_id,
         "test_name": test_name,
@@ -241,9 +315,13 @@ def _execute_single_test_sync(
         # New fields for step-level retry tracking
         "steps_failed": 0,
         "steps_retried": 0,
+        "final_storage_state": None,
     }
 
-    context = browser.new_context(viewport={"width": 1920, "height": 1080})
+    context_kwargs = {"viewport": {"width": 1920, "height": 1080}}
+    if initial_storage_state is not None:
+        context_kwargs["storage_state"] = initial_storage_state
+    context = browser.new_context(**context_kwargs)
     page = context.new_page()
 
     try:
@@ -259,6 +337,10 @@ def _execute_single_test_sync(
 
             import time as step_time
             step_start = step_time.time()
+
+            # Drain any stale step-control signals from the previous step before starting
+            _check_step_control(signal_file)
+
             print(f"\n  Step {step_num}: {instruction[:60]}...")
             print(f"    Action: {action_type}")
 
@@ -313,6 +395,27 @@ def _execute_single_test_sync(
                             failed_selectors=failed_selectors
                         )
 
+                        # On last retry, try live DOM + LLM selector rescue
+                        if attempt == max_step_retries and page:
+                            step_update("step_retry", {
+                                "message": f"Step {step_num}: trying live selector rescue...",
+                                "step_number": step_num,
+                                "attempt": attempt,
+                                "live_rescue": True,
+                            })
+                            live_selectors = _live_selector_rescue(
+                                page=page,
+                                element_name=selector_hints.get("element_name", ""),
+                                element_type=selector_hints.get("element_type", ""),
+                                action_type=action_type,
+                                instruction=instruction,
+                                failed_selectors=failed_selectors,
+                            )
+                            if live_selectors:
+                                print(f"    [LiveSelectorRescue] LLM suggested {len(live_selectors)} selectors: {live_selectors}")
+                                # Prepend LLM selectors so they're tried FIRST
+                                alternatives = live_selectors + [a for a in alternatives if a not in live_selectors]
+
                         if alternatives:
                             current_selector_hints["alternative_selectors"] = alternatives
                             print(f"    Generated {len(alternatives)} alternative selectors")
@@ -339,7 +442,8 @@ def _execute_single_test_sync(
                         suite_test_data=suite_test_data,
                         timeout=current_timeout,
                         sync_expect=sync_expect,
-                        instruction=instruction
+                        instruction=instruction,
+                        signal_file=signal_file,
                     )
 
                     # Success!
@@ -379,9 +483,42 @@ def _execute_single_test_sync(
                         "duration": round(step_elapsed, 2),
                         "selector_used": selector_used,
                         "retry_count": attempt,
+                        "instruction": instruction,
                     })
 
                     break  # Exit retry loop on success
+
+                except _StepControlSignal as ctrl_sig:
+                    # User clicked Next or Skip — break out of retry loop immediately
+                    step_elapsed = step_time.time() - step_start
+                    if ctrl_sig.action == "next":
+                        # Mark as PASSED (user confirmed step is complete)
+                        step_passed = True
+                        step_result["status"] = "PASSED"
+                        print(f"    [NEXT] User marked step {step_num} as complete")
+                        capture_and_send_screenshot(page, step_num, "passed")
+                        step_update("step_completed", {
+                            "message": f"Step {step_num} marked complete by user (Next)",
+                            "step_number": step_num,
+                            "status": "PASSED",
+                            "duration": round(step_elapsed, 2),
+                            "retry_count": attempt,
+                        })
+                    else:
+                        # Mark as SKIPPED
+                        step_passed = True  # Don't count as failure
+                        step_result["status"] = "SKIPPED"
+                        step_result["error"] = "Skipped by user"
+                        print(f"    [SKIP] User skipped step {step_num}")
+                        capture_and_send_screenshot(page, step_num, "failed")
+                        step_update("step_completed", {
+                            "message": f"Step {step_num} skipped by user",
+                            "step_number": step_num,
+                            "status": "SKIPPED",
+                            "duration": round(step_elapsed, 2),
+                            "retry_count": attempt,
+                        })
+                    break  # Exit retry loop
 
                 except Exception as e:
                     attempt_duration = step_time.time() - attempt_start
@@ -447,6 +584,7 @@ def _execute_single_test_sync(
                     "duration": round(step_elapsed, 2),
                     "error": last_error,
                     "retry_count": max_step_retries,
+                    "instruction": instruction,
                 })
 
                 try:
@@ -468,6 +606,10 @@ def _execute_single_test_sync(
         result["error"] = str(e) if str(e) else "Unknown test error"
 
     finally:
+        try:
+            result["final_storage_state"] = context.storage_state()
+        except Exception:
+            pass  # Carry-forward simply won't happen for next test
         context.close()
 
     result["finished_at"] = datetime.now().isoformat()
@@ -1235,6 +1377,130 @@ def _generate_alternative_selectors(
     return unique_alternatives
 
 
+def _live_selector_rescue(
+    page,
+    element_name: str,
+    element_type: str,
+    action_type: str,
+    instruction: str,
+    failed_selectors: List[str],
+) -> List[str]:
+    """
+    Last-resort selector recovery: scrape the live DOM, then ask the LLM
+    to identify the best Playwright selector for this step.
+    Returns a list of up to 3 selector strings (may be empty on any error).
+    Always wrapped in try/except so it never blocks execution.
+    """
+    try:
+        # 1. Scrape live page context
+        page_context = page.evaluate("""() => {
+            const getAttrs = (el) => ({
+                id: el.id || '',
+                name: el.getAttribute('name') || '',
+                type: el.getAttribute('type') || el.tagName.toLowerCase(),
+                placeholder: el.getAttribute('placeholder') || '',
+                ariaLabel: el.getAttribute('aria-label') || '',
+                text: (el.innerText || el.value || '').trim().substring(0, 60),
+                forLabel: el.labels && el.labels[0] ? el.labels[0].innerText.trim().substring(0, 40) : ''
+            });
+            return {
+                url: window.location.href,
+                inputs: Array.from(document.querySelectorAll('input,textarea,select'))
+                    .filter(el => !['hidden','submit','reset'].includes(el.type))
+                    .slice(0, 20).map(getAttrs),
+                buttons: Array.from(document.querySelectorAll('button,[role="button"],input[type="submit"]'))
+                    .slice(0, 20).map(getAttrs),
+                links: Array.from(document.querySelectorAll('a[href]'))
+                    .slice(0, 15)
+                    .map(el => ({ text: (el.innerText||'').trim().substring(0,60), href: el.href||'' })),
+            };
+        }""")
+
+        # 2. Build LLM prompt
+        inputs_text = "\n".join(
+            f"  - id={e['id']} name={e['name']} type={e['type']} placeholder={e['placeholder']} aria-label={e['ariaLabel']} label={e['forLabel']} text={e['text']}"
+            for e in page_context.get("inputs", [])
+        ) or "  (none)"
+        buttons_text = "\n".join(
+            f"  - id={e['id']} name={e['name']} aria-label={e['ariaLabel']} text={e['text']}"
+            for e in page_context.get("buttons", [])
+        ) or "  (none)"
+        links_text = "\n".join(
+            f"  - text={e['text']} href={e['href']}"
+            for e in page_context.get("links", [])
+        ) or "  (none)"
+        failed_text = "\n".join(f"  - {s}" for s in failed_selectors) or "  (none)"
+
+        prompt = f"""You are a Playwright selector expert. A test step failed because none of the pre-generated selectors matched.
+Given the live page context below, return the best Playwright selector(s) for this step.
+
+STEP INSTRUCTION: {instruction}
+ELEMENT NAME: {element_name}
+ELEMENT TYPE: {element_type}
+ACTION TYPE: {action_type}
+PAGE URL: {page_context.get('url', '')}
+
+LIVE PAGE ELEMENTS:
+INPUTS ({len(page_context.get('inputs', []))}):
+{inputs_text}
+
+BUTTONS ({len(page_context.get('buttons', []))}):
+{buttons_text}
+
+LINKS ({len(page_context.get('links', []))}):
+{links_text}
+
+FAILED SELECTORS (do NOT suggest these):
+{failed_text}
+
+Return ONLY a JSON array of up to 3 Playwright selector strings using our selector format.
+Selector format options:
+- "get_by_label::LabelText"
+- "get_by_placeholder::PlaceholderText"
+- "get_by_role::button::ButtonText"
+- "get_by_role::link::LinkText"
+- "get_by_text::VisibleText"
+- "locator::#id" or "locator::[name=value]" or "locator::[aria-label=value]"
+
+Example response: ["get_by_label::Email", "locator::#email", "get_by_placeholder::Enter email"]
+Return ONLY the JSON array, no explanation."""
+
+        # 3. Make a synchronous LLM call using settings
+        import json as _json
+        from app.core.config import settings
+        from app.agents.base_agent import BaseAgent, LLMProvider
+
+        provider_str = getattr(settings, 'DEFAULT_LLM_PROVIDER', 'groq').lower()
+        provider = LLMProvider(provider_str)
+
+        api_keys = {
+            "anthropic_api_key": getattr(settings, 'ANTHROPIC_API_KEY', None),
+            "openai_api_key": getattr(settings, 'OPENAI_API_KEY', None),
+            "groq_api_key": getattr(settings, 'GROQ_API_KEY', None),
+        }
+
+        class _SelectorRescueAgent(BaseAgent):
+            def execute(self, *args, **kwargs):
+                return self.call_llm(kwargs.get('prompt', ''))
+
+        agent = _SelectorRescueAgent(provider=provider, **api_keys)
+        raw = agent.call_llm(prompt)
+
+        # 4. Parse response — extract JSON array
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+        selectors = _json.loads(raw)
+        if isinstance(selectors, list):
+            return [str(s) for s in selectors if s and str(s) not in failed_selectors][:3]
+        return []
+
+    except Exception as e:
+        print(f"    [LiveSelectorRescue] Failed: {e}")
+        return []
+
+
 def _extract_button_name_from_instruction(instruction: str) -> Optional[str]:
     """Extract button/element name from instruction text."""
     if not instruction:
@@ -1390,7 +1656,8 @@ def _execute_action_sync(
     suite_test_data: Dict,
     timeout: int,
     sync_expect,
-    instruction: str = ""
+    instruction: str = "",
+    signal_file=None,
 ) -> Optional[str]:
     """Execute a single action from enhanced format (sync version)."""
     selector_used = None
@@ -1400,7 +1667,18 @@ def _execute_action_sync(
         if not url:
             raise ValueError("No URL provided for goto action")
         print(f"    Navigating to: {url}")
-        page.goto(url, wait_until="networkidle", timeout=timeout)
+        # Use load (all resources) then try networkidle briefly.
+        # domcontentloaded is too early for React SPA — the JS bundle hasn't
+        # rendered yet and subsequent fill steps write into an empty DOM.
+        page.goto(url, wait_until="load", timeout=timeout)
+        # Wait for networkidle so React finishes rendering the first view.
+        # Cap at 15s — apps with persistent WS/SSE never reach true networkidle.
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass  # Timeout is acceptable — page is rendered enough after load
+        actual_url = page.url
+        print(f"    Landed on: {actual_url}")
 
     elif action_type == "fill":
         # Get value to fill first - check common keys and fallback to any string value
@@ -1629,31 +1907,35 @@ def _execute_action_sync(
 
         click_done = False
 
-        # Case 1: Element exists but NOT visible - use force click immediately
+        # Case 1: Element exists but NOT visible - try scroll into view first, then raise
+        # Do NOT use force=True here: force click bypasses visibility and clicks hidden/wrong
+        # elements silently, causing false PASSes where the page never actually changes.
         if element_exists and not is_visible:
-            print(f"    Element found but not visible, using force click...")
+            print(f"    Element found but not visible, trying scroll into view...")
             try:
-                locator.first.click(force=True, timeout=10000)
+                locator.first.scroll_into_view_if_needed()
+                page.wait_for_timeout(500)
+                locator.first.click(timeout=10000)
                 click_done = True
                 selector_used = selector
-                print(f"    Force click successful!")
-            except Exception as e:
-                print(f"    Force click failed: {e}")
-                # Try scrolling into view and clicking
-                try:
-                    print(f"    Trying scroll into view + click...")
-                    locator.first.scroll_into_view_if_needed()
-                    page.wait_for_timeout(500)
-                    locator.first.click(timeout=10000)
-                    click_done = True
-                    selector_used = selector
-                except Exception as e2:
-                    print(f"    Scroll + click also failed: {e2}")
+                print(f"    Scroll + click successful!")
+            except Exception as e2:
+                print(f"    Scroll + click failed: {e2}")
+                # Raise so the retry mechanism tries better selectors instead of
+                # silently force-clicking an invisible/wrong element.
+                raise ValueError(
+                    f"Element found but not visible and could not be clicked after scroll: {e2}"
+                )
 
         # Case 2: Element is visible but disabled - wait for it to become enabled
         if not click_done and element_exists and is_visible and not is_enabled:
             print(f"    Button is disabled, waiting for it to become enabled (max 60s)...")
             for i in range(120):  # 120 * 500ms = 60 seconds
+                # Check for Next/Skip signal every iteration
+                ctrl = _check_step_control(signal_file)
+                if ctrl in ("next", "skip"):
+                    print(f"    Step control '{ctrl}' received — skipping disabled-button wait")
+                    raise _StepControlSignal(ctrl)
                 try:
                     if locator.first.is_enabled():
                         print(f"    Button is now enabled after {i * 0.5}s!")
@@ -1671,39 +1953,79 @@ def _execute_action_sync(
                 selector_used = selector
 
         # Case 3: Normal click - element is visible and enabled
+        # Use short-timeout polling so Next/Skip signals are checked between attempts
         if not click_done:
-            try:
-                locator.click(timeout=timeout)
-                click_done = True
-                selector_used = selector
-            except Exception as e:
-                # If normal click fails, try force click as last resort
-                error_msg = str(e).lower()
-                if "not visible" in error_msg or "outside of the viewport" in error_msg or "intercepted" in error_msg:
-                    print(f"    Normal click failed ({e}), trying force click...")
-                    locator.click(force=True, timeout=10000)
+            CLICK_POLL_MS = 2000   # try click with 2s timeout each poll
+            click_polls = max(1, timeout // CLICK_POLL_MS)
+            click_error = None
+            for _cp in range(click_polls):
+                # Check signal before each short-timeout click attempt
+                ctrl = _check_step_control(signal_file)
+                if ctrl in ("next", "skip"):
+                    print(f"    Step control '{ctrl}' received — skipping click wait")
+                    raise _StepControlSignal(ctrl)
+                try:
+                    locator.click(timeout=CLICK_POLL_MS)
                     click_done = True
                     selector_used = selector
-                else:
-                    raise
+                    click_error = None
+                    break
+                except Exception as e:
+                    click_error = e
+                    err_lower = str(e).lower()
+                    # Force click immediately if element is obstructed
+                    if "not visible" in err_lower or "outside of the viewport" in err_lower or "intercepted" in err_lower:
+                        print(f"    Normal click failed ({e}), trying force click...")
+                        try:
+                            locator.click(force=True, timeout=10000)
+                            click_done = True
+                            selector_used = selector
+                            click_error = None
+                        except Exception as fe:
+                            click_error = fe
+                        break
+                    # Timeout — poll again after checking signal
+                    print(f"    Click attempt {_cp + 1}/{click_polls} timed out, retrying...")
+            if not click_done and click_error is not None:
+                raise click_error
 
-        # Wait for navigation/redirect after click (max 48 seconds)
-        print(f"    Waiting for page navigation (max 48s)...")
+        # Wait for navigation/redirect after click (max 10 seconds)
+        print(f"    Waiting for page navigation (max 10s)...")
         current_url = page.url
+        navigated = False
         try:
             # Wait for URL to change or timeout
-            for i in range(96):  # 96 * 500ms = 48 seconds
+            for i in range(20):  # 20 * 500ms = 10 seconds
+                # Check for Next/Skip signal from user
+                ctrl = _check_step_control(signal_file)
+                if ctrl in ("next", "skip"):
+                    print(f"    Step control '{ctrl}' received — skipping navigation wait")
+                    raise _StepControlSignal(ctrl)
                 new_url = page.url
                 if new_url != current_url:
-                    print(f"    Page redirected to: {new_url} (after {i * 0.5}s)")
+                    print(f"    Page navigated to: {new_url} (after {i * 0.5:.1f}s)")
                     # Wait a bit more for page to fully load
-                    page.wait_for_load_state("networkidle", timeout=10000)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    navigated = True
                     break
                 page.wait_for_timeout(500)
-            else:
-                print(f"    No redirect after 48s, continuing...")
+        except _StepControlSignal:
+            raise
         except Exception as e:
             print(f"    Navigation wait: {e}")
+
+        if not navigated:
+            # One last check — URL may have changed right as the loop ended
+            final_url = page.url
+            if final_url != current_url:
+                print(f"    Late navigation detected: {final_url}")
+                navigated = True
+
+        if not navigated:
+            print(f"    No navigation after click — click succeeded, page stayed at {current_url}")
 
     elif action_type == "assert":
         _execute_assertions_sync(page, assertions, selector_hints, step_test_data, timeout, sync_expect)
@@ -1729,6 +2051,11 @@ def _execute_action_sync(
                 failure_detected = False
                 failure_message = ""
                 for i in range(240):  # 240 * 500ms = 120 seconds
+                    # Check for Next/Skip signal from user
+                    ctrl = _check_step_control(signal_file)
+                    if ctrl in ("next", "skip"):
+                        print(f"    Step control '{ctrl}' received — skipping loader wait")
+                        raise _StepControlSignal(ctrl)
                     try:
                         # Check for failure/error popups first
                         failure_selectors = [
@@ -1799,6 +2126,8 @@ def _execute_action_sync(
                 else:
                     print(f"    Waiting {wait_timeout}ms...")
                     page.wait_for_timeout(wait_timeout)
+        except _StepControlSignal:
+            raise  # Let Next/Skip propagate to retry loop
         except Exception as e:
             print(f"    Wait error: {e}, using fallback wait...")
             page.wait_for_timeout(wait_timeout)
@@ -2227,24 +2556,29 @@ def _execute_assertions_sync(
         if isinstance(expected_value, bool):
             expected_value_str = "true" if expected_value else "false"
         else:
-            expected_value_str = str(expected_value) if expected_value else ""
+            # Strip surrounding quotes that LLM sometimes wraps: '""Login successful""' → 'Login successful'
+            raw = str(expected_value) if expected_value else ""
+            expected_value_str = raw.strip().strip('"').strip("'").strip('"').strip()
+            expected_value = expected_value_str  # keep in sync for all assertion branches
 
         print(f"      Asserting: {assertion_type} = '{expected_value_str}'")
 
         if assertion_type == "url" or assertion_type == "url_contains" or assertion_type == "verify_url":
-            # URL assertions auto-pass - redirects add query params which is normal behavior
+            # URL assertions: wait briefly for navigation then check the actual URL
+            import time as _t
+            _t.sleep(1)  # Allow any post-action redirect to settle
             current_url = page.url
-            # Check if base URL matches (ignoring query params)
             if expected_value_str:
                 base_expected = expected_value_str.split('?')[0].rstrip('/')
                 base_current = current_url.split('?')[0].rstrip('/')
                 if base_expected in base_current or base_current.endswith(base_expected.split('/')[-1]):
                     print(f"      URL: {current_url} [PASS - base matches '{base_expected}']")
                 else:
-                    # Still auto-pass - the page navigated successfully
-                    print(f"      URL: {current_url} [AUTO-PASS - redirect detected]")
+                    raise AssertionError(
+                        f"URL mismatch: expected URL containing '{base_expected}' but got '{current_url}'"
+                    )
             else:
-                print(f"      URL: {current_url} [AUTO-PASS]")
+                print(f"      URL: {current_url} [PASS - navigated successfully]")
 
         elif assertion_type == "text":
             # Check if expected_value looks like a dynamic ID pattern (e.g., INC169, ORD123, etc.)
@@ -2262,10 +2596,11 @@ def _execute_assertions_sync(
                             print(f"      Found dynamic ID: {found_text}")
                             sync_expect(pattern_locator.first).to_be_visible(timeout=timeout)
                         else:
-                            # Auto-pass for dynamic IDs - the ID was created dynamically
-                            print(f"      Dynamic ID pattern not found, auto-passing (ID is dynamic)")
+                            raise AssertionError(f"Dynamic ID pattern '{prefix}XXX' not found on page (URL: {page.url})")
+                    except AssertionError:
+                        raise
                     except Exception as e:
-                        print(f"      Pattern search failed: {e}, auto-passing")
+                        raise AssertionError(f"Dynamic ID pattern search failed: {e} (URL: {page.url})")
             else:
                 # Use exact match to avoid strict mode violations
                 text_locator = page.get_by_text(expected_value_str, exact=True)
@@ -2309,24 +2644,43 @@ def _execute_assertions_sync(
                     pass
 
             if not heading_found:
-                # Auto-pass heading assertions - main flow is more important
-                print(f"      Heading '{expected_value}' not found, auto-passing")
+                raise AssertionError(f"Heading '{expected_value}' not found on page (URL: {page.url})")
 
         elif assertion_type == "toast":
+            # Strip surrounding quotes that LLM sometimes wraps around the value
+            # e.g. '""Login successful""' → 'Login successful'
+            toast_text = str(expected_value).strip().strip('"').strip("'").strip('"').strip()
+
             toast_selectors = [
-                ".toast",
-                ".Toastify",
                 "[role='alert']",
-                ".notification",
+                "[role='status']",
+                ".Toastify__toast",
                 "[class*='toast']",
                 "[class*='Toast']",
+                ".toast",
+                ".Toastify",
+                "[class*='snack']",
+                "[class*='Snack']",
+                "[class*='notification']",
+                "[class*='alert']",
+                "[class*='success']",
+                "[data-testid*='toast']",
+                "[id*='toast']",
             ]
             toast_found = False
+
+            # Toasts appear briefly — poll for up to 5s across all selectors
             for toast_sel in toast_selectors:
                 try:
                     locator = page.locator(toast_sel).first
                     if locator.count() > 0:
-                        sync_expect(locator).to_contain_text(expected_value, timeout=5000)
+                        text = (locator.inner_text() or "").strip()
+                        if toast_text.lower() in text.lower():
+                            toast_found = True
+                            print(f"      Toast found with selector: {toast_sel} | text: '{text}'")
+                            break
+                        # Also try Playwright contains_text for partial match
+                        sync_expect(locator).to_contain_text(toast_text, timeout=3000)
                         toast_found = True
                         print(f"      Toast found with selector: {toast_sel}")
                         break
@@ -2334,16 +2688,16 @@ def _execute_assertions_sync(
                     continue
 
             if not toast_found:
-                # Try to find text directly
+                # Try to find the text anywhere on the page
                 try:
-                    sync_expect(page.get_by_text(expected_value)).to_be_visible(timeout=3000)
+                    sync_expect(page.get_by_text(toast_text, exact=False)).to_be_visible(timeout=3000)
                     toast_found = True
+                    print(f"      Toast text found directly on page: '{toast_text}'")
                 except Exception:
                     pass
 
             if not toast_found:
-                # Auto-pass toast assertions - toasts are transient and may have already disappeared
-                print(f"      Toast message not found (may have disappeared), auto-passing")
+                raise AssertionError(f"Toast message '{toast_text}' not found on page (URL: {page.url})")
 
         elif assertion_type in ["element", "visible"]:
             selector = _get_best_selector_sync(page, selector_hints, step_test_data)
@@ -2415,11 +2769,15 @@ def _execute_assertions_sync(
                     locator = page.locator(css_selector)
                     if locator.count() > 0:
                         sync_expect(locator.first).to_be_visible(timeout=timeout)
+                        element_found = True
                     else:
-                        print(f"      Selector '{css_selector}' not found, auto-passing visibility check")
+                        raise AssertionError(
+                            f"Element not found: selector '{css_selector}' matched 0 elements on {page.url}"
+                        )
                 else:
-                    # Auto-pass if we can't determine what to check
-                    print(f"      No selector for visibility check, auto-passing")
+                    raise AssertionError(
+                        f"Element not found: no selector could be resolved for visibility check on {page.url}"
+                    )
 
         elif assertion_type == "enabled":
             selector = _get_best_selector_sync(page, selector_hints, step_test_data)
@@ -2435,10 +2793,13 @@ def _execute_assertions_sync(
                     if locator.count() > 0:
                         sync_expect(locator.first).to_be_enabled(timeout=timeout)
                     else:
-                        print(f"      Selector '{css_selector}' not found, auto-passing enabled check")
+                        raise AssertionError(
+                            f"Element not found: selector '{css_selector}' matched 0 elements on {page.url}"
+                        )
                 else:
-                    # Auto-pass if we can't determine what to check
-                    print(f"      No selector for enabled check, auto-passing")
+                    raise AssertionError(
+                        f"Element not found: no selector could be resolved for enabled check on {page.url}"
+                    )
 
         elif assertion_type == "status":
             # Use exact match to avoid strict mode violations
@@ -2467,7 +2828,7 @@ def _execute_assertions_sync(
                 print(f"      Auto-passing assertion")
 
 
-async def execute_enhanced(test_suite: Dict, headless: bool = False, timeout: int = None, update_queue=None) -> Dict[str, Any]:
+async def execute_enhanced(test_suite: Dict, headless: bool = False, timeout: int = None, update_queue=None, stop_event=None, signal_file=None, initial_storage_state=None, keep_browser_open: bool = True) -> Dict[str, Any]:
     """
     Execute enhanced test suite with dynamic runtime selector mapping.
     Uses multiprocessing to run Playwright in a separate process (Windows compatible).
@@ -2490,7 +2851,7 @@ async def execute_enhanced(test_suite: Dict, headless: bool = False, timeout: in
 
     process = multiprocessing.Process(
         target=_run_in_process,
-        args=(test_suite, headless, timeout, result_queue, update_queue)
+        args=(test_suite, headless, timeout, result_queue, update_queue, signal_file, initial_storage_state, keep_browser_open)
     )
 
     process.start()
@@ -2501,7 +2862,32 @@ async def execute_enhanced(test_suite: Dict, headless: bool = False, timeout: in
     # Allow 60 seconds per step (for disabled buttons, navigation, loaders) + 5 minutes buffer
     max_wait = total_steps * 60 + 300
     print(f"Process timeout: {max_wait} seconds for {total_steps} steps")
-    process.join(timeout=max_wait)
+
+    # Poll every second so we can react to stop_event immediately
+    elapsed = 0
+    poll_interval = 1  # seconds
+    stopped_by_user = False
+    while process.is_alive() and elapsed < max_wait:
+        if stop_event and stop_event.is_set():
+            print(f"[execute_enhanced] Stop event received — terminating Playwright process")
+            process.terminate()
+            process.join(timeout=5)
+            stopped_by_user = True
+            break
+        process.join(timeout=poll_interval)
+        elapsed += poll_interval
+
+    if stopped_by_user:
+        return {
+            "project": test_suite.get("project", "Unknown"),
+            "base_url": test_suite.get("base_url", ""),
+            "total": len(test_suite.get("test_cases", [])),
+            "passed": 0,
+            "failed": 0,
+            "results": [],
+            "executed_at": datetime.now().isoformat(),
+            "stopped": True
+        }
 
     if process.is_alive():
         process.terminate()

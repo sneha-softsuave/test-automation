@@ -11,6 +11,7 @@ from typing import Optional, Dict, Any, List
 import asyncio
 import json
 import traceback
+import threading
 from datetime import datetime
 
 from app.core.config import settings
@@ -29,6 +30,60 @@ def get_run_deep_agent():
 
 
 router = APIRouter(prefix="/deep-agent", tags=["Deep Agent"])
+
+# Per-session stop events: session_id -> threading.Event
+# Set the event to signal the running orchestrator to stop immediately.
+_stop_events: Dict[str, threading.Event] = {}
+
+# Per-session step control files: session_id -> temp file path
+# Used to send "next" or "skip" signals into the executor subprocess via a file.
+import tempfile as _tempfile
+import os as _os
+_step_control_files: Dict[str, str] = {}  # session_id -> temp file path
+
+
+@router.post("/stop-execution")
+async def stop_execution(session_id: str = Query(...)):
+    """Signal the running orchestrator to stop immediately for the given session."""
+    event = _stop_events.get(session_id)
+    if event:
+        event.set()
+    await sse_manager.broadcast(session_id, {
+        "type": "execution_stopped",
+        "message": "Stop requested by user"
+    })
+    return {"status": "stop_requested", "session_id": session_id}
+
+
+@router.post("/step-control")
+async def step_control(
+    session_id: str = Query(...),
+    action: str = Query(..., description="'next' to mark current step done, 'skip' to skip it"),
+):
+    """
+    Send a step-level control signal to the running executor subprocess.
+    action='next'  → mark current step as complete and advance immediately
+    action='skip'  → skip the current step (recorded as SKIPPED in report)
+    """
+    if action not in ("next", "skip"):
+        raise HTTPException(status_code=400, detail="action must be 'next' or 'skip'")
+
+    fpath = _step_control_files.get(session_id)
+    if fpath is None:
+        return {"status": "no_active_execution", "session_id": session_id}
+
+    try:
+        with open(fpath, "w") as f:
+            f.write(action)
+    except Exception:
+        pass  # file write error — ignore
+
+    await sse_manager.broadcast(session_id, {
+        "type": "step_control_ack",
+        "action": action,
+        "message": f"Step control '{action}' sent"
+    })
+    return {"status": "sent", "action": action, "session_id": session_id}
 
 
 def validate_llm_provider(provider_name: str) -> str:
@@ -174,14 +229,24 @@ async def run_deep_agent_endpoint(
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Setup error: {str(e)}")
 
-    # Get default model based on provider
+    # Get default model based on provider — all models come from settings (config.py / .env)
     if not model:
         model_defaults = {
-            "anthropic": "claude-sonnet-4-20250514",
-            "openai": "gpt-4o",
-            "groq": "llama-3.1-8b-instant"
+            "anthropic": settings.ANTHROPIC_MODEL,
+            "openai": settings.OPENAI_MODEL,
+            "groq": settings.GROQ_MODEL,
         }
-        model = model_defaults.get(provider_name, "llama-3.1-8b-instant")
+        model = model_defaults.get(provider_name, settings.GROQ_MODEL)
+
+    # Create per-session step control signal file and register it
+    tf = _tempfile.NamedTemporaryFile(mode='w', suffix='.signal', delete=False)
+    step_control_file = tf.name
+    tf.close()  # Close immediately; subprocess will read/write it
+    _step_control_files[session_id] = step_control_file
+
+    # Create per-session stop event and register it
+    stop_event = threading.Event()
+    _stop_events[session_id] = stop_event
 
     # Create event queue for SSE bridging
     event_queue = asyncio.Queue()
@@ -252,7 +317,9 @@ async def run_deep_agent_endpoint(
                 headless=headless,
                 timeout=timeout,
                 max_retries=max_retries,
-                broadcast_func=broadcast_wrapper
+                broadcast_func=broadcast_wrapper,
+                stop_event=stop_event,
+                step_control_file=step_control_file,
             )
         )
 
@@ -328,6 +395,95 @@ async def run_deep_agent_endpoint(
             await broadcaster_task
         except asyncio.CancelledError:
             pass
+        # Clean up per-session control structures
+        _step_control_files.pop(session_id, None)
+        _stop_events.pop(session_id, None)
+        try:
+            _os.unlink(step_control_file)
+        except Exception:
+            pass
+
+
+@router.post("/execute-with-script")
+async def execute_with_script(
+    input_data: Dict[str, Any] = Body(...),
+    session_id: str = Query(..., description="Session ID for SSE updates"),
+    headless: Optional[bool] = Query(default=True, description="Run browser in headless mode"),
+    timeout: Optional[int] = Query(default=30000, description="Timeout in milliseconds"),
+):
+    """
+    Execute a single pre-built Playwright script string directly via subprocess.
+
+    Accepts { script: str, test_id: str } and runs it via ScriptExecutor.
+    Returns { test_id, status, stdout, stderr, executed_at }.
+    """
+    script: str = input_data.get("script", "")
+    test_id: str = input_data.get("test_id", "TC_UNKNOWN")
+
+    if not script:
+        raise HTTPException(status_code=400, detail="'script' field is required")
+
+    # Inject __main__ block if missing so `python script.py` works
+    # --browser chromium is required by pytest-playwright for the `page` fixture
+    main_block = (
+        '\n\nif __name__ == "__main__":\n'
+        '    import pytest as _pytest, sys as _sys, os as _os\n'
+        '    _args = [__file__, "-v", "--tb=short", "--browser", "chromium"]\n'
+        '    if _os.environ.get("PLAYWRIGHT_HEADLESS", "1") == "0":\n'
+        '        _args.append("--headed")\n'
+        '    _sys.exit(_pytest.main(_args))\n'
+    )
+    if 'if __name__ == "__main__"' not in script:
+        script += main_block
+
+    # Broadcast start event
+    await sse_manager.broadcast(session_id, {
+        "type": "test_started",
+        "test_id": test_id,
+        "message": f"Executing script for {test_id}..."
+    })
+
+    try:
+        from app.tools.script_executor import ScriptExecutor
+
+        executor = ScriptExecutor(headless=headless, timeout=timeout)
+
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: executor.execute_script(script, test_id)
+        )
+
+        # Broadcast completion event
+        await sse_manager.broadcast(session_id, {
+            "type": "test_completed",
+            "test_id": test_id,
+            "status": result.get("status"),
+            "message": f"{test_id}: {result.get('status')}"
+        })
+
+        return {
+            "test_id": test_id,
+            "status": result.get("status", "ERROR"),
+            "stdout": result.get("stdout", ""),
+            "stderr": result.get("stderr", ""),
+            "executed_at": result.get("executed_at", datetime.now().isoformat()),
+        }
+
+    except Exception as e:
+        error_details = traceback.format_exc()
+        print(f"[execute-with-script] Error: {error_details}")
+
+        await sse_manager.broadcast(session_id, {
+            "type": "test_completed",
+            "test_id": test_id,
+            "status": "ERROR",
+            "message": str(e)
+        })
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Script execution failed: {str(e)}"
+        )
 
 
 @router.get("/status/{session_id}")
@@ -434,8 +590,8 @@ async def run_deep_agent_from_parsed(
             "raw_data": [],
             "project_name": test_suite.get("project", "Test Suite"),
             "base_url": test_suite.get("base_url"),
-            "llm_provider": "groq",
-            "model": "llama-3.1-8b-instant",
+            "llm_provider": settings.DEFAULT_LLM_PROVIDER,
+            "model": settings.GROQ_MODEL,
             "session_id": session_id,
             "headless": headless,
             "timeout": timeout,
@@ -575,6 +731,10 @@ async def run_multi_agent_endpoint(
         default=True,
         description="Run browser in headless mode"
     ),
+    keep_browser_open: Optional[bool] = Query(
+        default=True,
+        description="Keep browser open across all test cases (False = close/reopen per test case)"
+    ),
     timeout: Optional[int] = Query(
         default=30000,
         description="Timeout for each action in milliseconds"
@@ -635,14 +795,14 @@ async def run_multi_agent_endpoint(
         print(f"[Multi-Agent] Setup error: {e}")
         raise HTTPException(status_code=500, detail=f"Setup error: {str(e)}")
 
-    # Get default model
+    # Get default model — all models come from settings (config.py / .env)
     if not model:
         model_defaults = {
-            "anthropic": "claude-sonnet-4-20250514",
-            "openai": "gpt-4o",
-            "groq": "llama-3.1-8b-instant"
+            "anthropic": settings.ANTHROPIC_MODEL,
+            "openai": settings.OPENAI_MODEL,
+            "groq": settings.GROQ_MODEL,
         }
-        model = model_defaults.get(provider_name, "llama-3.1-8b-instant")
+        model = model_defaults.get(provider_name, settings.GROQ_MODEL)
 
     # Create event queue for SSE
     event_queue = asyncio.Queue()
@@ -682,6 +842,10 @@ async def run_multi_agent_endpoint(
 
     broadcaster_task = asyncio.create_task(broadcast_events())
 
+    # Create and register a fresh stop event for this session
+    stop_event = threading.Event()
+    _stop_events[session_id] = stop_event
+
     try:
         # Import multi-agent orchestrator
         from app.agents.deep_agent import run_multi_agent
@@ -698,11 +862,18 @@ async def run_multi_agent_endpoint(
                 llm_provider=provider_name,
                 model=model,
                 headless=headless,
+                keep_browser_open=keep_browser_open,
                 timeout=timeout,
                 max_retries=max_retries,
-                broadcast_func=broadcast_wrapper
+                broadcast_func=broadcast_wrapper,
+                stop_event=stop_event,
             )
         )
+
+        # Check if stop was requested
+        if stop_event.is_set():
+            print(f"[Multi-Agent] Stopped by user for session {session_id}")
+            raise HTTPException(status_code=499, detail="Test stopped by user")
 
         print(f"[Multi-Agent] Completed: {result.get('summary', {})}")
 
@@ -732,6 +903,8 @@ async def run_multi_agent_endpoint(
             "completed_at": datetime.now().isoformat()
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         error_details = traceback.format_exc()
         print(f"[Multi-Agent] Error: {error_details}")
@@ -748,6 +921,7 @@ async def run_multi_agent_endpoint(
         )
 
     finally:
+        _stop_events.pop(session_id, None)
         broadcaster_task.cancel()
         try:
             await broadcaster_task

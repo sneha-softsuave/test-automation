@@ -49,13 +49,18 @@ class ScriptExecutor:
             print(f"Script saved to: {script_file}")
             print(f"Executing script...\n")
 
+            # Set env so the __main__ block knows whether to pass --headed
+            env = os.environ.copy()
+            env["PLAYWRIGHT_HEADLESS"] = "0" if not self.headless else "1"
+
             # Execute the script
             result = subprocess.run(
                 [sys.executable, script_file],
                 capture_output=True,
                 text=True,
                 timeout=self.timeout // 1000,
-                cwd=tempfile.gettempdir()
+                cwd=tempfile.gettempdir(),
+                env=env,
             )
 
             # Parse results

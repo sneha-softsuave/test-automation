@@ -1,7 +1,8 @@
 import { motion } from 'framer-motion';
-import { Bot, MessageSquare, FlaskConical, Play, FileCheck, Download, Menu, X, Zap, Wrench, ChevronDown, ChevronRight, BarChart3, Terminal, Brain } from 'lucide-react';
-import { useState } from 'react';
+import { Bot, MessageSquare, FlaskConical, Play, FileCheck, Download, Menu, X, Zap, Wrench, ChevronDown, ChevronRight, BarChart3, Terminal, Brain, Settings, Sparkles, FolderOpen } from 'lucide-react';
+import { useState, useEffect } from 'react';
 import { useStore } from '../../store/useStore';
+import { listProjects, type ProjectSummary } from '../../services/api';
 import styles from './Layout.module.css';
 
 interface LayoutProps {
@@ -10,6 +11,7 @@ interface LayoutProps {
 
 // Functional test sub-items
 const functionalTestItems = [
+  { id: 'generate', label: 'Generate Test Case', icon: Sparkles },
   { id: 'upload', label: 'Agent', icon: MessageSquare },
   { id: 'suite', label: 'Test Suite', icon: FlaskConical },
   { id: 'execution', label: 'Execute', icon: Play },
@@ -26,13 +28,21 @@ const loadTestItems = [
 ] as const;
 
 export const Layout = ({ children }: LayoutProps) => {
-  const { currentView, setCurrentView, testSuite, executionResult, rawTestCases } = useStore();
+  const { currentView, setCurrentView, testSuite, executionResult, rawTestCases, selectedProjectName, setSelectedProjectName } = useStore();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [functionalTestExpanded, setFunctionalTestExpanded] = useState(true); // Default: expanded
-  const [loadTestExpanded, setLoadTestExpanded] = useState(true); // Default: expanded
+  const [functionalTestExpanded, setFunctionalTestExpanded] = useState(false);
+  const [loadTestExpanded, setLoadTestExpanded] = useState(false);
+  const [projectsExpanded, setProjectsExpanded] = useState(false);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+
+  useEffect(() => {
+    listProjects().then(setProjects).catch(() => {});
+  }, [currentView]);
 
   const canNavigateTo = (view: string): boolean => {
     switch (view) {
+      case 'generate':
+        return true;
       case 'upload':
         return true;
       case 'suite':
@@ -51,6 +61,10 @@ export const Layout = ({ children }: LayoutProps) => {
         return true; // Load Test Reports is always accessible
       case 'loadtest-insights':
         return true; // AI Insights is always accessible
+      case 'settings':
+        return true; // Settings is always accessible
+      case 'projects':
+        return true; // Projects is always accessible
       default:
         return false;
     }
@@ -128,6 +142,86 @@ export const Layout = ({ children }: LayoutProps) => {
 
         {/* Navigation */}
         <nav className={styles.nav}>
+          {/* Projects Section */}
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: 0.05 }}
+          >
+            <button
+              className={`${styles.navItem} ${styles.navParent} ${currentView === 'projects' ? styles.active : ''}`}
+              onClick={() => {
+                if (!projectsExpanded) setProjectsExpanded(true);
+                setCurrentView('projects');
+                setMobileMenuOpen(false);
+              }}
+            >
+              <div className={styles.navItemIcon}>
+                <FolderOpen size={20} />
+              </div>
+              <span className={styles.navItemLabel}>Projects</span>
+              <button
+                className={styles.expandButton}
+                onClick={e => { e.stopPropagation(); setProjectsExpanded(!projectsExpanded); }}
+                aria-label={projectsExpanded ? 'Collapse' : 'Expand'}
+              >
+                {projectsExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              </button>
+              {currentView === 'projects' && (
+                <motion.div
+                  className={styles.navItemIndicator}
+                  layoutId="navIndicator"
+                  transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                />
+              )}
+            </button>
+
+            {projectsExpanded && (
+              <motion.div
+                className={styles.navChildren}
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.2 }}
+                style={{ maxHeight: 180, overflowY: 'auto' }}
+              >
+                {projects.length === 0 ? (
+                  <span style={{ display: 'block', padding: '6px 16px', fontSize: '0.75rem', color: '#94a3b8' }}>
+                    No projects yet
+                  </span>
+                ) : (
+                  projects.map((p, index) => {
+                    const isProjectActive = currentView === 'project-workspace' && selectedProjectName === p.name;
+                    return (
+                      <motion.button
+                        key={p.name}
+                        className={`${styles.navItem} ${styles.navChild} ${isProjectActive ? styles.active : ''}`}
+                        onClick={() => {
+                          setSelectedProjectName(p.name);
+                          setCurrentView('project-workspace');
+                          setMobileMenuOpen(false);
+                        }}
+                        initial={{ opacity: 0, x: -20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: 0.05 * (index + 1) }}
+                        whileHover={{ x: 4 }}
+                        whileTap={{ scale: 0.98 }}
+                      >
+                        <div className={styles.navItemIcon}>
+                          <FolderOpen size={16} />
+                        </div>
+                        <span className={styles.navItemLabel}>{p.name}</span>
+                        <span style={{ fontSize: '0.6875rem', background: '#e2e8f0', color: '#475569', padding: '1px 5px', borderRadius: 8, flexShrink: 0 }}>
+                          {p.test_count}
+                        </span>
+                      </motion.button>
+                    );
+                  })
+                )}
+              </motion.div>
+            )}
+          </motion.div>
+
           {/* Functional Test Parent */}
           <motion.div
             initial={{ opacity: 0, x: -20 }}
@@ -283,6 +377,33 @@ export const Layout = ({ children }: LayoutProps) => {
               </motion.div>
             )}
           </motion.div>
+
+          {/* Settings Section */}
+          <motion.div
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: 0.6 }}
+          >
+            <button
+              className={`${styles.navItem} ${currentView === 'settings' ? styles.active : ''}`}
+              onClick={() => {
+                setCurrentView('settings');
+                setMobileMenuOpen(false);
+              }}
+            >
+              <div className={styles.navItemIcon}>
+                <Settings size={20} />
+              </div>
+              <span className={styles.navItemLabel}>Settings</span>
+              {currentView === 'settings' && (
+                <motion.div
+                  className={styles.navItemIndicator}
+                  layoutId="navIndicator"
+                  transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                />
+              )}
+            </button>
+          </motion.div>
         </nav>
 
         {/* Status */}
@@ -327,6 +448,7 @@ export const Layout = ({ children }: LayoutProps) => {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4 }}
+          style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
         >
           {children}
         </motion.div>

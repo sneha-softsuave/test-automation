@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from app.models.load_test_models import LoadTestMetrics, APIConfig, LoadTestConfig
+from app.models.load_test_models import LoadTestMetrics, APIConfig, LoadTestConfig, AIAnalysis, TestSuggestion, APISuggestion
 
 
 class LoadTestReportGenerator:
@@ -21,7 +21,8 @@ class LoadTestReportGenerator:
         api: APIConfig,
         config: LoadTestConfig,
         metrics: LoadTestMetrics,
-        duration: float
+        duration: float,
+        llm_provider: str = "groq"
     ) -> str:
         """Generate HTML report for manual (single API) test."""
 
@@ -30,10 +31,14 @@ class LoadTestReportGenerator:
         print(f"🔍 [REPORT] Config: {config}", flush=True)
         print(f"🔍 [REPORT] Metrics: {metrics}", flush=True)
         print(f"🔍 [REPORT] Duration: {duration}", flush=True)
+        print(f"🔍 [REPORT] LLM Provider: {llm_provider}", flush=True)
 
         try:
             report_filename = f"report_{test_id}.html"
             report_path = self.results_dir / report_filename
+
+            # Fetch AI insights from cache
+            ai_insights = self._get_ai_insights(test_id, llm_provider)
 
             html_content = self._generate_html(
                 title=f"Load Test Report - {api.name}",
@@ -47,7 +52,8 @@ class LoadTestReportGenerator:
                     "metrics": metrics,
                     "duration": duration
                 }],
-                total_duration=duration
+                total_duration=duration,
+                ai_insights=ai_insights
             )
 
             # Write report
@@ -70,24 +76,30 @@ class LoadTestReportGenerator:
         self,
         sequential_test_id: str,
         api_results: List[Dict[str, Any]],
-        total_duration: float
+        total_duration: float,
+        llm_provider: str = "groq"
     ) -> str:
         """Generate HTML report for sequential test with multiple APIs."""
 
         print(f"🔍 [REPORT] Starting sequential report generation for: {sequential_test_id}", flush=True)
         print(f"🔍 [REPORT] Number of API results: {len(api_results)}", flush=True)
         print(f"🔍 [REPORT] Total duration: {total_duration}", flush=True)
+        print(f"🔍 [REPORT] LLM Provider: {llm_provider}", flush=True)
 
         try:
             report_filename = f"report_{sequential_test_id}.html"
             report_path = self.results_dir / report_filename
+
+            # Fetch AI insights from cache
+            ai_insights = self._get_ai_insights(sequential_test_id, llm_provider)
 
             html_content = self._generate_html(
                 title=f"Sequential Load Test Report",
                 test_type="Sequential Test",
                 test_id=sequential_test_id,
                 apis=api_results,
-                total_duration=total_duration
+                total_duration=total_duration,
+                ai_insights=ai_insights
             )
 
             # Write report
@@ -133,13 +145,224 @@ class LoadTestReportGenerator:
             print(f"⚠️ Error reading current report file: {e}", flush=True)
             return None
 
+    def _get_ai_insights(self, test_id: str, llm_provider: str = "groq") -> Optional[AIAnalysis]:
+        """Fetch AI insights from cache without regenerating."""
+        try:
+            from app.api.routes.load_test import ai_analysis_cache
+            cache_key = f"{test_id}_{llm_provider}"
+            insights = ai_analysis_cache.get(cache_key)
+            if insights:
+                print(f"✅ [REPORT] Found AI insights in cache for {cache_key}", flush=True)
+            else:
+                print(f"⚠️ [REPORT] No AI insights found in cache for {cache_key}", flush=True)
+            return insights
+        except Exception as e:
+            print(f"⚠️ [REPORT] Error fetching AI insights: {e}", flush=True)
+            return None
+
+    def _generate_ai_insights_html(self, insights: AIAnalysis, test_id: str) -> str:
+        """Generate HTML for AI insights section matching AISuggestionsPanel design."""
+        if not insights:
+            return ""
+
+        # Determine performance level styling
+        level = insights.performance_level.lower()
+        level_colors = {
+            "good": {"border": "#10b981", "emoji": "✅", "text": "Good"},
+            "warning": {"border": "#f59e0b", "emoji": "⚠️", "text": "Warning"},
+            "critical": {"border": "#ef4444", "emoji": "❌", "text": "Critical"}
+        }
+        level_info = level_colors.get(level, level_colors["warning"])
+
+        # Generate test suggestions HTML
+        test_suggestions_html = ""
+        if insights.test_suggestions:
+            for suggestion in insights.test_suggestions:
+                severity_class = f"severity-{suggestion.severity.lower()}"
+
+                # Build metrics HTML
+                metrics_html = ""
+                if suggestion.metrics:
+                    metrics_items = []
+                    m = suggestion.metrics
+
+                    if m.current_users is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Current Users</div><div class="metric-value">{m.current_users}</div></div>')
+                    if m.recommended_users is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Recommended Users</div><div class="metric-value">{m.recommended_users}</div></div>')
+                    if m.current_spawn_rate is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Current Spawn Rate</div><div class="metric-value">{m.current_spawn_rate}/s</div></div>')
+                    if m.recommended_spawn_rate is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Recommended Spawn Rate</div><div class="metric-value">{m.recommended_spawn_rate}/s</div></div>')
+                    if m.current_duration is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Current Duration</div><div class="metric-value">{m.current_duration}</div></div>')
+                    if m.recommended_duration is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Recommended Duration</div><div class="metric-value">{m.recommended_duration}</div></div>')
+
+                    if metrics_items:
+                        metrics_html = f'<div class="metrics-grid">{"".join(metrics_items)}</div>'
+
+                test_suggestions_html += f"""
+                <div class="suggestion-card">
+                    <div class="suggestion-header">
+                        <h4 class="suggestion-title">{suggestion.title}</h4>
+                        <span class="severity-badge {severity_class}">{suggestion.severity.upper()}</span>
+                    </div>
+                    <p class="suggestion-description">{suggestion.description}</p>
+                    {metrics_html}
+                    <div class="suggestion-reasoning">
+                        <strong>💡 Reasoning:</strong> {suggestion.reasoning}
+                    </div>
+                </div>
+                """
+
+        # Generate API suggestions HTML
+        api_suggestions_html = ""
+        if insights.api_suggestions:
+            for suggestion in insights.api_suggestions:
+                severity_class = f"severity-{suggestion.severity.lower()}"
+                category_emoji = {
+                    "response_time": "⏱️",
+                    "error_rate": "❌",
+                    "scalability": "📈",
+                    "infrastructure": "🏗️"
+                }.get(suggestion.category, "🔧")
+
+                # Build metrics HTML
+                metrics_html = ""
+                if suggestion.metrics:
+                    metrics_items = []
+                    m = suggestion.metrics
+
+                    if m.current_value is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Current Value</div><div class="metric-value">{m.current_value:.2f}ms</div></div>')
+                    if m.target_value is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Target Value</div><div class="metric-value">{m.target_value:.2f}ms</div></div>')
+                    if m.current_error_rate is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Current Error Rate</div><div class="metric-value">{m.current_error_rate:.2f}%</div></div>')
+                    if m.target_error_rate is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Target Error Rate</div><div class="metric-value">{m.target_error_rate:.2f}%</div></div>')
+                    if m.failed_requests is not None and m.total_requests is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Failed Requests</div><div class="metric-value">{m.failed_requests}/{m.total_requests}</div></div>')
+                    if m.current_p95 is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Current P95</div><div class="metric-value">{m.current_p95:.2f}ms</div></div>')
+                    if m.target_p95 is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Target P95</div><div class="metric-value">{m.target_p95:.2f}ms</div></div>')
+                    if m.current_p99 is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Current P99</div><div class="metric-value">{m.current_p99:.2f}ms</div></div>')
+                    if m.target_p99 is not None:
+                        metrics_items.append(f'<div class="metric-item"><div class="metric-label">Target P99</div><div class="metric-value">{m.target_p99:.2f}ms</div></div>')
+
+                    if metrics_items:
+                        metrics_html = f'<div class="metrics-grid">{"".join(metrics_items)}</div>'
+
+                api_suggestions_html += f"""
+                <div class="suggestion-card">
+                    <div class="suggestion-header">
+                        <h4 class="suggestion-title">{category_emoji} {suggestion.title}</h4>
+                        <span class="severity-badge {severity_class}">{suggestion.severity.upper()}</span>
+                    </div>
+                    <p class="suggestion-category"><strong>Category:</strong> {suggestion.category.replace('_', ' ').title()}</p>
+                    <p class="suggestion-description">{suggestion.description}</p>
+                    {metrics_html}
+                    <div class="suggestion-details">
+                        <div class="detail-section">
+                            <strong>📋 High-Level Solution:</strong>
+                            <p>{suggestion.high_level}</p>
+                        </div>
+                        <div class="detail-section">
+                            <strong>⚙️ Technical Details:</strong>
+                            <p>{suggestion.technical}</p>
+                        </div>
+                    </div>
+                </div>
+                """
+
+        # Build the full AI insights section
+        test_suggestions_section = ""
+        if test_suggestions_html:
+            test_suggestions_count = len(insights.test_suggestions)
+            test_suggestions_section = f"""
+            <div class="suggestions-section">
+                <div class="section-header" onclick="toggleSection('test-suggestions')">
+                    <h3>🎯 Test Optimization Suggestions ({test_suggestions_count})</h3>
+                    <span class="toggle-icon" id="test-suggestions-icon">▼</span>
+                </div>
+                <div class="section-content" id="test-suggestions-content">
+                    {test_suggestions_html}
+                </div>
+            </div>
+            """
+
+        api_suggestions_section = ""
+        if api_suggestions_html:
+            api_suggestions_count = len(insights.api_suggestions)
+            api_suggestions_section = f"""
+            <div class="suggestions-section">
+                <div class="section-header" onclick="toggleSection('api-suggestions')">
+                    <h3>⚡ API Performance Suggestions ({api_suggestions_count})</h3>
+                    <span class="toggle-icon" id="api-suggestions-icon">▼</span>
+                </div>
+                <div class="section-content" id="api-suggestions-content">
+                    {api_suggestions_html}
+                </div>
+            </div>
+            """
+
+        # Determine message based on score
+        score_message = ""
+        if insights.performance_score >= 80:
+            score_message = "Excellent performance! Your API is handling the load well."
+        elif insights.performance_score >= 60:
+            score_message = "Good performance with some areas for improvement."
+        elif insights.performance_score >= 40:
+            score_message = "Moderate performance. Review suggestions to optimize."
+        else:
+            score_message = "Performance issues detected. Please review critical suggestions."
+
+        # Add hint text if there are suggestions
+        hint_text = ""
+        if test_suggestions_html or api_suggestions_html:
+            hint_text = '<p class="expand-hint">💡 Click section headers below to expand and view detailed suggestions</p>'
+
+        html = f"""
+        <!-- AI Insights Section -->
+        <div class="ai-insights-section">
+            <h2 class="ai-insights-title">🤖 AI-Powered Insights</h2>
+
+            <!-- Performance Score -->
+            <div class="performance-score-container">
+                <div class="score-circle score-{level}">
+                    <div class="score-value">{insights.performance_score}</div>
+                    <div class="score-label">Performance Score</div>
+                </div>
+                <div class="score-info">
+                    <div class="score-badge score-badge-{level}">{level_info['emoji']} {level_info['text']}</div>
+                    <p class="score-message">{score_message}</p>
+                    <div class="test-id-display">Test ID: {test_id}</div>
+                    <div class="generated-at">Generated: {insights.generated_at}</div>
+                </div>
+            </div>
+
+            {hint_text}
+
+            {test_suggestions_section}
+            {api_suggestions_section}
+
+            {'' if (test_suggestions_html or api_suggestions_html) else '<div class="no-suggestions">🎉 No critical issues found. Your API is performing well!</div>'}
+        </div>
+        """
+
+        return html
+
     def _generate_html(
         self,
         title: str,
         test_type: str,
         test_id: str,
         apis: List[Dict[str, Any]],
-        total_duration: float
+        total_duration: float,
+        ai_insights: Optional[AIAnalysis] = None
     ) -> str:
         """Generate HTML content for the report."""
 
@@ -439,11 +662,13 @@ class LoadTestReportGenerator:
         .metric-value {{
             font-size: 2rem;
             font-weight: bold;
+            color: white;
             margin-bottom: 0.5rem;
         }}
 
         .metric-label {{
             font-size: 0.875rem;
+            color: white;
             opacity: 0.9;
         }}
 
@@ -600,6 +825,297 @@ class LoadTestReportGenerator:
             text-align: center;
         }}
 
+        /* AI Insights Section */
+        .ai-insights-section {{
+            margin: 2rem 0;
+            padding: 2rem;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }}
+
+        .ai-insights-title {{
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: #111827;
+            margin-bottom: 1.5rem;
+            text-align: center;
+        }}
+
+        /* Performance Score */
+        .performance-score-container {{
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+            padding: 2rem;
+            background: #f9fafb;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+        }}
+
+        .score-circle {{
+            width: 160px;
+            height: 160px;
+            border-radius: 50%;
+            border: 8px solid;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: white;
+            flex-shrink: 0;
+        }}
+
+        .score-circle.score-good {{ border-color: #10b981; }}
+        .score-circle.score-warning {{ border-color: #f59e0b; }}
+        .score-circle.score-critical {{ border-color: #ef4444; }}
+
+        .score-value {{
+            font-size: 3rem;
+            font-weight: bold;
+            color: #111827;
+        }}
+
+        .score-label {{
+            font-size: 0.875rem;
+            color: #6b7280;
+            text-align: center;
+        }}
+
+        .score-info {{
+            flex: 1;
+        }}
+
+        .score-badge {{
+            display: inline-block;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }}
+
+        .score-badge.score-badge-good {{ background: #dcfce7; color: #16a34a; }}
+        .score-badge.score-badge-warning {{ background: #fef3c7; color: #d97706; }}
+        .score-badge.score-badge-critical {{ background: #fee2e2; color: #dc2626; }}
+
+        .score-message {{
+            font-size: 1.125rem;
+            color: #374151;
+            margin-bottom: 0.75rem;
+        }}
+
+        .test-id-display {{
+            font-size: 0.875rem;
+            color: #6b7280;
+            margin-bottom: 0.25rem;
+        }}
+
+        .generated-at {{
+            font-size: 0.75rem;
+            color: #9ca3af;
+        }}
+
+        .expand-hint {{
+            text-align: center;
+            font-size: 0.875rem;
+            color: #667eea;
+            font-weight: 500;
+            margin: 1rem 0 1.5rem 0;
+            padding: 0.75rem;
+            background: #f0f4ff;
+            border-radius: 8px;
+            border-left: 3px solid #667eea;
+        }}
+
+        /* Suggestions Section */
+        .suggestions-section {{
+            margin: 1.5rem 0;
+            background: #f9fafb;
+            border-radius: 8px;
+            overflow: hidden;
+        }}
+
+        .section-header {{
+            padding: 1rem 1.5rem;
+            background: white;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #e5e7eb;
+            transition: background 0.2s, box-shadow 0.2s;
+            user-select: none;
+        }}
+
+        .section-header:hover {{
+            background: #f9fafb;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+        }}
+
+        .section-header:active {{
+            background: #f3f4f6;
+        }}
+
+        .section-header h3 {{
+            margin: 0;
+            font-size: 1.25rem;
+            color: #111827;
+        }}
+
+        .toggle-icon {{
+            font-size: 1.25rem;
+            transition: transform 0.2s;
+            color: #667eea;
+            font-weight: bold;
+        }}
+
+        .section-content {{
+            display: block;
+        }}
+
+        .suggestion-card {{
+            margin: 1rem;
+            padding: 1.5rem;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }}
+
+        .suggestion-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+        }}
+
+        .suggestion-title {{
+            flex: 1;
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: #111827;
+            margin: 0 1rem 0 0;
+        }}
+
+        .severity-badge {{
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }}
+
+        .severity-badge.severity-critical {{ background: #fee2e2; color: #dc2626; }}
+        .severity-badge.severity-warning {{ background: #fef3c7; color: #d97706; }}
+        .severity-badge.severity-good {{ background: #dcfce7; color: #16a34a; }}
+
+        .suggestion-category {{
+            font-size: 0.875rem;
+            color: #6b7280;
+            margin-bottom: 0.75rem;
+        }}
+
+        .suggestion-description {{
+            font-size: 1rem;
+            color: #374151;
+            line-height: 1.6;
+            margin-bottom: 1rem;
+        }}
+
+        .suggestion-reasoning {{
+            padding: 1rem;
+            background: #f9fafb;
+            border-left: 3px solid #667eea;
+            border-radius: 4px;
+            font-size: 0.9375rem;
+            color: #4b5563;
+            margin-top: 1rem;
+        }}
+
+        .suggestion-details {{
+            margin-top: 1rem;
+        }}
+
+        .detail-section {{
+            margin-bottom: 1rem;
+            padding: 1rem;
+            background: #f9fafb;
+            border-radius: 6px;
+        }}
+
+        .detail-section:last-child {{
+            margin-bottom: 0;
+        }}
+
+        .detail-section strong {{
+            color: #111827;
+            display: block;
+            margin-bottom: 0.5rem;
+        }}
+
+        .detail-section p {{
+            color: #4b5563;
+            line-height: 1.6;
+            margin: 0;
+        }}
+
+        .metrics-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin: 1rem 0;
+        }}
+
+        .metric-item {{
+            padding: 0.75rem;
+            background: #f9fafb;
+            border-radius: 6px;
+        }}
+
+        .metric-item .metric-label {{
+            font-size: 0.75rem;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.25rem;
+        }}
+
+        .metric-item .metric-value {{
+            font-size: 1.125rem;
+            font-weight: 600;
+            color: #111827;
+        }}
+
+        .no-suggestions {{
+            padding: 2rem;
+            text-align: center;
+            font-size: 1.125rem;
+            color: #10b981;
+            background: #dcfce7;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }}
+
+        /* Responsive */
+        @media (max-width: 768px) {{
+            .performance-score-container {{
+                flex-direction: column;
+                text-align: center;
+            }}
+            .score-circle {{
+                width: 120px;
+                height: 120px;
+            }}
+            .score-value {{
+                font-size: 2.5rem;
+            }}
+            .metrics-grid {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+
         @media print {{
             body {{
                 background: white;
@@ -607,6 +1123,9 @@ class LoadTestReportGenerator:
             }}
             .container {{
                 box-shadow: none;
+            }}
+            .section-header {{
+                cursor: default;
             }}
         }}
     </style>
@@ -669,6 +1188,9 @@ class LoadTestReportGenerator:
                     <canvas id="summaryFailureChart"></canvas>
                 </div>
             </div>
+
+            <!-- AI Insights -->
+            {self._generate_ai_insights_html(ai_insights, test_id) if ai_insights else ''}
         </div>
 
         <div class="footer">
@@ -738,9 +1260,36 @@ class LoadTestReportGenerator:
             URL.revokeObjectURL(url);
         }}
 
+        // Toggle collapsible sections (for AI insights)
+        function toggleSection(sectionId) {{
+            const content = document.getElementById(sectionId + '-content');
+            const icon = document.getElementById(sectionId + '-icon');
+
+            if (content && icon) {{
+                if (content.style.display === 'none') {{
+                    content.style.display = 'block';
+                    icon.textContent = '▼';
+                }} else {{
+                    content.style.display = 'none';
+                    icon.textContent = '▶';
+                }}
+            }}
+        }}
+
         // Initialize charts when DOM is ready
         window.addEventListener('DOMContentLoaded', function() {{
             console.log('📊 Initializing charts with data:', apiData);
+
+            // Initialize AI insights sections as collapsed by default
+            const aiSections = document.querySelectorAll('.section-content');
+            aiSections.forEach(section => {{
+                section.style.display = 'none';
+            }});
+            // Set all toggle icons to collapsed state
+            const toggleIcons = document.querySelectorAll('.toggle-icon');
+            toggleIcons.forEach(icon => {{
+                icon.textContent = '▶';
+            }});
 
             // Create individual chart for each API
             apiData.forEach((api, index) => {{

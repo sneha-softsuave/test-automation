@@ -77,6 +77,7 @@ class LoadTestRequest(BaseModel):
     selected_api: Optional[APIConfig] = Field(None, description="Full API configuration (overrides uploaded config)")
     config: LoadTestConfig = Field(..., description="Load test configuration")
     session_id: str = Field(..., description="SSE session ID for streaming")
+    llm_provider: Optional[str] = Field(default="groq", description="LLM provider for AI insights")
 
 
 class MultiAPILoadTestRequest(BaseModel):
@@ -171,7 +172,9 @@ class SequentialLoadTestRequest(BaseModel):
     """Request to start sequential load testing of multiple APIs."""
     upload_id: str = Field(..., description="Upload session ID")
     selected_api_names: List[str] = Field(..., description="List of API names to test sequentially")
+    selected_apis_config: Optional[List[APIConfig]] = Field(default=None, description="Full API configurations with user edits (overrides uploaded config)")
     session_id: str = Field(..., description="SSE session ID for streaming")
+    llm_provider: Optional[str] = Field(default="groq", description="LLM provider for AI insights")
 
 
 class SuggestionMetrics(BaseModel):

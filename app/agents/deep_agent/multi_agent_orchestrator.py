@@ -118,6 +118,7 @@ class MultiAgentState:
 
     # Config
     headless: bool = True
+    keep_browser_open: bool = True
     timeout: int = 30000
     llm_provider: str = "groq"
     model: Optional[str] = None
@@ -129,6 +130,9 @@ class MultiAgentState:
 
     # SSE
     broadcast_func: Optional[Callable] = None
+
+    # Auth state carry-forward (cookies + localStorage) across test runs
+    shared_storage_state: Optional[Dict] = None
 
 
 SUPERVISOR_PROMPT = """You are the Deep Agent Supervisor, coordinating a team of specialized sub-agents for test automation.
@@ -197,12 +201,12 @@ class MultiAgentOrchestrator:
         self.reporter_agent: Optional[ReporterAgent] = None
 
     def _get_default_model(self, provider: str) -> str:
-        """Get default model for provider."""
+        """Get default model for provider — all models come from settings (config.py / .env)."""
         return {
-            "groq": settings.GROQ_MODEL or "llama-3.1-8b-instant",
-            "openai": settings.OPENAI_MODEL or "gpt-4o-mini",
-            "anthropic": settings.ANTHROPIC_MODEL or "claude-3-haiku-20240307"
-        }.get(provider.lower(), "llama-3.1-8b-instant")
+            "groq": settings.GROQ_MODEL,
+            "openai": settings.OPENAI_MODEL,
+            "anthropic": settings.ANTHROPIC_MODEL,
+        }.get(provider.lower(), settings.GROQ_MODEL)
 
     def _init_sub_agents(self, broadcast_func: Optional[Callable] = None):
         """Initialize all sub-agents with shared config."""
@@ -240,7 +244,7 @@ class MultiAgentOrchestrator:
         return f"""
 - Project: {self.state.project_name}
 - Raw test cases: {len(self.state.raw_data)} loaded
-- Parsed: {'Yes - ' + str(self.state.parse_stats.get('total_test_cases', 0)) + ' tests' if self.state.parsed_suite else 'No'}
+- Parsed: {'Yes - ' + str(len(self.state.parsed_suite.get('test_cases', []))) + ' tests' if self.state.parsed_suite else 'No'}
 - Executed: {'Yes - ' + str(results.get('passed', 0)) + '/' + str(results.get('total', 0)) + ' passed' if self.state.execution_results else 'No'}
 - Validation status: {self.state.validation_status}
 - Retry count: {self.state.retry_count}/{self.state.max_retries}
@@ -261,6 +265,12 @@ class MultiAgentOrchestrator:
 
     def _decide_next_agent(self) -> Dict[str, str]:
         """Use supervisor LLM to decide which sub-agent to delegate to."""
+        # Fast-path rule overrides: avoid unnecessary LLM calls when state is unambiguous
+        if self.state.parsed_suite and not self.state.execution_results:
+            parsed_count = len(self.state.parsed_suite.get("test_cases", []))
+            print(f"[Supervisor] Fast-path: parsed ({parsed_count} tests), not yet executed → ExecutorAgent")
+            return {"delegate_to": "ExecutorAgent", "reason": "Tests parsed and ready to execute"}
+
         prompt = SUPERVISOR_PROMPT.format(
             state_summary=self._get_state_summary(),
             recent_actions=self._get_recent_actions()
@@ -467,8 +477,11 @@ class MultiAgentOrchestrator:
         result = self.executor_agent.execute({
             "parsed_suite": test_suite_to_run,
             "headless": self.state.headless,
+            "keep_browser_open": self.state.keep_browser_open,
             "timeout": self.state.timeout,
-            "base_url": self.state.base_url
+            "base_url": self.state.base_url,
+            "stop_event": getattr(self, '_stop_event', None),
+            "initial_storage_state": self.state.shared_storage_state,
         })
 
         # Record action
@@ -482,6 +495,12 @@ class MultiAgentOrchestrator:
 
         if result["success"]:
             new_execution_results = result.get("execution_results") or {}
+
+            # Carry authentication state forward for next execution (e.g., retry with fresh login)
+            next_state = result.get("final_storage_state")
+            if next_state is not None:
+                self.state.shared_storage_state = next_state
+                print(f"[Supervisor] Auth state stored ({len(next_state.get('cookies', []))} cookies)")
 
             if is_retry and self.state.passed_results:
                 # Merge retry results with previously passed results
@@ -656,6 +675,7 @@ class MultiAgentOrchestrator:
         project_name: str = "Test Project",
         base_url: Optional[str] = None,
         headless: bool = True,
+        keep_browser_open: bool = True,
         timeout: int = 30000,
         max_retries: int = 2,
         broadcast_func: Optional[Callable] = None
@@ -678,6 +698,7 @@ class MultiAgentOrchestrator:
             project_name=project_name,
             base_url=base_url,
             headless=headless,
+            keep_browser_open=keep_browser_open,
             timeout=timeout,
             max_retries=max_retries,
             llm_provider=self.llm_provider,
@@ -701,6 +722,9 @@ class MultiAgentOrchestrator:
 
         # Store all parsed test cases for the final report
         all_parsed_test_cases = []
+
+        # Auth state (cookies + localStorage) carried forward across tests
+        shared_storage_state = None
 
         # Process each test case ONE AT A TIME: Parse → Execute → Retry
         for test_index, raw_test_case in enumerate(raw_data):
@@ -762,11 +786,18 @@ class MultiAgentOrchestrator:
             test_result = self._execute_single_test_with_retry(
                 test_case=parsed_test_case,
                 test_index=test_index,
-                total_tests=total_tests
+                total_tests=total_tests,
+                initial_storage_state=shared_storage_state
             )
 
             # Store the result
             self.state.all_test_results.append(test_result)
+
+            # Carry authentication state forward to next test
+            next_state = test_result.get("final_storage_state")
+            if next_state is not None:
+                shared_storage_state = next_state
+                print(f"[Supervisor] Auth state carried forward ({len(next_state.get('cookies', []))} cookies)")
 
             status = "PASSED" if test_result.get("status") == "PASSED" else "FAILED"
             print(f"[Supervisor] Test {test_id} final status: {status}")
@@ -966,7 +997,8 @@ class MultiAgentOrchestrator:
         self,
         test_case: Dict,
         test_index: int,
-        total_tests: int
+        total_tests: int,
+        initial_storage_state=None
     ) -> Dict[str, Any]:
         """
         Execute a single test case with retry logic.
@@ -1004,8 +1036,10 @@ class MultiAgentOrchestrator:
             exec_result = self.executor_agent.execute({
                 "parsed_suite": single_test_suite,
                 "headless": self.state.headless,
+                "keep_browser_open": self.state.keep_browser_open,
                 "timeout": current_timeout,
-                "base_url": self.state.base_url
+                "base_url": self.state.base_url,
+                "initial_storage_state": initial_storage_state,
             })
 
             if not exec_result["success"]:
@@ -1090,20 +1124,25 @@ class MultiAgentOrchestrator:
         project_name: str = "Test Project",
         base_url: Optional[str] = None,
         headless: bool = True,
+        keep_browser_open: bool = True,
         timeout: int = 30000,
         max_retries: int = 2,
-        broadcast_func: Optional[Callable] = None
+        broadcast_func: Optional[Callable] = None,
+        stop_event=None,
     ) -> Dict[str, Any]:
         """
         Run the multi-agent orchestration with LLM-driven decisions.
         The supervisor LLM decides which agent to call next based on state.
         """
+        self._stop_event = stop_event  # Store so sub-agents can access it
+
         # Initialize state
         self.state = MultiAgentState(
             raw_data=raw_data,
             project_name=project_name,
             base_url=base_url,
             headless=headless,
+            keep_browser_open=keep_browser_open,
             timeout=timeout,
             max_retries=max_retries,
             llm_provider=self.llm_provider,
@@ -1124,6 +1163,17 @@ class MultiAgentOrchestrator:
         iteration = 0
 
         while iteration < max_iterations:
+            # Check stop signal at the top of every iteration
+            if stop_event and stop_event.is_set():
+                print(f"[Supervisor] Stop requested — aborting workflow before iteration {iteration + 1}")
+                self._broadcast({
+                    "type": "execution_stopped",
+                    "message": "Test execution stopped by user"
+                })
+                # Terminate the Playwright subprocess if it's still running
+                self._terminate_playwright_process()
+                return {"status": "stopped", "errors": ["Stopped by user"], "generated_script": None, "report_data": None}
+
             iteration += 1
 
             # STRICT CHECK: If report is already generated, we're done
@@ -1153,6 +1203,12 @@ class MultiAgentOrchestrator:
 
             # Delegate to chosen sub-agent
             if delegate_to == "ParserAgent":
+                # Guard: if we already have a parsed suite (even partial), skip re-parsing
+                # This prevents a loop when batch parsing partially failed (e.g. rate limit on batch 2)
+                if self.state.parsed_suite:
+                    parsed_count = len(self.state.parsed_suite.get("test_cases", []))
+                    print(f"[Supervisor] parsed_suite already set ({parsed_count} tests) — skipping re-parse, proceeding to executor")
+                    continue
                 result = self._delegate_to_parser()
                 if not result["success"]:
                     # Let supervisor decide what to do
@@ -1172,6 +1228,11 @@ class MultiAgentOrchestrator:
                 result = self._delegate_to_validator()
 
             elif delegate_to == "ReporterAgent":
+                # Final stop check: skip report if user stopped
+                if stop_event and stop_event.is_set():
+                    print(f"[Supervisor] Stop requested — skipping ReporterAgent")
+                    self._terminate_playwright_process()
+                    return {"status": "stopped", "errors": ["Stopped by user"], "generated_script": None, "report_data": None}
                 result = self._delegate_to_reporter()
                 # Report generated, workflow is complete - exit immediately
                 print(f"[Supervisor] Report generated, workflow complete.")
@@ -1192,6 +1253,17 @@ class MultiAgentOrchestrator:
         })
 
         return final_result
+
+    def _terminate_playwright_process(self):
+        """Terminate the Playwright subprocess if it is still alive."""
+        try:
+            proc = getattr(self, '_playwright_process', None)
+            if proc is not None and proc.is_alive():
+                print(f"[Supervisor] Terminating Playwright process (pid={proc.pid})")
+                proc.terminate()
+                proc.join(timeout=5)
+        except Exception as e:
+            print(f"[Supervisor] Error terminating Playwright process: {e}")
 
     def _build_final_result(self) -> Dict[str, Any]:
         """Build the final result dictionary."""
@@ -1227,9 +1299,11 @@ def run_multi_agent(
     llm_provider: str = "groq",
     model: Optional[str] = None,
     headless: bool = True,
+    keep_browser_open: bool = True,
     timeout: int = 30000,
     max_retries: int = 2,
-    broadcast_func: Optional[Callable] = None
+    broadcast_func: Optional[Callable] = None,
+    stop_event=None,
 ) -> Dict[str, Any]:
     """
     Run the multi-agent deep automation system.
@@ -1250,7 +1324,9 @@ def run_multi_agent(
         project_name=project_name,
         base_url=base_url,
         headless=headless,
+        keep_browser_open=keep_browser_open,
         timeout=timeout,
         max_retries=max_retries,
-        broadcast_func=broadcast_func
+        broadcast_func=broadcast_func,
+        stop_event=stop_event,
     )

@@ -42,6 +42,7 @@ if __name__ == "__main__":
             "generated_locustfiles/*",
             "load_test_results/*",
             "uploads/*",
+            "projects/*",
             "*.log"
         ]
     )

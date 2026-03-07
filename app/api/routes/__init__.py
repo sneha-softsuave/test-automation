@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.routes import health, excel, test_cases, scraper, websocket, deep_agent, agent_chat, load_test
+from app.api.routes import health, excel, test_cases, scraper, websocket, deep_agent, agent_chat, load_test, recorder, projects
 
 router = APIRouter()
 
@@ -12,3 +12,5 @@ router.include_router(websocket.router, tags=["WebSocket"])
 router.include_router(deep_agent.router, tags=["Deep Agent"])
 router.include_router(agent_chat.router, tags=["Agent Chat"])
 router.include_router(load_test.router, tags=["Load Test"])
+router.include_router(recorder.router, tags=["Recorder"])
+router.include_router(projects.router, tags=["Projects"])

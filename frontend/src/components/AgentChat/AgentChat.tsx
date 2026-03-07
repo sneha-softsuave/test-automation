@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Upload,
@@ -35,16 +35,23 @@ import {
   Rocket,
   BarChart3,
   TrendingUp,
+  Pencil,
+  StopCircle,
+  SkipForward,
+  ChevronsRight,
 } from 'lucide-react';
-import { useStore, LLM_OPTIONS, type LLMProvider } from '../../store/useStore';
-import { uploadExcel, executeMultiAgent, chatWithAgent } from '../../services/api';
+import { useStore, useAgentChatStore, LLM_OPTIONS, type LLMProvider } from '../../store/useStore';
+import type { AgentMessage, AgentExecutionLog } from '../../store/useStore';
+import { uploadExcel, executeMultiAgent, chatWithAgent, stopExecution, stepControl, saveActiveSession, clearActiveSession } from '../../services/api';
 import type { TestCaseRaw, UploadResponse, AgentChatResponse } from '../../services/api';
 import { useExecutionWebSocket } from '../../hooks/useExecutionWebSocket';
 import type { ExecutionLog } from '../../hooks/useExecutionWebSocket';
+import { LiveExcelGrid } from '../LiveExcelGrid/LiveExcelGrid';
 import { TerminalDisplay } from '../TerminalDisplay/TerminalDisplay';
 import { AgentAtomDiagram } from '../AgentAtomDiagram/AgentAtomDiagram';
 import styles from './AgentChat.module.css';
 
+// Message type alias for local use (matches AgentMessage from store but with Date timestamp)
 interface Message {
   id: string;
   type: 'user' | 'agent' | 'system';
@@ -77,19 +84,62 @@ interface AgentTodo {
   status: 'pending' | 'in_progress' | 'done' | 'error';
 }
 
+// Convert a store AgentMessage (ISO timestamp) to local Message (Date timestamp)
+function toLocalMessage(m: AgentMessage): Message {
+  return { ...m, timestamp: new Date(m.timestamp), testCases: m.testCases as TestCaseRaw[] | undefined };
+}
+
+// Convert a local Message (Date timestamp) to store AgentMessage (ISO string)
+function toStoreMessage(m: Message): AgentMessage {
+  return { ...m, timestamp: m.timestamp.toISOString(), testCases: m.testCases };
+}
+
 export const AgentChat = () => {
-  const { setExecutionResult, setCurrentView, addNotification, setRawTestCases, clearScreenshots, setGeneratedScript, setTestSuite, rawTestCases, llmProvider, setLlmProvider } = useStore();
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      type: 'agent',
-      content: "Hello! I'm your Test Automation Agent. Upload an Excel or JSON file with your test cases, and I'll help you understand and execute them.\n\n**After uploading, you can:**\n\n**Ask questions:**\n• \"What does test 1 do?\"\n• \"Explain the login test steps\"\n• \"How many tests are there?\"\n\n**Run tests:**\n• **\"execute test 2\"** - Run a specific test\n• **\"run test 1, 3, 5\"** - Run multiple tests\n• **\"execute all\"** - Run all tests",
-      timestamp: new Date(),
-      status: 'complete',
-    },
-  ]);
+  const { setExecutionResult, setCurrentView, addNotification, setRawTestCases, clearScreenshots, setGeneratedScript, setTestSuite, rawTestCases, llmProvider, setLlmProvider, keepBrowserOpenAgent } = useStore();
+
+  // ── Session-persisted state (survives navigation, clears on browser refresh) ──
+  const {
+    agentMessages,
+    setAgentMessages,
+    addAgentMessage,
+    agentIsExecuting,
+    setAgentIsExecuting,
+    agentIsProcessing,
+    setAgentIsProcessing,
+    agentShowLiveLog,
+    setAgentShowLiveLog,
+    agentLogs,
+    clearAgentLogs,
+    agentProgress,
+    setAgentProgress,
+    agentCurrentTest,
+    setAgentCurrentTest,
+    agentCurrentStep,
+    setAgentCurrentStep,
+    agentSessionId,
+    clearAgentSession,
+  } = useAgentChatStore();
+
+  // Convert stored messages to local format (ISO → Date)
+  const messages: Message[] = agentMessages.map(toLocalMessage);
+  const setMessages = useCallback((msgs: Message[] | ((prev: Message[]) => Message[])) => {
+    if (typeof msgs === 'function') {
+      setAgentMessages(msgs(agentMessages.map(toLocalMessage)).map(toStoreMessage));
+    } else {
+      setAgentMessages(msgs.map(toStoreMessage));
+    }
+  }, [agentMessages, setAgentMessages]);
+
+  // Aliases for backward-compat with the rest of the component
+  const isExecuting = agentIsExecuting;
+  const setIsExecuting = setAgentIsExecuting;
+  const isProcessing = agentIsProcessing;
+  const setIsProcessing = setAgentIsProcessing;
+  const showLiveLog = agentShowLiveLog;
+  const setShowLiveLog = setAgentShowLiveLog;
+
+  // ── Local-only state (ephemeral — OK to lose on navigation) ──
   const [inputValue, setInputValue] = useState('');
-  const [isProcessing, setIsProcessing] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [thinkingSteps, _setThinkingSteps] = useState<ThinkingStep[]>([]);
   const [agentThoughts, setAgentThoughts] = useState<AgentThought[]>([]);
@@ -98,10 +148,12 @@ export const AgentChat = () => {
   const [rawData, setRawData] = useState<TestCaseRaw[] | null>(null);
   const [uploadResponse, setUploadResponse] = useState<UploadResponse | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [showLiveLog, setShowLiveLog] = useState(false);
-  const [isExecuting, setIsExecuting] = useState(false);
   const [selectedScreenshotIndex, setSelectedScreenshotIndex] = useState<number | null>(null);
   const [showScreenshotDropdown, setShowScreenshotDropdown] = useState(false);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editedTestCases, setEditedTestCases] = useState<TestCaseRaw[] | null>(null);
+  const [expandedTestCase, setExpandedTestCase] = useState<number | null>(null);
+  const [rightPanelView, setRightPanelView] = useState<'browser' | 'excel'>('browser');
 
   // Use LLM_OPTIONS from store (centralized config)
   const llmOptions = LLM_OPTIONS;
@@ -111,21 +163,84 @@ export const AgentChat = () => {
   const logEndRef = useRef<HTMLDivElement>(null);
 
   // Hook for execution logs and browser state
+  // Pass agentSessionId so the SSE channel is stable across navigation.
   const {
     isConnected,
     sessionId,
-    logs,
-    currentTest,
-    currentStep,
+    logs: sseHookLogs,
+    currentTest: sseCurrentTest,
+    currentStep: sseCurrentStep,
     currentAgent,
-    progress,
+    progress: sseProgress,
     browserState,
     screenshots,
+    liveExcelRows,
     connect,
     disconnect,
-    clearLogs,
-    addLog,
-  } = useExecutionWebSocket();
+    clearLogs: clearHookLogs,
+    addLog: addHookLog,
+  } = useExecutionWebSocket(agentSessionId);
+
+  // Merge SSE hook logs into the persistent store whenever they change
+  useEffect(() => {
+    if (sseHookLogs.length > 0) {
+      // Convert ExecutionLog → AgentExecutionLog (Date → ISO string)
+      const converted: AgentExecutionLog[] = sseHookLogs.map((l) => ({
+        ...l,
+        timestamp: l.timestamp instanceof Date ? l.timestamp.toISOString() : String(l.timestamp),
+      }));
+      // Only update store when we have new logs (avoid infinite loop)
+      if (converted.length !== agentLogs.length) {
+        // Replace store logs with current SSE logs
+        useAgentChatStore.getState().setAgentLogs(converted);
+      }
+    }
+  }, [sseHookLogs]);
+
+  // Bridge SSE progress → store
+  useEffect(() => {
+    const p = sseProgress;
+    const stored = agentProgress;
+    const changed = (
+      p.totalTests !== stored.totalTests ||
+      p.totalSteps !== stored.totalSteps ||
+      p.completedTests !== stored.completedTests ||
+      p.completedSteps !== stored.completedSteps ||
+      p.passedTests !== stored.passedTests ||
+      p.failedTests !== stored.failedTests
+    );
+    if (changed) {
+      setAgentProgress(p);
+    }
+  }, [sseProgress]);
+
+  // Bridge SSE currentTest/currentStep → store
+  useEffect(() => {
+    if (sseCurrentTest !== agentCurrentTest) setAgentCurrentTest(sseCurrentTest);
+  }, [sseCurrentTest]);
+
+  useEffect(() => {
+    if (sseCurrentStep !== agentCurrentStep) setAgentCurrentStep(sseCurrentStep);
+  }, [sseCurrentStep]);
+
+  // Use persisted logs/progress/current when SSE is not active
+  const logs = sseHookLogs.length > 0 ? sseHookLogs : agentLogs.map((l) => ({
+    ...l,
+    timestamp: new Date(l.timestamp),
+  })) as typeof sseHookLogs;
+
+  const progress = isConnected ? sseProgress : agentProgress;
+  const currentTest = isConnected ? sseCurrentTest : agentCurrentTest;
+  const currentStep = isConnected ? sseCurrentStep : agentCurrentStep;
+
+  const clearLogs = useCallback(() => {
+    clearHookLogs();
+    clearAgentLogs();
+  }, [clearHookLogs, clearAgentLogs]);
+
+  const addLog = useCallback((log: Parameters<typeof addHookLog>[0]) => {
+    addHookLog(log);
+  }, [addHookLog]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -145,12 +260,22 @@ export const AgentChat = () => {
     }
   }, [logs, showLiveLog]);
 
-  // Auto-show live log when execution starts
+  // Auto-show live log when execution starts or when we return with active execution
   useEffect(() => {
     if (isExecuting && logs.length > 0 && !showLiveLog) {
       setShowLiveLog(true);
     }
   }, [isExecuting, logs.length, showLiveLog]);
+
+  // On mount: if we were executing when we left, re-show the live panel with persisted logs
+  useEffect(() => {
+    if (agentIsExecuting && agentShowLiveLog) {
+      // The persisted state already sets showLiveLog=true, but make sure the live panel is visible
+      setShowLiveLog(true);
+    }
+    // Only run on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Get setScreenshots from store
   const { setScreenshots: setGlobalScreenshots } = useStore();
@@ -192,30 +317,14 @@ export const AgentChat = () => {
     return () => document.removeEventListener('click', handleClickOutside);
   }, [showScreenshotDropdown]);
 
-  // Initialize rawData from persisted store on mount
+  // Restore rawData from persisted store on mount (messages already persisted via sessionStorage)
   useEffect(() => {
     if (rawTestCases && rawTestCases.length > 0 && !rawData) {
       setRawData(rawTestCases);
-      // Show welcome back message with restored data
-      const testList = rawTestCases.map(tc =>
-        `**${tc['T.C.No']}** - ${tc['Test Case']}`
-      ).join('\n');
-
-      setMessages([{
-        id: '1',
-        type: 'agent',
-        content: `Welcome back! I've restored your **${rawTestCases.length} test case(s)**:\n\n${testList}\n\n` +
-          `What would you like to do?\n` +
-          `• **"execute test 1"** - Run specific test\n` +
-          `• **"execute all"** - Run all tests\n` +
-          `• Ask me anything about your tests!`,
-        timestamp: new Date(),
-        status: 'complete',
-      }]);
     }
   }, [rawTestCases, rawData]);
 
-  const addMessage = (
+  const addMessage = useCallback((
     type: Message['type'],
     content: string,
     status?: Message['status'],
@@ -229,9 +338,9 @@ export const AgentChat = () => {
       status,
       testCases,
     };
-    setMessages((prev) => [...prev, newMessage]);
+    addAgentMessage(toStoreMessage(newMessage));
     return newMessage.id;
-  };
+  }, [addAgentMessage]);
 
   const addThought = (phase: AgentPhase, text: string) => {
     const thought: AgentThought = {
@@ -258,10 +367,46 @@ export const AgentChat = () => {
     );
   };
 
-  const clearAgentState = () => {
+  const clearAgentState = useCallback(() => {
     setAgentThoughts([]);
     setAgentTodos([]);
     setCurrentPhase(null);
+  }, []);
+
+  const handleStartEdit = (message: Message) => {
+    setEditingMessageId(message.id);
+    setEditedTestCases(message.testCases ? message.testCases.map(tc => ({ ...tc })) : []);
+    setExpandedTestCase(null);
+  };
+
+  const handleSaveEdit = () => {
+    if (!editedTestCases || !editingMessageId) return;
+    setRawData(editedTestCases);
+    setRawTestCases(editedTestCases);
+    // Also update the message object so reopening the editor shows the saved data
+    setMessages(prev =>
+      prev.map(m =>
+        m.id === editingMessageId ? { ...m, testCases: editedTestCases } : m
+      )
+    );
+    setEditingMessageId(null);
+    setEditedTestCases(null);
+    setExpandedTestCase(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingMessageId(null);
+    setEditedTestCases(null);
+    setExpandedTestCase(null);
+  };
+
+  const handleFieldChange = (tcIndex: number, field: string, value: string) => {
+    setEditedTestCases(prev => {
+      if (!prev) return prev;
+      const updated = [...prev];
+      updated[tcIndex] = { ...updated[tcIndex], [field]: value };
+      return updated;
+    });
   };
 
   const handleFileSelect = async (file: File) => {
@@ -393,7 +538,7 @@ export const AgentChat = () => {
     }
   };
 
-  const executeTests = async (testNumbers: number[] | 'all') => {
+  const executeTests = async (testNumbers: string[] | 'all') => {
     if (!rawData || rawData.length === 0) {
       addMessage('agent', "Please upload a test file first.", 'error');
       return;
@@ -407,7 +552,7 @@ export const AgentChat = () => {
       selectedTests = rawData;
       testDescription = `all ${rawData.length} test case(s)`;
     } else {
-      selectedTests = rawData.filter((tc) => testNumbers.includes(tc['T.C.No']));
+      selectedTests = rawData.filter((tc) => testNumbers.includes(String(tc['T.C.No'])));
       if (selectedTests.length === 0) {
         const available = rawData.map((tc) => tc['T.C.No']).join(', ');
         addMessage('agent', `No test cases found with number(s): ${testNumbers.join(', ')}.\n\nAvailable test numbers: ${available}`, 'error');
@@ -420,6 +565,7 @@ export const AgentChat = () => {
 
     setIsProcessing(true);
     setIsExecuting(true);
+    saveActiveSession(sessionId); // persist so refresh can kill backend
     clearLogs();
     clearAgentState();
     clearScreenshots(); // Clear previous screenshots for new execution
@@ -486,7 +632,8 @@ export const AgentChat = () => {
           projectName: uploadResponse?.filename || 'Test Project',
           llmProvider: llmProvider,  // Use selected LLM provider
           model: llmOptions[llmProvider].model,  // Use corresponding model
-          headless: true,
+          headless: !keepBrowserOpenAgent,
+          keepBrowserOpen: keepBrowserOpenAgent,
           timeout: 30000,
           maxRetries: 2,
         }
@@ -600,8 +747,41 @@ export const AgentChat = () => {
       });
     } finally {
       setIsProcessing(false);
+      clearActiveSession(); // execution done — no orphan to kill on next refresh
       // Disconnect SSE after execution
       setTimeout(() => disconnect(), 2000);
+    }
+  };
+
+  const handleStopTest = async () => {
+    try {
+      await stopExecution(sessionId);
+    } catch {
+      // Ignore network errors — still reset local state
+    }
+    clearActiveSession(); // manually stopped — clear before refresh risk
+    setIsExecuting(false);
+    setIsProcessing(false);
+    clearAgentState();
+    disconnect();
+    addMessage('agent', '🛑 **Test execution stopped by user.**\n\nNo report or script was generated.', 'error');
+    addNotification('warning', 'Test execution stopped');
+    // Keep logs visible so user can see what happened
+  };
+
+  const handleNextStep = async () => {
+    try {
+      await stepControl(sessionId, 'next');
+    } catch {
+      // Ignore errors — signal is best-effort
+    }
+  };
+
+  const handleSkipStep = async () => {
+    try {
+      await stepControl(sessionId, 'skip');
+    } catch {
+      // Ignore errors — signal is best-effort
     }
   };
 
@@ -610,19 +790,12 @@ export const AgentChat = () => {
 
     // Clear command - handle locally
     if (cmd === 'clear' || cmd === 'reset') {
-      setMessages([{
-        id: '1',
-        type: 'agent',
-        content: "Chat cleared! Upload a new file to get started.\n\nYou can ask me questions about your test cases or use commands like **\"execute test 1\"**.",
-        timestamp: new Date(),
-        status: 'complete',
-      }]);
+      clearAgentSession();
       setUploadedFile(null);
       setRawData(null);
       setRawTestCases(null);
       setUploadResponse(null);
       clearLogs();
-      setShowLiveLog(false);
       return;
     }
 
@@ -1099,6 +1272,64 @@ export const AgentChat = () => {
                         }} />
                       ))}
                     </div>
+
+                    {/* Pencil button — only on messages with testCases */}
+                    {message.testCases && message.testCases.length > 0 && (
+                      <button
+                        className={styles.editTestCasesBtn}
+                        onClick={() =>
+                          editingMessageId === message.id ? handleCancelEdit() : handleStartEdit(message)
+                        }
+                        title="Edit test cases"
+                      >
+                        <Pencil size={14} />
+                        {editingMessageId === message.id ? 'Cancel editing' : 'Edit test cases'}
+                      </button>
+                    )}
+
+                    {/* Inline editor panel */}
+                    {editingMessageId === message.id && editedTestCases && (
+                      <div className={styles.testCaseEditor}>
+                        <div className={styles.editorHeader}>
+                          <span>Editing {editedTestCases.length} test case(s)</span>
+                          <div className={styles.editorActions}>
+                            <button className={styles.saveBtn} onClick={handleSaveEdit}>Save changes</button>
+                            <button className={styles.cancelBtn} onClick={handleCancelEdit}>Cancel</button>
+                          </div>
+                        </div>
+                        {editedTestCases.map((tc, index) => (
+                          <div key={index} className={styles.testCaseItem}>
+                            <button
+                              className={styles.testCaseHeader}
+                              onClick={() => setExpandedTestCase(expandedTestCase === index ? null : index)}
+                            >
+                              <ChevronDown
+                                size={14}
+                                className={expandedTestCase === index ? styles.chevronOpen : styles.chevronClosed}
+                              />
+                              <span>{tc['T.C.No']}. {tc['Test Case']}</span>
+                            </button>
+                            {expandedTestCase === index && (
+                              <div className={styles.testCaseFields}>
+                                {Object.entries(tc)
+                                  .filter(([key]) => key !== 'T.C.No')
+                                  .map(([field, value]) => (
+                                    <div key={field} className={styles.fieldGroup}>
+                                      <label className={styles.fieldLabel}>{field}</label>
+                                      <textarea
+                                        className={styles.fieldInput}
+                                        value={String(value ?? '')}
+                                        onChange={(e) => handleFieldChange(index, field, e.target.value)}
+                                        rows={field === 'Test Case Steps' ? 6 : 3}
+                                      />
+                                    </div>
+                                  ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </motion.div>
               ))}
@@ -1223,8 +1454,56 @@ export const AgentChat = () => {
                   {screenshots.length} screenshots
                 </span>
               )}
+              {/* View toggle icons — in header, icon-only */}
+              <div className={styles.viewToggleInline}>
+                <button
+                  className={`${styles.viewToggleIconBtn} ${rightPanelView === 'browser' ? styles.viewToggleActive : ''}`}
+                  onClick={() => setRightPanelView('browser')}
+                  title="Browser View"
+                >
+                  <Monitor size={14} />
+                </button>
+                <button
+                  className={`${styles.viewToggleIconBtn} ${rightPanelView === 'excel' ? styles.viewToggleActive : ''}`}
+                  onClick={() => setRightPanelView('excel')}
+                  title="Excel View"
+                >
+                  <FileSpreadsheet size={14} />
+                  {liveExcelRows.length > 0 && (
+                    <span className={styles.excelBadgeTiny}>{liveExcelRows.length}</span>
+                  )}
+                </button>
+              </div>
             </div>
             <div className={styles.connectionStatus}>
+              {isExecuting && (
+                <>
+                  <button
+                    className={styles.nextStepBtn}
+                    onClick={handleNextStep}
+                    title="Mark current step as complete and advance"
+                  >
+                    <ChevronsRight size={14} />
+                    Next
+                  </button>
+                  <button
+                    className={styles.skipStepBtn}
+                    onClick={handleSkipStep}
+                    title="Skip current step (recorded as SKIPPED in report)"
+                  >
+                    <SkipForward size={14} />
+                    Skip
+                  </button>
+                  <button
+                    className={styles.stopTestBtn}
+                    onClick={handleStopTest}
+                    title="Stop test execution"
+                  >
+                    <StopCircle size={14} />
+                    Stop Test
+                  </button>
+                </>
+              )}
               {isExecuting ? (
                 isConnected ? (
                   <span className={styles.connected}>
@@ -1252,8 +1531,10 @@ export const AgentChat = () => {
             </div>
           </div>
 
-          {/* Left Section - Browser View */}
+          {/* Left Section - Browser / Excel View */}
           <div className={styles.browserSection}>
+            {rightPanelView === 'browser' && (
+              <>
             {/* Screenshot History Dropdown */}
             {screenshots.length > 0 && (
               <div className={styles.screenshotSelector}>
@@ -1417,6 +1698,12 @@ export const AgentChat = () => {
                 )}
               </div>
             </div>
+              </>
+            )}
+
+            {rightPanelView === 'excel' && (
+              <LiveExcelGrid rows={liveExcelRows} isExecuting={isExecuting} />
+            )}
 
             {/* Progress */}
             {progress.totalSteps > 0 && (

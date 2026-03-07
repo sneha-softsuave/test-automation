@@ -73,6 +73,10 @@ import json
 uploaded_configs: Dict[str, List[APIConfig]] = {}
 active_tests: Dict[str, Dict] = {}
 
+# In-memory cache for AI analysis results
+# Key format: "{test_id}_{llm_provider}" -> AIAnalysis
+ai_analysis_cache: Dict[str, AIAnalysis] = {}
+
 def load_metrics_from_csv(test_id: str) -> Optional[Dict[str, Any]]:
     """
     Load metrics from Locust stats CSV files.
@@ -410,6 +414,7 @@ async def start_load_test_from_excel(
             "api": selected_api,  # Store full API object for report generation
             "config": request.config,
             "session_id": request.session_id,
+            "llm_provider": request.llm_provider or "groq",  # Store for AI insights generation
             "start_time": datetime.now(),
             "status": "running"
         }
@@ -716,6 +721,134 @@ async def get_api_templates():
     return {"templates": templates}
 
 
+async def generate_ai_insights_background(
+    test_id: str,
+    llm_provider: str,
+    metrics: Any,
+    config: Any,
+    api: Any,
+    regenerate_report: bool = True
+):
+    """
+    Background task to generate AI insights after test completion.
+    This runs asynchronously without blocking the main flow.
+    """
+    try:
+        print(f"🤖 [BACKGROUND] Starting AI insights generation for {test_id}", flush=True)
+
+        # Convert metrics to dict if needed
+        metrics_dict = metrics.dict() if hasattr(metrics, 'dict') else metrics
+        metrics_dict['test_id'] = test_id
+
+        # Convert config to dict if needed
+        config_dict = config.dict() if hasattr(config, 'dict') else config if isinstance(config, dict) else {}
+
+        # Convert API to dict if needed
+        api_dict = {}
+        if api:
+            if hasattr(api, 'dict'):
+                api_dict = api.dict()
+            elif isinstance(api, dict):
+                api_dict = api
+            else:
+                api_dict = {
+                    'endpoint': getattr(api, 'endpoint', '/api/endpoint'),
+                    'method': getattr(api, 'method', 'GET'),
+                    'api_type': 'unknown'
+                }
+
+        # Validate provider
+        try:
+            provider = LLMProvider(llm_provider.lower())
+        except ValueError:
+            provider = LLMProvider.GROQ
+
+        # Check if provider has API key configured
+        try:
+            validate_provider_config(provider)
+        except HTTPException:
+            print(f"⚠️ [BACKGROUND] API key not configured for {provider.value}, skipping AI insights", flush=True)
+            return
+
+        # Initialize AnalyzerAgent
+        from app.agents.load_test.sub_agents.analyzer_agent import AnalyzerAgent
+
+        if provider == LLMProvider.GROQ:
+            analyzer = AnalyzerAgent(
+                provider=provider,
+                groq_api_key=settings.GROQ_API_KEY,
+                groq_model=settings.GROQ_MODEL
+            )
+        elif provider == LLMProvider.OPENAI:
+            analyzer = AnalyzerAgent(
+                provider=provider,
+                openai_api_key=settings.OPENAI_API_KEY,
+                openai_model=settings.OPENAI_MODEL
+            )
+        else:  # ANTHROPIC
+            analyzer = AnalyzerAgent(
+                provider=provider,
+                anthropic_api_key=settings.ANTHROPIC_API_KEY,
+                anthropic_model=settings.ANTHROPIC_MODEL
+            )
+
+        # Generate analysis
+        analysis = analyzer.analyze_and_suggest(
+            metrics=metrics_dict,
+            test_config=config_dict,
+            api_details=api_dict
+        )
+
+        # Cache the result
+        cache_key = f"{test_id}_{llm_provider}"
+        ai_analysis_cache[cache_key] = analysis
+
+        print(f"✅ [BACKGROUND] AI insights generated and cached for {test_id} (score: {analysis.performance_score}/100)", flush=True)
+
+        # Regenerate report with AI insights
+        if regenerate_report:
+            print(f"📊 [BACKGROUND] Regenerating report with AI insights...", flush=True)
+
+            # Check if this is a sequential test or single test
+            if test_id.startswith('seq_'):
+                # Sequential test - get api_results from sequential_test_manager
+                from app.services.sequential_test_manager import sequential_test_manager
+                test_info = sequential_test_manager.get_sequential_test_status(test_id)
+                if test_info and test_info.get('api_results'):
+                    duration = (datetime.now() - test_info['start_time']).total_seconds()
+                    report_filename = load_test_report_generator.generate_sequential_report(
+                        sequential_test_id=test_id,
+                        api_results=test_info['api_results'],
+                        total_duration=duration,
+                        llm_provider=llm_provider
+                    )
+                    print(f"✅ [BACKGROUND] Sequential report regenerated with AI insights: {report_filename}", flush=True)
+            else:
+                # Single test - get data from active_tests
+                if test_id in active_tests:
+                    test_info = active_tests[test_id]
+                    api_obj = test_info.get('api')
+                    config_obj = test_info.get('config')
+                    start_time = test_info.get('start_time')
+
+                    if api_obj and config_obj:
+                        duration = (datetime.now() - start_time).total_seconds()
+                        report_filename = load_test_report_generator.generate_manual_report(
+                            test_id=test_id,
+                            api=api_obj,
+                            config=config_obj,
+                            metrics=metrics,
+                            duration=duration,
+                            llm_provider=llm_provider
+                        )
+                        print(f"✅ [BACKGROUND] Manual report regenerated with AI insights: {report_filename}", flush=True)
+
+    except Exception as e:
+        print(f"❌ [BACKGROUND] Failed to generate AI insights: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+
+
 async def stream_metrics_task(test_id: str, session_id: str):
     """Background task to stream metrics via SSE."""
     try:
@@ -766,15 +899,38 @@ async def stream_metrics_task(test_id: str, session_id: str):
 
                 if api and config and final_metrics:
                     duration = (datetime.now() - start_time).total_seconds()
-                    print(f"📊 [STREAM] Calling generate_manual_report...", flush=True)
+                    # Get LLM provider from session or default to groq
+                    llm_provider_str = test_info.get("llm_provider", "groq")
+
+                    print(f"📊 [STREAM] Calling generate_manual_report with provider: {llm_provider_str}...", flush=True)
                     report_filename = load_test_report_generator.generate_manual_report(
                         test_id,
                         api,
                         config,
                         final_metrics,
-                        duration
+                        duration,
+                        llm_provider_str
                     )
                     print(f"📄 Manual test report generated: {report_filename}", flush=True)
+
+                    # Auto-generate AI insights in background
+                    try:
+                        print(f"🤖 [STREAM] Auto-generating AI insights for test: {test_id}", flush=True)
+
+                        # Generate insights asynchronously (don't block the stream)
+                        asyncio.create_task(
+                            generate_ai_insights_background(
+                                test_id=test_id,
+                                llm_provider=llm_provider_str,
+                                metrics=final_metrics,
+                                config=config,
+                                api=api,
+                                regenerate_report=True
+                            )
+                        )
+                        print(f"✅ [STREAM] AI insights generation started in background", flush=True)
+                    except Exception as e:
+                        print(f"⚠️ Failed to start AI insights generation: {e}", flush=True)
                 else:
                     print(f"⚠️ [STREAM] Cannot generate report - missing data: api={api is not None}, config={config is not None}, metrics={final_metrics is not None}", flush=True)
             except Exception as e:
@@ -817,8 +973,15 @@ async def start_sequential_test(
     else:
         apis = uploaded_configs[request.upload_id]
 
-    # Filter selected APIs (maintain Excel order)
-    selected_apis = [api for api in apis if api.name in request.selected_api_names]
+    # Use user-edited configs if provided, otherwise fall back to uploaded Excel configs
+    if request.selected_apis_config:
+        # User edited configs — use directly (already ordered by frontend)
+        selected_apis = request.selected_apis_config
+        logger.info(f"✓ Using user-edited API configs for {len(selected_apis)} APIs")
+    else:
+        # Filter selected APIs from uploaded Excel (maintain Excel row order)
+        selected_apis = [api for api in apis if api.name in request.selected_api_names]
+        logger.info(f"✓ Using Excel configs for {len(selected_apis)} APIs")
 
     if not selected_apis:
         raise HTTPException(status_code=404, detail="No matching APIs found")
@@ -845,7 +1008,8 @@ async def start_sequential_test(
     success = await sequential_test_manager.start_sequential_test(
         sequential_test_id,
         selected_apis,
-        request.session_id
+        request.session_id,
+        request.llm_provider or "groq"  # Pass LLM provider for AI insights
     )
 
     if not success:
@@ -1583,17 +1747,28 @@ async def analyze_with_all_agents(
 
 
 @router.get("/analysis/{test_id}")
-async def get_test_analysis(test_id: str, llm_provider: str = "groq"):
+async def get_test_analysis(test_id: str, llm_provider: str = "groq", force_regenerate: bool = False):
     """
     Get AI-powered analysis and suggestions for a completed load test.
 
     Args:
         test_id: Load test ID (can be single test or sequential test ID)
         llm_provider: AI provider (groq, openai, anthropic)
+        force_regenerate: If True, bypass cache and regenerate analysis
 
     Returns:
         AI analysis with test and API suggestions
     """
+    # Handle "undefined" from frontend - treat as default "groq"
+    if llm_provider == "undefined" or not llm_provider:
+        llm_provider = "groq"
+
+    # Check cache first (unless force_regenerate is True)
+    cache_key = f"{test_id}_{llm_provider}"
+    if not force_regenerate and cache_key in ai_analysis_cache:
+        logger.info(f"✅ Returning cached AI analysis for test: {test_id} (provider: {llm_provider})")
+        return ai_analysis_cache[cache_key]
+
     logger.info(f"🤖 Generating AI analysis for test: {test_id}")
 
     # Try to get metrics from active_tests or locust_manager cache
@@ -1858,6 +2033,11 @@ async def get_test_analysis(test_id: str, llm_provider: str = "groq"):
 
             logger.info(f"   ✅ Generated rule-based analysis with score: {score}/100")
 
+        # Cache the analysis result
+        cache_key = f"{test_id}_{llm_provider}"
+        ai_analysis_cache[cache_key] = analysis
+        logger.info(f"   💾 Cached AI analysis for future requests (key: {cache_key})")
+
         # Convert to dict for JSON response
         return analysis.dict()
 
@@ -1866,3 +2046,58 @@ async def get_test_analysis(test_id: str, llm_provider: str = "groq"):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Analysis generation failed: {str(e)}")
+
+
+@router.delete("/analysis/cache/{test_id}")
+async def clear_analysis_cache(test_id: str, llm_provider: Optional[str] = None):
+    """
+    Clear cached AI analysis for a specific test.
+
+    Args:
+        test_id: Load test ID
+        llm_provider: Optional specific provider to clear. If not provided, clears all providers.
+
+    Returns:
+        Success message
+    """
+    cleared_count = 0
+
+    if llm_provider:
+        # Clear specific provider cache
+        cache_key = f"{test_id}_{llm_provider}"
+        if cache_key in ai_analysis_cache:
+            del ai_analysis_cache[cache_key]
+            cleared_count = 1
+            logger.info(f"🗑️ Cleared AI analysis cache for test: {test_id} (provider: {llm_provider})")
+    else:
+        # Clear all provider caches for this test
+        keys_to_delete = [key for key in ai_analysis_cache.keys() if key.startswith(f"{test_id}_")]
+        for key in keys_to_delete:
+            del ai_analysis_cache[key]
+            cleared_count += 1
+        logger.info(f"🗑️ Cleared {cleared_count} AI analysis cache entries for test: {test_id}")
+
+    return {
+        "success": True,
+        "message": f"Cleared {cleared_count} cache entries for test {test_id}",
+        "cleared_count": cleared_count
+    }
+
+
+@router.delete("/analysis/cache")
+async def clear_all_analysis_cache():
+    """
+    Clear all cached AI analysis results.
+
+    Returns:
+        Success message with count of cleared entries
+    """
+    cleared_count = len(ai_analysis_cache)
+    ai_analysis_cache.clear()
+    logger.info(f"🗑️ Cleared all AI analysis cache ({cleared_count} entries)")
+
+    return {
+        "success": True,
+        "message": f"Cleared all AI analysis cache ({cleared_count} entries)",
+        "cleared_count": cleared_count
+    }
