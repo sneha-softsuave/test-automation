@@ -1112,18 +1112,27 @@ class RecorderAgent(BaseAgent):
                 primary_err = _e
                 logger.warning(f"assert_visible primary selector failed ({selector_expr!r}): {_e}")
 
-            # Fallback 1: extract quoted text from selector and search by visible text
-            _txt_match = re.search(r"['\"]([^'\"]{2,})['\"]", selector_expr)
-            if _txt_match:
-                _txt = _txt_match.group(1)
-                _txt = re.sub(r"^(dialog|button|heading|modal|popup|alert)\s*", "", _txt, flags=re.IGNORECASE).strip()
-                if _txt:
-                    try:
-                        expect(page.get_by_text(_txt, exact=False).first).to_be_visible(timeout=timeout)
-                        logger.info(f"assert_visible passed via text fallback: {_txt!r}")
-                        return
-                    except Exception:
-                        pass
+            # Fallback 1: extract meaningful name from selector and search by visible text
+            # Priority: name=/label= parameter (e.g. get_by_role('dialog', name='Create Candidate'))
+            # then all quoted strings, skipping Playwright API role keywords
+            _txt = None
+            _name_match = re.search(r"(?:name|label)=['\"](.+?)['\"]", selector_expr)
+            if _name_match:
+                _txt = _name_match.group(1)
+            else:
+                _api_keywords = {
+                    "dialog", "button", "heading", "modal", "popup", "alert",
+                    "alertdialog", "checkbox", "radio", "link", "text",
+                }
+                _all_quoted = re.findall(r"['\"]([^'\"]{2,})['\"]", selector_expr)
+                _txt = next((t for t in reversed(_all_quoted) if t.lower() not in _api_keywords), None)
+            if _txt:
+                try:
+                    expect(page.get_by_text(_txt, exact=False).first).to_be_visible(timeout=timeout)
+                    logger.info(f"assert_visible passed via text fallback: {_txt!r}")
+                    return
+                except Exception:
+                    pass
 
             # Fallback 2: if selector/instruction mentions modal/dialog/popup, check any open dialog
             _sel_lower = selector_expr.lower()
