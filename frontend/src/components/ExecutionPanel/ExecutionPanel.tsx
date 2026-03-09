@@ -148,7 +148,7 @@ export const ExecutionPanel = () => {
             llmProvider: llmProvider,
             model: LLM_OPTIONS[llmProvider].model,
             headless: headless,
-            keepBrowserOpen: !headless,
+            keepBrowserOpen: keepBrowserOpenAgent,
             timeout,
             maxRetries,
           }
@@ -160,6 +160,7 @@ export const ExecutionPanel = () => {
           sessionId,
           {
             headless: headless,
+            keepBrowserOpen: keepBrowserOpenAgent,
             timeout,
             maxRetries,
           }

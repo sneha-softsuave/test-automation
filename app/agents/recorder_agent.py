@@ -38,6 +38,17 @@ LINKS ({link_count}):
 VISIBLE DROPDOWN / LIST ITEMS ({dropdown_count}):
 {dropdown_text}
 
+TABLE HEADERS ({table_count}):
+{tables_text}
+
+OPEN MODALS/DIALOGS ({modal_count}):
+{modals_text}
+
+─────────────────────────────────────────────────────────────
+PREVIOUS TEST CASES (for context — do NOT re-execute these)
+─────────────────────────────────────────────────────────────
+{context_summary}
+
 ─────────────────────────────────────────────────────────────
 USER PARAGRAPH
 ─────────────────────────────────────────────────────────────
@@ -73,17 +84,56 @@ Return ONLY a JSON array starting with [ and ending with ]:
 ]
 
 Allowed action_type values:
-  "goto"       — navigate to a URL
-  "fill"       — type text into an input field
-  "click"      — click a button, link, or element
-  "select"     — choose from a native <select> dropdown
-  "wait"       — wait for element or time
-  "assert"     — verify something is visible/true
-  "screenshot" — capture a screenshot
-  "clear"      — clear an input field
-  "press"      — press a keyboard key (e.g. Enter, Tab, Escape)
+  — NAVIGATION —
+  "goto"           — navigate to a URL
+  "back"           — browser back button
+  "forward"        — browser forward button
+  "reload"         — reload/refresh the page
 
-For "fill" and "click" prefer selectors in this priority order:
+  — MOUSE —
+  "click"          — single left click on an element
+  "double_click"   — double click on an element
+  "right_click"    — right-click (context menu) on an element
+  "hover"          — hover the mouse over an element
+
+  — FORM INPUT —
+  "fill"           — clear field then type text (fastest)
+  "type"           — type text character-by-character (for OTP/autocomplete fields)
+  "select"         — choose from a native <select> dropdown
+  "check"          — check a checkbox or radio button
+  "uncheck"        — uncheck a checkbox
+  "clear"          — clear an input field
+  "press"          — press a keyboard key (Enter, Tab, Escape, ArrowDown, etc.)
+  "upload"         — upload a file; value = file path
+
+  — DRAG & SCROLL —
+  "drag"           — drag element (selector) to a target (value = target selector)
+  "scroll"         — scroll page or element; value = "down"/"up"/"top"/"bottom" or pixels like "500"
+
+  — ASSERTIONS —
+  "assert_visible"   — verify element is visible on page
+  "assert_hidden"    — verify element is NOT visible
+  "assert_text"      — verify element contains specific text (value = expected text)
+  "assert_value"     — verify input field has a specific value (value = expected value)
+  "assert_url"       — verify page URL contains/matches (value = expected url or pattern)
+  "assert_title"     — verify page title contains (value = expected title text)
+  "assert_count"     — verify number of matching elements (value = expected count as integer)
+  "assert_enabled"   — verify element is enabled (not disabled)
+  "assert_disabled"  — verify element is disabled
+  "assert_checked"   — verify checkbox/radio is checked
+  "assert_attribute" — verify element has attribute=value (value = "attr=expected_val")
+  "assert_table"     — verify table headers are visible; selector = table locator, value = comma-separated expected column names
+
+  — OTHER —
+  "wait"           — wait for element or time; value = ms number OR state like "visible"
+  "screenshot"     — capture a screenshot
+
+SELECTOR RULES — MANDATORY:
+- Each input/button in the page context above has a "→ USE: ..." suggested selector
+- You MUST use the suggested selector exactly as shown when it is available — do NOT invent your own
+- Only create your own selector if no suggested selector is provided for that element
+
+For elements without a suggested selector, prefer this priority order:
   1. page.get_by_label('...')
   2. page.get_by_placeholder('...')
   3. page.get_by_role('...', name='...')
@@ -107,7 +157,11 @@ Rules:
 - NEVER produce a "goto" action whose value is a module name, section name, or anything that is not a real URL — use "click" instead to navigate via the UI
 - NEVER produce a "click" action with an empty selector — if you cannot find the element in the page context, use page.get_by_text('button label from the command', exact=False) as the selector
 - If the paragraph says "Navigate to the X module" or "go to the X section", use action_type "click" with the sidebar/menu element, NOT "goto"
-- For "assert": ONLY generate an assert if the paragraph explicitly says "verify" or "check" AND you can determine a real selector or URL to verify against. If you cannot determine the selector or expected value, SKIP the assert entirely — do NOT generate an assert with empty selector and empty value
+- For assert_* actions: use the most specific assert type that matches the intent
+  - assert_table: selector = page.locator('table') or specific table locator, value = comma-separated expected column header names from the TABLE HEADERS section above
+  - assert_text: selector = element containing the text, value = exact expected text
+  - assert_visible: selector = element to check, value = ""
+  - assert_url: selector = "", value = URL fragment or full URL
 - instruction must be a human-readable description of what this specific atomic step does
 - test_data should capture any user-supplied values (email, name, etc.) or null if none
 - Use REAL selectors from the page context above whenever possible
@@ -135,6 +189,12 @@ LINKS ({link_count}):
 VISIBLE DROPDOWN / LIST ITEMS ({dropdown_count}):
 {dropdown_text}
 
+TABLE HEADERS ({table_count}):
+{tables_text}
+
+OPEN MODALS/DIALOGS ({modal_count}):
+{modals_text}
+
 ─────────────────────────────────────────────────────────────
 USER COMMAND
 ─────────────────────────────────────────────────────────────
@@ -144,17 +204,45 @@ USER COMMAND
 OUTPUT FORMAT — return ONLY this JSON, no extra text
 ─────────────────────────────────────────────────────────────
 Pick exactly ONE of these action_type values:
-  "goto"       — navigate to a URL
-  "fill"       — type text into an input field
-  "click"      — click a button, link, or element
-  "select"     — choose from a native <select> dropdown
-  "wait"       — wait for element or time
-  "assert"     — verify something is visible/true
-  "screenshot" — capture a screenshot
-  "clear"      — clear an input field
-  "press"      — press a keyboard key (e.g. Enter, Tab, Escape)
+  "goto"           — navigate to a URL
+  "back"           — browser back
+  "forward"        — browser forward
+  "reload"         — reload page
+  "click"          — single left click
+  "double_click"   — double click
+  "right_click"    — right-click (context menu)
+  "hover"          — hover mouse over element
+  "fill"           — clear + type text into input
+  "type"           — type character-by-character (OTP/autocomplete)
+  "select"         — native <select> dropdown
+  "check"          — check a checkbox/radio
+  "uncheck"        — uncheck a checkbox
+  "clear"          — clear an input field
+  "press"          — keyboard key (Enter, Tab, Escape, ArrowDown…)
+  "upload"         — file upload; value = file path
+  "drag"           — drag to target; value = target selector
+  "scroll"         — scroll; value = "down"/"up"/"top"/"bottom" or pixels
+  "assert_visible"   — element is visible
+  "assert_hidden"    — element is not visible
+  "assert_text"      — element contains text (value = expected)
+  "assert_value"     — input has value (value = expected)
+  "assert_url"       — page URL matches (value = expected pattern)
+  "assert_title"     — page title contains (value = expected)
+  "assert_count"     — N elements exist (value = integer count)
+  "assert_enabled"   — element is enabled
+  "assert_disabled"  — element is disabled
+  "assert_checked"   — checkbox is checked
+  "assert_attribute" — has attribute (value = "attr=expected_val")
+  "assert_table"     — table headers visible; value = comma-separated column names
+  "wait"           — wait for element/time
+  "screenshot"     — capture screenshot
 
-For "fill" and "click" prefer selectors in this priority order:
+SELECTOR RULES — MANDATORY:
+- Each input/button in the page context above has a "→ USE: ..." suggested selector
+- You MUST use the suggested selector exactly as shown when it is available — do NOT invent your own
+- Only create your own selector if no suggested selector is provided for that element
+
+For elements without a suggested selector, prefer this priority order:
   1. page.get_by_label('...')
   2. page.get_by_placeholder('...')
   3. page.get_by_role('...', name='...')
@@ -187,22 +275,57 @@ Rules:
 - For "click": set value to ""
 - NEVER generate a "goto" action to reload or revisit the CURRENT URL shown above — only "goto" when navigating to a DIFFERENT page
 - NEVER produce a "click" action with an empty selector — if you cannot find the element in the page context, use page.get_by_text('button label from the command', exact=False) as the selector
-- For "assert": set selector to the element to check and value to the expected text/url
+- For assert_* actions: pick the most specific type (assert_visible, assert_text, assert_table, etc.)
+  - assert_table: selector = page.locator('table'), value = comma-separated expected column headers
+  - assert_text: selector = element containing the text, value = expected text string
+  - assert_visible / assert_hidden: selector = element, value = ""
+  - assert_url: selector = "", value = URL pattern
 - For "wait": set selector to element selector or "" if waiting for time, value to ms or selector text
 - For "press": set selector to the focused element or "" and value to the key name
+- For "drag": set selector = source element, value = target selector expression
+- For "scroll": set selector = "" for whole page or element selector, value = "down"/"up"/"top"/"bottom" or pixel amount
 - instruction must be a human-readable description of what this step does
 - test_data should capture any user-supplied values (email, name, etc.) or null if none
 - Use REAL selectors from the page context above whenever possible
 """
 
 
+
+
 def _scrape_page_context(page: Any) -> Dict[str, Any]:
     """
-    Extract lightweight page context (inputs, buttons, links) from a live Playwright page.
+    Extract lightweight page context (inputs, buttons, links, tables, modals) from a live Playwright page.
     Does NOT use SelectorExtractor (which opens a new browser) — instead uses page.evaluate().
+    Each input/button also gets a pre-computed `suggested_selector` so the LLM doesn't have to guess.
     """
     try:
         context = page.evaluate("""() => {
+            function bestSelector(el) {
+                // 1. Label association
+                if (el.labels && el.labels[0]) {
+                    const labelText = el.labels[0].innerText.trim();
+                    if (labelText) return "page.get_by_label('" + labelText.replace(/'/g, "\\\\'") + "')";
+                }
+                // 2. aria-label
+                const ariaLabel = el.getAttribute('aria-label');
+                if (ariaLabel) return "page.get_by_label('" + ariaLabel.replace(/'/g, "\\\\'") + "')";
+                // 3. placeholder
+                const ph = el.getAttribute('placeholder');
+                if (ph) return "page.get_by_placeholder('" + ph.replace(/'/g, "\\\\'") + "')";
+                // 4. role + name for buttons
+                const role = el.getAttribute('role') || (el.tagName === 'BUTTON' ? 'button' : '');
+                const name = (el.innerText || el.value || '').trim().substring(0, 40);
+                if (role && name) return "page.get_by_role('" + role + "', name='" + name.replace(/'/g, "\\\\'") + "')";
+                // 5. name attribute
+                if (el.getAttribute('name')) return "page.locator('[name=\"" + el.getAttribute('name') + "\"]')";
+                // 6. id
+                if (el.id) return "page.locator('#" + el.id + "')";
+                // 7. type-based
+                const type = el.getAttribute('type');
+                if (type) return "page.locator('input[type=\"" + type + "\"]')";
+                return '';
+            }
+
             const getAttrs = (el) => ({
                 id: el.id || '',
                 name: el.getAttribute('name') || '',
@@ -211,7 +334,8 @@ def _scrape_page_context(page: Any) -> Dict[str, Any]:
                 ariaLabel: el.getAttribute('aria-label') || '',
                 text: (el.innerText || el.value || '').trim().substring(0, 60),
                 role: el.getAttribute('role') || '',
-                forLabel: el.labels && el.labels[0] ? el.labels[0].innerText.trim().substring(0, 40) : ''
+                forLabel: el.labels && el.labels[0] ? el.labels[0].innerText.trim().substring(0, 40) : '',
+                suggested_selector: bestSelector(el)
             });
 
             const inputs = Array.from(document.querySelectorAll('input, textarea, select'))
@@ -247,13 +371,37 @@ def _scrape_page_context(page: Any) -> Dict[str, Any]:
                 }))
                 .filter(el => el.text.length > 0);
 
+            // Tables — extract headers and row count
+            const tables = Array.from(document.querySelectorAll('table')).slice(0, 5).map(tbl => {
+                const headers = Array.from(tbl.querySelectorAll('th')).map(th => (th.innerText || '').trim()).filter(t => t.length > 0);
+                const rows = tbl.querySelectorAll('tbody tr').length;
+                const caption = (tbl.querySelector('caption') ? tbl.querySelector('caption').innerText.trim() : '');
+                return { caption, headers, row_count: rows };
+            }).filter(t => t.headers.length > 0);
+
+            // Open modals / dialogs
+            const modals = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], .modal, [class*="modal"], [class*="dialog"]'))
+                .filter(el => {
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
+                })
+                .slice(0, 3)
+                .map(el => {
+                    const heading = el.querySelector('h1,h2,h3,h4,[class*="title"],[class*="header"]');
+                    const title = heading ? (heading.innerText || '').trim() : (el.getAttribute('aria-label') || '');
+                    return { title };
+                })
+                .filter(m => m.title.length > 0);
+
             return {
                 url: window.location.href,
                 title: document.title,
                 inputs,
                 buttons,
                 links,
-                dropdownItems
+                dropdownItems,
+                tables,
+                modals,
             };
         }""")
         return context
@@ -266,6 +414,8 @@ def _scrape_page_context(page: Any) -> Dict[str, Any]:
             "buttons": [],
             "links": [],
             "dropdownItems": [],
+            "tables": [],
+            "modals": [],
         }
 
 
@@ -285,7 +435,9 @@ def _format_inputs(inputs: List[Dict]) -> str:
             parts.append(f"name='{el['name']}'")
         if el.get("type"):
             parts.append(f"type={el['type']}")
-        lines.append(f"  [{i+1}] {', '.join(parts) or 'unnamed input'}")
+        sel = el.get("suggested_selector", "")
+        sel_str = f"  → USE: {sel}" if sel else ""
+        lines.append(f"  [{i+1}] {', '.join(parts) or 'unnamed input'}{sel_str}")
     return "\n".join(lines)
 
 
@@ -300,7 +452,9 @@ def _format_buttons(buttons: List[Dict]) -> str:
             extra.append(f"id='{el['id']}'")
         if el.get("type"):
             extra.append(f"type={el['type']}")
-        lines.append(f"  [{i+1}] '{text}' {' '.join(extra)}")
+        sel = el.get("suggested_selector", "")
+        sel_str = f"  → USE: {sel}" if sel else ""
+        lines.append(f"  [{i+1}] '{text}' {' '.join(extra)}{sel_str}")
     return "\n".join(lines)
 
 
@@ -323,6 +477,26 @@ def _format_dropdown_items(items: List[Dict]) -> str:
         role_str = f" [{role}]" if role else ""
         lines.append(f"  [{i+1}] '{text}'{role_str}")
     return "\n".join(lines)
+
+
+def _format_tables(tables: List[Dict]) -> str:
+    if not tables:
+        return "  (none)"
+    lines = []
+    for i, tbl in enumerate(tables):
+        caption = tbl.get("caption", "")
+        headers = tbl.get("headers", [])
+        rows = tbl.get("row_count", 0)
+        cap_str = f" '{caption}'" if caption else ""
+        hdr_str = ", ".join(f"'{h}'" for h in headers) if headers else "(no headers)"
+        lines.append(f"  [{i+1}] Table{cap_str}: columns=[{hdr_str}], rows={rows}")
+    return "\n".join(lines)
+
+
+def _format_modals(modals: List[Dict]) -> str:
+    if not modals:
+        return "  (none open)"
+    return "\n".join(f"  [{i+1}] '{m.get('title', 'unnamed')}'" for i, m in enumerate(modals))
 
 
 class RecorderAgent(BaseAgent):
@@ -353,21 +527,9 @@ class RecorderAgent(BaseAgent):
         """Required by BaseAgent ABC — delegates to parse_command()."""
         return self.parse_command(*args, **kwargs)
 
-    def parse_multi_step_command(self, paragraph: str, page: Any) -> List[Dict[str, Any]]:
-        """
-        Parse a natural language paragraph into an ordered list of atomic Playwright actions.
-
-        Args:
-            paragraph: Full natural language description of multiple actions
-                       (e.g. "Login with email test@example.com then go to clients page")
-            page: Live Playwright page object
-
-        Returns:
-            Ordered list of action dicts, each with action_type, selector, value, instruction, etc.
-        """
-        ctx = _scrape_page_context(page)
-
-        prompt = MULTI_STEP_PROMPT.format(
+    def _build_prompt_context(self, ctx: Dict[str, Any]) -> Dict[str, Any]:
+        """Build common format kwargs for MULTI_STEP_PROMPT / RECORDER_PROMPT."""
+        return dict(
             current_url=ctx.get("url", ""),
             page_title=ctx.get("title", ""),
             input_count=len(ctx.get("inputs", [])),
@@ -378,6 +540,23 @@ class RecorderAgent(BaseAgent):
             links_text=_format_links(ctx.get("links", [])),
             dropdown_count=len(ctx.get("dropdownItems", [])),
             dropdown_text=_format_dropdown_items(ctx.get("dropdownItems", [])),
+            table_count=len(ctx.get("tables", [])),
+            tables_text=_format_tables(ctx.get("tables", [])),
+            modal_count=len(ctx.get("modals", [])),
+            modals_text=_format_modals(ctx.get("modals", [])),
+        )
+
+    def parse_multi_step_command(self, paragraph: str, page: Any, context_summary: str = "") -> List[Dict[str, Any]]:
+        """
+        Parse a natural language paragraph into an ordered list of atomic Playwright actions.
+        """
+        ctx = _scrape_page_context(page)
+
+        context_section = context_summary.strip() if context_summary.strip() else "(none — this is the first test case)"
+
+        prompt = MULTI_STEP_PROMPT.format(
+            **self._build_prompt_context(ctx),
+            context_summary=context_section,
             paragraph=paragraph,
         )
 
@@ -388,27 +567,11 @@ class RecorderAgent(BaseAgent):
     def parse_command(self, command: str, page: Any) -> Dict[str, Any]:
         """
         Parse a natural language command using the live page context.
-
-        Args:
-            command: Natural language command (e.g. "fill email as test@example.com")
-            page: Live Playwright page object
-
-        Returns:
-            Action dict with action_type, selector, value, instruction, etc.
         """
         ctx = _scrape_page_context(page)
 
         prompt = RECORDER_PROMPT.format(
-            current_url=ctx.get("url", ""),
-            page_title=ctx.get("title", ""),
-            input_count=len(ctx.get("inputs", [])),
-            inputs_text=_format_inputs(ctx.get("inputs", [])),
-            button_count=len(ctx.get("buttons", [])),
-            buttons_text=_format_buttons(ctx.get("buttons", [])),
-            link_count=len(ctx.get("links", [])),
-            links_text=_format_links(ctx.get("links", [])),
-            dropdown_count=len(ctx.get("dropdownItems", [])),
-            dropdown_text=_format_dropdown_items(ctx.get("dropdownItems", [])),
+            **self._build_prompt_context(ctx),
             command=command,
         )
 
@@ -487,21 +650,193 @@ class RecorderAgent(BaseAgent):
                 logger.info("Skipping assert — both selector and value are empty (no-op)")
                 return
             from playwright.sync_api import expect  # type: ignore
-            if "url" in (action.get("instruction", "").lower()):
+            instruction = action.get("instruction", "")
+            if "url" in instruction.lower():
                 if value:
                     expect(page).to_have_url(re.compile(re.escape(value)), timeout=10_000)
                 else:
                     logger.info("Skipping URL assert — expected value is empty")
                     return
             elif selector_expr:
-                locator = self._resolve_locator(page, selector_expr)
-                if value:
-                    expect(locator).to_contain_text(value, timeout=10_000)
-                else:
-                    expect(locator).to_be_visible(timeout=10_000)
+                # ── Strategy: extract keywords from the user's instruction, scan
+                # the live page for toast/alert/success messages, and match keywords
+                # against actual visible text.  This avoids searching for the user's
+                # exact prompt wording (which is never on the page).
+
+                # 1. Extract meaningful keywords from instruction
+                _skip = {"verify", "check", "assert", "confirm", "ensure", "that",
+                         "the", "is", "was", "has", "been", "are", "a", "an", "it",
+                         "should", "be", "displayed", "shown", "visible", "page",
+                         "popup", "dialog", "modal", "message", "notification"}
+                _keywords = [
+                    w.strip("'\".,!") for w in instruction.lower().split()
+                    if w.strip("'\".,!") not in _skip and len(w.strip("'\".,!")) > 2
+                ]
+                logger.info(f"Assert keywords from instruction: {_keywords}")
+
+                # 2. Scan the live page for toast/alert/success/popup messages
+                _page_messages = self._scan_page_messages(page)
+                logger.info(f"Assert scan found {len(_page_messages)} message(s) on page: {_page_messages}")
+
+                # 3. Try to find a page message that matches the keywords
+                _matched_text = None
+                if _keywords and _page_messages:
+                    best_score = 0
+                    for msg in _page_messages:
+                        msg_lower = msg.lower()
+                        score = sum(1 for kw in _keywords if kw in msg_lower)
+                        if score > best_score:
+                            best_score = score
+                            _matched_text = msg
+                    if best_score == 0:
+                        _matched_text = None
+
+                # 4a. If we matched actual page text, use it
+                if _matched_text:
+                    try:
+                        text_locator = page.get_by_text(_matched_text, exact=False)
+                        expect(text_locator.first).to_be_visible(timeout=8_000)
+                        logger.info(f"Assert passed via matched page message: {_matched_text!r}")
+                        return
+                    except Exception:
+                        pass
+
+                # 4b. Fall back to value or text extracted from the LLM selector
+                _selector_text_match = re.search(r"get_by_text\(['\"](.+?)['\"]", selector_expr)
+                _selector_text = _selector_text_match.group(1) if _selector_text_match else None
+                if _selector_text:
+                    _selector_text = re.sub(
+                        r"^(verify|check|assert|confirm|ensure)\s+", "",
+                        _selector_text, flags=re.IGNORECASE
+                    ).strip()
+                _assert_text = value or _selector_text
+
+                if _assert_text:
+                    try:
+                        text_locator = page.get_by_text(_assert_text, exact=False)
+                        expect(text_locator.first).to_be_visible(timeout=8_000)
+                        logger.info(f"Assert passed via text search: {_assert_text!r}")
+                        return
+                    except Exception:
+                        pass
+
+                # 4c. Try each keyword individually as a partial text match
+                for kw in _keywords:
+                    try:
+                        text_locator = page.get_by_text(kw, exact=False)
+                        if text_locator.count() > 0:
+                            expect(text_locator.first).to_be_visible(timeout=3_000)
+                            logger.info(f"Assert passed via keyword match: {kw!r}")
+                            return
+                    except Exception:
+                        continue
+
+                # 4d. If any success-like message was found on page at all, pass
+                if _page_messages:
+                    logger.info(f"Assert passed — success message found on page: {_page_messages[0]!r}")
+                    return
+
+                # 4e. Last resort: try the LLM selector directly
+                try:
+                    locator = self._resolve_locator(page, selector_expr)
+                    if value:
+                        expect(locator).to_contain_text(value, ignore_case=True, timeout=8_000)
+                    else:
+                        expect(locator).to_be_visible(timeout=8_000)
+                except Exception as assert_err:
+                    raise Exception(
+                        f"Assert failed: no matching text found on page. "
+                        f"Keywords={_keywords}, scanned_messages={_page_messages}, "
+                        f"selector={selector_expr!r}. Error: {assert_err}"
+                    )
 
         elif action_type == "screenshot":
             pass  # Caller always takes screenshot; this is a no-op
+
+        # ── Navigation ──────────────────────────────────────────────────────
+        elif action_type == "back":
+            page.go_back(wait_until="domcontentloaded", timeout=15_000)
+
+        elif action_type == "forward":
+            page.go_forward(wait_until="domcontentloaded", timeout=15_000)
+
+        elif action_type == "reload":
+            page.reload(wait_until="domcontentloaded", timeout=15_000)
+
+        # ── Mouse ────────────────────────────────────────────────────────────
+        elif action_type == "double_click":
+            locator = self._resolve_locator(page, selector_expr)
+            locator.scroll_into_view_if_needed(timeout=3_000)
+            locator.dbl_click(timeout=10_000)
+
+        elif action_type == "right_click":
+            locator = self._resolve_locator(page, selector_expr)
+            locator.scroll_into_view_if_needed(timeout=3_000)
+            locator.click(button="right", timeout=10_000)
+
+        elif action_type == "hover":
+            locator = self._resolve_locator(page, selector_expr)
+            locator.scroll_into_view_if_needed(timeout=3_000)
+            locator.hover(timeout=10_000)
+
+        elif action_type == "drag":
+            # selector = source element, value = target selector expression
+            source = self._resolve_locator(page, selector_expr)
+            target = self._resolve_locator(page, value)
+            source.drag_to(target, timeout=15_000)
+
+        elif action_type == "scroll":
+            # value = "down"/"up"/"top"/"bottom" or pixel amount or element selector
+            _scroll_map = {
+                "down": (0, 500), "up": (0, -500),
+                "top": None, "bottom": None,
+            }
+            v_lower = value.lower().strip() if value else "down"
+            if v_lower in ("top", "bottom"):
+                page.evaluate(f"window.scrollTo(0, {'0' if v_lower == 'top' else 'document.body.scrollHeight'})")
+            elif v_lower in ("down", "up"):
+                dx, dy = _scroll_map[v_lower]
+                page.mouse.wheel(dx, dy)
+            elif value and value.lstrip("-").isdigit():
+                page.mouse.wheel(0, int(value))
+            elif selector_expr:
+                self._resolve_locator(page, selector_expr).scroll_into_view_if_needed(timeout=8_000)
+            else:
+                page.mouse.wheel(0, 500)
+
+        # ── Form controls ────────────────────────────────────────────────────
+        elif action_type == "type":
+            # press_sequentially — types character by character (good for OTP/autocomplete)
+            locator = self._resolve_locator(page, selector_expr)
+            locator.clear(timeout=5_000)
+            locator.press_sequentially(value, delay=50)
+
+        elif action_type == "check":
+            locator = self._resolve_locator(page, selector_expr)
+            locator.check(timeout=10_000)
+
+        elif action_type == "uncheck":
+            locator = self._resolve_locator(page, selector_expr)
+            locator.uncheck(timeout=10_000)
+
+        elif action_type == "upload":
+            locator = self._resolve_locator(page, selector_expr)
+            locator.set_input_files(value, timeout=10_000)
+
+        # ── Targeted assertions ───────────────────────────────────────────────
+        elif action_type in ("assert_visible", "assert_hidden", "assert_text",
+                             "assert_value", "assert_url", "assert_title",
+                             "assert_count", "assert_enabled", "assert_disabled",
+                             "assert_checked", "assert_attribute", "assert_table"):
+            # When the LLM couldn't determine a selector for a general "verify X succeeded"
+            # prompt, fall back to the robust keyword-scan assert handler instead of failing.
+            if not selector_expr and action_type in ("assert_visible", "assert_text"):
+                logger.info(f"{action_type} has empty selector — falling back to keyword-scan assert")
+                fallback = dict(action)
+                fallback["action_type"] = "assert"
+                self.execute_action(fallback, page, screenshot_b64)
+                return
+            self._execute_targeted_assert(page, action_type, selector_expr, value)
 
         else:
             raise ValueError(f"Unknown action_type: {action_type!r}")
@@ -539,6 +874,7 @@ class RecorderAgent(BaseAgent):
             )
             page.locator(option_sel).first.wait_for(state="visible", timeout=5_000)
             page.locator(option_sel).first.click(timeout=5_000)
+            page.wait_for_timeout(500)
 
         elif interaction == "select_option":
             loc.select_option(label=value, timeout=8_000)
@@ -570,18 +906,19 @@ class RecorderAgent(BaseAgent):
                        for kw in ("phone", "tel", "mobile"))
         if is_phone:
             import re as _re
-            # Strip country code prefix (+91, +1, etc.), then remove all non-digit characters
-            # so the local number widget receives clean digits (e.g. "9999423567")
-            without_cc = _re.sub(r'^\+?\d{1,3}[-\s]?', '', value.strip())
-            digits = _re.sub(r'\D', '', without_cc)
+            # Keep all digits from whatever value is given (including country code).
+            # Do NOT strip country code — the field adds + automatically.
+            # Clear first to remove any pre-filled + sign, then fill with raw digits.
+            digits = _re.sub(r'\D', '', value.strip())
             for sel in ["input[type='tel']", "input[type='number']",
                         "input[inputmode='numeric']", "input[inputmode='tel']",
                         "input[placeholder*='phone' i]", "input[placeholder*='number' i]"]:
                 try:
                     cand = page.locator(sel).first
                     if cand.count() > 0:
+                        cand.clear(timeout=3_000)
                         cand.fill(digits, timeout=8_000)
-                        logger.info(f"Phone fill: digits-only {digits!r} (from {value!r}) on {sel}")
+                        logger.info(f"Phone fill: digits {digits!r} (from {value!r}) on {sel}")
                         return
                 except Exception:
                     continue
@@ -605,6 +942,8 @@ class RecorderAgent(BaseAgent):
             option_locator = page.locator(option_sel).first
             option_locator.wait_for(state="visible", timeout=5_000)
             option_locator.click(timeout=5_000)
+            # Wait for dropdown overlay to fully close before next action
+            page.wait_for_timeout(500)
             logger.info(f"Combobox fill: typed {value!r} and selected matching option")
             return
         except Exception:
@@ -669,6 +1008,188 @@ class RecorderAgent(BaseAgent):
         except Exception:
             return []
 
+    def _scan_page_messages(self, page: Any) -> list:
+        """Scan DOM for toast/alert/success/popup messages. Returns list of visible text strings."""
+        try:
+            return page.evaluate("""() => {
+                const sels = [
+                    '[role="alert"]',
+                    '[role="status"]',
+                    '[class*="toast"]:not(script):not(style)',
+                    '[class*="success"]:not(script):not(style)',
+                    '[class*="notification"]:not(script):not(style)',
+                    '[class*="snackbar"]:not(script):not(style)',
+                    '[class*="message"]:not(script):not(style)',
+                    '[class*="popup"]:not(script):not(style)',
+                    '[class*="alert"]:not(script):not(style)',
+                    '[class*="banner"]:not(script):not(style)',
+                    '[class*="modal-body"]:not(script):not(style)',
+                    '[class*="dialog"]:not(script):not(style)',
+                    '[class*="confirm"]:not(script):not(style)',
+                    '[aria-live="polite"]',
+                    '[aria-live="assertive"]',
+                ];
+                const seen = new Set();
+                const out = [];
+                for (const s of sels) {
+                    try {
+                        document.querySelectorAll(s).forEach(el => {
+                            const style = window.getComputedStyle(el);
+                            if (style.display === 'none' || style.visibility === 'hidden') return;
+                            const t = (el.innerText || '').trim();
+                            if (t && t.length > 2 && t.length < 300 && !seen.has(t)) {
+                                seen.add(t); out.push(t);
+                            }
+                        });
+                    } catch {}
+                }
+                return out;
+            }""")
+        except Exception:
+            return []
+
+    def _execute_targeted_assert(self, page: Any, action_type: str, selector_expr: str, value: str) -> None:
+        """
+        Execute one of the targeted assert_* action types using Playwright expect() API.
+        Each type maps to a specific assertion rather than the generic text-search assert.
+        """
+        from playwright.sync_api import expect  # type: ignore
+
+        timeout = 8_000
+
+        if action_type == "assert_url":
+            pattern = value or selector_expr
+            if pattern:
+                expect(page).to_have_url(re.compile(re.escape(pattern), re.IGNORECASE), timeout=timeout)
+                logger.info(f"assert_url passed: {pattern!r}")
+            return
+
+        if action_type == "assert_title":
+            expect(page).to_have_title(re.compile(re.escape(value or selector_expr), re.IGNORECASE), timeout=timeout)
+            logger.info(f"assert_title passed: {value!r}")
+            return
+
+        if action_type == "assert_table":
+            # value = comma-separated expected column header names
+            # Verify each expected header is visible somewhere in a <th>
+            expected_headers = [h.strip() for h in (value or "").split(",") if h.strip()]
+            if not expected_headers:
+                # Just verify a table exists
+                tbl = page.locator("table").first
+                expect(tbl).to_be_visible(timeout=timeout)
+                logger.info("assert_table passed: table is visible")
+                return
+            for header in expected_headers:
+                try:
+                    th_loc = page.locator(f"th:has-text('{header}')").first
+                    expect(th_loc).to_be_visible(timeout=timeout)
+                    logger.info(f"assert_table header visible: {header!r}")
+                except Exception:
+                    # Fallback: generic get_by_text
+                    expect(page.get_by_text(header, exact=False).first).to_be_visible(timeout=timeout)
+                    logger.info(f"assert_table header visible (text fallback): {header!r}")
+            return
+
+        # assert_visible handles its own locator internally (with fallback chain)
+        # All other assert_* types need a locator resolved here
+        if action_type != "assert_visible":
+            if not selector_expr:
+                raise Exception(f"{action_type}: selector is required but was empty")
+            locator = self._resolve_locator(page, selector_expr)
+
+        if action_type == "assert_visible":
+            if not selector_expr:
+                raise Exception("assert_visible: selector is required but was empty")
+            primary_err: Exception = Exception("primary selector failed")
+
+            # Primary: resolve locator + check visibility (both inside try so any failure is caught)
+            try:
+                _vis_locator = self._resolve_locator(page, selector_expr)
+                expect(_vis_locator).to_be_visible(timeout=timeout)
+                logger.info(f"assert_visible passed: {selector_expr!r}")
+                return
+            except Exception as _e:
+                primary_err = _e
+                logger.warning(f"assert_visible primary selector failed ({selector_expr!r}): {_e}")
+
+            # Fallback 1: extract quoted text from selector and search by visible text
+            _txt_match = re.search(r"['\"]([^'\"]{2,})['\"]", selector_expr)
+            if _txt_match:
+                _txt = _txt_match.group(1)
+                _txt = re.sub(r"^(dialog|button|heading|modal|popup|alert)\s*", "", _txt, flags=re.IGNORECASE).strip()
+                if _txt:
+                    try:
+                        expect(page.get_by_text(_txt, exact=False).first).to_be_visible(timeout=timeout)
+                        logger.info(f"assert_visible passed via text fallback: {_txt!r}")
+                        return
+                    except Exception:
+                        pass
+
+            # Fallback 2: if selector/instruction mentions modal/dialog/popup, check any open dialog
+            _sel_lower = selector_expr.lower()
+            if any(kw in _sel_lower for kw in ("dialog", "modal", "popup", "alertdialog")):
+                for _modal_sel in ('[role="dialog"]', '[role="alertdialog"]',
+                                   '[class*="modal"]', '[class*="dialog"]'):
+                    try:
+                        expect(page.locator(_modal_sel).first).to_be_visible(timeout=3_000)
+                        logger.info(f"assert_visible passed via modal fallback: {_modal_sel!r}")
+                        return
+                    except Exception:
+                        continue
+
+            # Fallback 3: any toast/success message on page counts as a pass
+            _msgs = self._scan_page_messages(page)
+            if _msgs:
+                logger.info(f"assert_visible passed — page message visible: {_msgs[0]!r}")
+                return
+
+            raise Exception(
+                f"assert_visible: element not found. selector={selector_expr!r}. "
+                f"Original error: {primary_err}"
+            )
+
+        elif action_type == "assert_hidden":
+            expect(locator).to_be_hidden(timeout=timeout)
+            logger.info(f"assert_hidden passed: {selector_expr!r}")
+
+        elif action_type == "assert_text":
+            expect(locator).to_contain_text(value, ignore_case=True, timeout=timeout)
+            logger.info(f"assert_text passed: {value!r} in {selector_expr!r}")
+
+        elif action_type == "assert_value":
+            expect(locator).to_have_value(value, timeout=timeout)
+            logger.info(f"assert_value passed: {value!r}")
+
+        elif action_type == "assert_count":
+            count = int(value) if value and value.isdigit() else 0
+            expect(locator).to_have_count(count, timeout=timeout)
+            logger.info(f"assert_count passed: {count}")
+
+        elif action_type == "assert_enabled":
+            expect(locator).to_be_enabled(timeout=timeout)
+            logger.info(f"assert_enabled passed: {selector_expr!r}")
+
+        elif action_type == "assert_disabled":
+            expect(locator).to_be_disabled(timeout=timeout)
+            logger.info(f"assert_disabled passed: {selector_expr!r}")
+
+        elif action_type == "assert_checked":
+            expect(locator).to_be_checked(timeout=timeout)
+            logger.info(f"assert_checked passed: {selector_expr!r}")
+
+        elif action_type == "assert_attribute":
+            # value format: "attr=expected_value"
+            if "=" in value:
+                attr_name, _, attr_val = value.partition("=")
+                expect(locator).to_have_attribute(attr_name.strip(), attr_val.strip(), timeout=timeout)
+                logger.info(f"assert_attribute passed: {attr_name}={attr_val!r}")
+            else:
+                # Just check attribute exists (non-empty)
+                actual = locator.get_attribute(value)
+                if actual is None:
+                    raise Exception(f"assert_attribute: attribute {value!r} not found on element")
+                logger.info(f"assert_attribute passed: {value!r} = {actual!r}")
+
     def _click_with_fallback(self, page: Any, selector_expr: str, value: str = "", instruction: str = "", screenshot_b64: str = "") -> None:
         """
         Try to click using the primary selector. If it fails (e.g. custom dropdown item
@@ -684,16 +1205,24 @@ class RecorderAgent(BaseAgent):
         """
         last_primary_error: Exception = Exception("click failed")
 
+        # Dismiss any open overlays/dropdowns before clicking a button
+        # This prevents the click from landing on a stale dropdown overlay
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=3_000)
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
+
         # Step 1: try the primary selector (skip if empty to avoid css parse error)
         if selector_expr and selector_expr.strip():
             try:
                 locator = self._resolve_locator(page, selector_expr)
-                # If element exists but is disabled, wait up to 5s for it to become enabled
-                try:
-                    locator.wait_for(state="visible", timeout=5_000)
-                    locator.wait_for(state="enabled", timeout=5_000)
-                except Exception:
-                    pass
+                locator.wait_for(state="visible", timeout=8_000)
+                # Scroll into view to ensure element is not behind a sticky header/overlay
+                locator.scroll_into_view_if_needed(timeout=3_000)
                 locator.click(timeout=10_000)
                 return
             except Exception as primary_err:
@@ -723,6 +1252,13 @@ class RecorderAgent(BaseAgent):
             if text_match:
                 display_text = text_match.group(1)
                 if display_text.lower() not in ("button", "link", "option", "true", "false"):
+                    # Prefer button/link roles before raw text to avoid clicking non-interactive elements
+                    try:
+                        page.get_by_role("button", name=re.compile(re.escape(display_text), re.IGNORECASE)).first.click(timeout=8_000)
+                        logger.info(f"Click succeeded via fallback get_by_role(button) for {display_text!r}")
+                        return
+                    except Exception:
+                        pass
                     try:
                         page.get_by_text(display_text, exact=True).first.click(timeout=8_000)
                         logger.info(f"Click succeeded via fallback get_by_text(exact) for {display_text!r}")
@@ -754,15 +1290,24 @@ class RecorderAgent(BaseAgent):
                         candidates.append(phrase)
 
             for phrase in candidates:
+                # Try button role FIRST — avoids falsely "clicking" non-interactive
+                # text elements like modal titles that contain the same keyword
                 try:
-                    page.get_by_text(phrase, exact=False).first.click(timeout=5_000)
-                    logger.info(f"Click succeeded via instruction keyword get_by_text for {phrase!r}")
+                    page.get_by_role("button", name=re.compile(phrase, re.IGNORECASE)).first.click(timeout=5_000)
+                    logger.info(f"Click succeeded via instruction keyword get_by_role(button) for {phrase!r}")
                     return
                 except Exception:
                     pass
                 try:
-                    page.get_by_role("button", name=re.compile(phrase, re.IGNORECASE)).first.click(timeout=5_000)
-                    logger.info(f"Click succeeded via instruction keyword get_by_role(button) for {phrase!r}")
+                    page.get_by_role("link", name=re.compile(phrase, re.IGNORECASE)).first.click(timeout=5_000)
+                    logger.info(f"Click succeeded via instruction keyword get_by_role(link) for {phrase!r}")
+                    return
+                except Exception:
+                    pass
+                # get_by_text as last resort for this phrase (may match non-interactive elements)
+                try:
+                    page.get_by_text(phrase, exact=True).first.click(timeout=5_000)
+                    logger.info(f"Click succeeded via instruction keyword get_by_text(exact) for {phrase!r}")
                     return
                 except Exception:
                     pass

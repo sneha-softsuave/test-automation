@@ -383,12 +383,14 @@ export const executeFromParsed = async (
   sessionId: string,
   options: {
     headless?: boolean;
+    keepBrowserOpen?: boolean;
     timeout?: number;
     maxRetries?: number;
   } = {}
 ): Promise<MultiAgentResponse> => {
   const {
     headless = true,
+    keepBrowserOpen = true,
     timeout = 30000,
     maxRetries = 2,
   } = options;
@@ -396,6 +398,7 @@ export const executeFromParsed = async (
   const params = new URLSearchParams({
     session_id: sessionId,
     headless: headless.toString(),
+    keep_browser_open: keepBrowserOpen.toString(),
     timeout: timeout.toString(),
     max_retries: maxRetries.toString(),
   });

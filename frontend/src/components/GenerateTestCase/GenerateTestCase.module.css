@@ -531,6 +531,36 @@
   border-top: 1px solid #e2e8f0;
 }
 
+/* ─── Case divider between test cases in chat ───────────────────── */
+.caseDivider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 12px;
+  padding: 0 4px;
+}
+
+.caseDividerLine {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #bbf7d0 40%, #22c55e 60%, transparent);
+  opacity: 0.6;
+}
+
+.caseDividerLabel {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #16a34a;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 20px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
 /* ─── Action bar above the chat input (complete / cancel) ─────── */
 .chatActionBar {
   display: flex;

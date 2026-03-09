@@ -126,6 +126,7 @@ class BaseAgent(ABC):
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
+            temperature=0,
             messages=[{"role": "user", "content": prompt}]
         )
         return response.content[0].text.strip()
@@ -135,6 +136,7 @@ class BaseAgent(ABC):
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
+            temperature=0,
             messages=[{"role": "user", "content": prompt}]
         )
         return response.choices[0].message.content.strip()
@@ -144,6 +146,7 @@ class BaseAgent(ABC):
         response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
+            temperature=0,
             messages=[{"role": "user", "content": prompt}]
         )
         return response.choices[0].message.content.strip()

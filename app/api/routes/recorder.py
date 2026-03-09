@@ -155,24 +155,16 @@ def _make_ref_instruction(s: dict) -> str:
     return instruction
 
 
-def _build_enhanced_test_suite(
-    steps: list,
-    app_name: str,
-    base_url: str,
-    test_email: str,
-    test_password: str,
-) -> dict:
-    """Wrap recorded steps into EnhancedTestSuite format."""
+def _build_tc_steps(steps: list) -> list:
+    """Convert raw recorded steps into EnhancedTestSuite step format."""
     tc_steps = []
     for s in steps:
         action_type = s.get("action_type", "")
-        # Ensure goto steps carry the URL in test_data so Excel export can pick it up
         step_test_data = s.get("test_data") or {}
         if action_type == "goto":
             url = s.get("value") or s.get("selector") or step_test_data.get("url", "")
             if url:
                 step_test_data = {**step_test_data, "url": url}
-
         tc_steps.append({
             "step_number": s.get("step_number"),
             "instruction": _make_ref_instruction(s),
@@ -188,6 +180,29 @@ def _build_enhanced_test_suite(
             "test_data": step_test_data,
             "assertions": s.get("assertions"),
         })
+    return tc_steps
+
+
+def _build_enhanced_test_suite(
+    test_cases: list,
+    app_name: str,
+    base_url: str,
+    test_email: str,
+    test_password: str,
+) -> dict:
+    """
+    Wrap recorded test cases into EnhancedTestSuite format.
+    test_cases: list of {name, steps} dicts — one entry per finalized case.
+    """
+    built_cases = []
+    for idx, tc in enumerate(test_cases):
+        case_id = f"TC_{idx + 1:03d}"
+        built_cases.append({
+            "id": case_id,
+            "name": tc.get("name") or f"Recorded Test {idx + 1}",
+            "steps": _build_tc_steps(tc.get("steps", [])),
+            "expected_results": ["All recorded steps execute successfully"],
+        })
 
     return {
         "project": f"{app_name} Tests",
@@ -199,14 +214,7 @@ def _build_enhanced_test_suite(
                 "password": test_password,
             }
         },
-        "test_cases": [
-            {
-                "id": "TC_001",
-                "name": "Recorded Test",
-                "steps": tc_steps,
-                "expected_results": ["All recorded steps execute successfully"],
-            }
-        ],
+        "test_cases": built_cases,
     }
 
 
@@ -308,8 +316,9 @@ In 1-2 sentences, explain what went wrong and what the user should change in the
         agent = RecorderAgent(provider=AgentLLMProvider(provider_name))
 
         # ── Step 1: parse the paragraph into atomic actions (needs page context)
+        context_summary = session.get_context_summary()
         actions = session.run_in_pw_thread(
-            lambda: agent.parse_multi_step_command(request.command, session.page)
+            lambda: agent.parse_multi_step_command(request.command, session.page, context_summary)
         )
         logger.info(f"[recorder/command] parsed {len(actions)} atomic action(s)")
 
@@ -469,8 +478,14 @@ async def recorder_complete(request: CompleteRequest):
         raise HTTPException(status_code=404, detail=f"Session '{request.session_id}' not found.")
 
     # Capture metadata before closing
-    steps = list(session.steps)
     base_url = request.base_url or session.base_url
+
+    # Auto-finalize any remaining in-progress steps as the last case
+    if session.steps:
+        case_name = f"Test Case {len(session.test_cases) + 1}"
+        session.finalize_current_case(case_name)
+
+    all_cases = list(session.test_cases)
 
     # Derive app name
     app_name = request.app_name
@@ -481,40 +496,78 @@ async def recorder_complete(request: CompleteRequest):
         except Exception:
             app_name = "My App"
 
-    # Retrieve test credentials from the first fill step that has email/password
+    # Retrieve test credentials from any fill step across all cases
     test_email = "test@example.com"
     test_password = "password123"
-    for s in steps:
-        td = s.get("test_data") or {}
-        if isinstance(td, dict):
-            if td.get("email"):
-                test_email = td["email"]
-            if td.get("password"):
-                test_password = td["password"]
+    for tc in all_cases:
+        for s in tc.get("steps", []):
+            td = s.get("test_data") or {}
+            if isinstance(td, dict):
+                if td.get("email"):
+                    test_email = td["email"]
+                if td.get("password"):
+                    test_password = td["password"]
 
     # Close the browser
     recorder_session_manager.close_session(request.session_id)
 
-    if not steps:
+    if not all_cases:
         raise HTTPException(status_code=400, detail="No steps were recorded. Nothing to complete.")
 
     test_suite = _build_enhanced_test_suite(
-        steps=steps,
+        test_cases=all_cases,
         app_name=app_name,
         base_url=base_url,
         test_email=test_email,
         test_password=test_password,
     )
 
+    total_steps = sum(len(tc.get("steps", [])) for tc in all_cases)
     tc_count = len(test_suite.get("test_cases", []))
-    logger.info(f"[recorder/complete] session={request.session_id} steps={len(steps)} tcs={tc_count}")
+    logger.info(f"[recorder/complete] session={request.session_id} steps={total_steps} tcs={tc_count}")
 
     return {
         "success": True,
-        "message": f"Recorded {len(steps)} step(s) into {tc_count} test case(s)",
+        "message": f"Recorded {total_steps} step(s) into {tc_count} test case(s)",
         "session_id": request.session_id,
         "test_suite": test_suite,
-        "step_count": len(steps),
+        "step_count": total_steps,
+    }
+
+
+@router.post("/recorder/new-case")
+async def recorder_new_case(request: CancelRequest):
+    """
+    Finalize the current in-progress steps as a completed test case,
+    then reset the step buffer so subsequent commands go into the next case.
+    The browser stays open — recording continues uninterrupted.
+    """
+    session = recorder_session_manager.get_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{request.session_id}' not found.")
+
+    if not session.steps:
+        raise HTTPException(status_code=400, detail="No steps in current case. Record at least one step before starting a new case.")
+
+    case_name = f"Test Case {len(session.test_cases) + 1}"
+    finalized_count = session.finalize_current_case(case_name)
+    case_number = len(session.test_cases)
+
+    logger.info(f"[recorder/new-case] session={request.session_id} case={case_name} steps={finalized_count}")
+
+    await sse_manager.broadcast(request.session_id, {
+        "type": "recorder_new_case",
+        "case_number": case_number,
+        "case_name": case_name,
+        "steps_finalized": finalized_count,
+    })
+
+    return {
+        "success": True,
+        "case_number": case_number,
+        "case_name": case_name,
+        "steps_finalized": finalized_count,
+        "message": f"{case_name} saved ({finalized_count} step(s)). Recording next case.",
     }
 
 

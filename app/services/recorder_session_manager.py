@@ -34,7 +34,8 @@ class RecorderSession:
     def __init__(self, session_id: str, base_url: str):
         self.session_id = session_id
         self.base_url = base_url
-        self.steps: List[Dict] = []
+        self.test_cases: List[Dict] = []      # finalized cases [{name, steps}]
+        self._current_steps: List[Dict] = []  # steps for the case being recorded now
         self.started_at = datetime.utcnow().isoformat()
 
         # Playwright objects — only accessed from _pw_thread
@@ -50,6 +51,56 @@ class RecorderSession:
             daemon=True,
         )
         self._pw_thread.start()
+
+    @property
+    def steps(self) -> List[Dict]:
+        """Current in-progress steps (backward-compat for existing route code)."""
+        return self._current_steps
+
+    def finalize_current_case(self, name: str = "") -> int:
+        """
+        Move current_steps into test_cases as a new finalized case.
+        Returns the number of steps finalized.
+        """
+        if not self._current_steps:
+            return 0
+        case_name = name or f"Test Case {len(self.test_cases) + 1}"
+        self.test_cases.append({
+            "name": case_name,
+            "steps": list(self._current_steps),
+        })
+        finalized_count = len(self._current_steps)
+        self._current_steps = []
+        return finalized_count
+
+    def all_steps(self) -> List[Dict]:
+        """All steps across every finalized case plus current in-progress steps."""
+        result = []
+        for tc in self.test_cases:
+            result.extend(tc["steps"])
+        result.extend(self._current_steps)
+        return result
+
+    def get_context_summary(self) -> str:
+        """
+        Return a concise text summary of all finalized test cases for LLM context.
+        Includes instructions and key data values so the LLM can resolve references
+        like 'the candidate I just created' in subsequent cases.
+        """
+        if not self.test_cases:
+            return ""
+        lines = []
+        for i, tc in enumerate(self.test_cases):
+            lines.append(f"Test Case {i + 1} — {tc['name']}:")
+            for s in tc.get("steps", []):
+                instruction = s.get("instruction", "")
+                if not instruction:
+                    continue
+                td = s.get("test_data") or {}
+                data_parts = [f"{k}={v}" for k, v in td.items() if v and k not in ("url",)]
+                data_str = f" [{', '.join(data_parts)}]" if data_parts else ""
+                lines.append(f"  • {instruction}{data_str}")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
     # Playwright thread loop                                               #
@@ -127,8 +178,8 @@ class RecorderSession:
         return self.run_in_pw_thread(_screenshot)
 
     def add_step(self, step: Dict) -> None:
-        step["step_number"] = len(self.steps) + 1
-        self.steps.append(step)
+        step["step_number"] = len(self._current_steps) + 1
+        self._current_steps.append(step)
 
     def close(self) -> None:
         """Stop the browser and playwright thread."""

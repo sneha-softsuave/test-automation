@@ -154,6 +154,10 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const [recInstruction, setRecInstruction] = useState('');
   const [collapsedMessages, setCollapsedMessages] = useState<Set<string>>(new Set());
   const [recPanelView, setRecPanelView] = useState<'browser' | 'excel'>('browser');
+  // Finalized cases from "Start new case" — each entry holds steps for one row (for Excel)
+  const [finalizedCases, setFinalizedCases] = useState<Array<{ name: string; steps: RecordedStep[] }>>([]);
+  // Message index where each new case starts — used to show dividers and compute current-case steps
+  const [caseBoundaries, setCaseBoundaries] = useState<number[]>([]);
 
   // ── Save to Project state ─────────────────────────────────────────────────
   const [showSaveModal, setShowSaveModal] = useState(false);
@@ -169,7 +173,12 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   // Auto-size textarea
   const chatTextareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const allRecSteps = recMessages.flatMap(m => m.steps);
+  // Steps in the current in-progress case only (messages after the last case boundary)
+  const currentCaseStartMsgIdx = caseBoundaries.length > 0 ? caseBoundaries[caseBoundaries.length - 1] : 0;
+  const allRecSteps = recMessages.slice(currentCaseStartMsgIdx).flatMap(m => m.steps);
+  // Total steps across all finalized cases + current case
+  const totalRecSteps = finalizedCases.reduce((sum, c) => sum + c.steps.length, 0) + allRecSteps.length;
+  const currentCaseNumber = finalizedCases.length + 1;
 
   // Derive Excel cell content from accumulated steps — mirrors backend _steps_to_input_data
   const recExcelInputData = (() => {
@@ -364,6 +373,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const handleStartRecording = async () => {
     setRecError(null);
     setRecMessages([]);
+    setFinalizedCases([]);
+    setCaseBoundaries([]);
     setRecScreenshot(null);
     setRecCurrentUrl('');
     setRecResult(null);
@@ -517,6 +528,29 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     }
   };
 
+  const handleNewCase = async () => {
+    if (allRecSteps.length === 0 || recStatus !== 'active') return;
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/recorder/new-case`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionIdRef.current }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || 'Failed to start new case');
+      }
+      const data = await res.json();
+      // Store finalized case steps for Excel, but keep ALL messages visible for context
+      setFinalizedCases(prev => [...prev, { name: data.case_name, steps: allRecSteps }]);
+      setCaseBoundaries(prev => [...prev, recMessages.length]);
+      addNotification('success', `${data.case_name} saved (${data.steps_finalized} step(s)). Recording Case ${data.case_number + 1}…`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      addNotification('error', `Failed to start new case: ${msg}`);
+    }
+  };
+
   const handleCancelRecording = async () => {
     try {
       await fetch(`${API_BASE}/api/v1/recorder/cancel`, {
@@ -528,6 +562,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     disconnectSSE();
     setRecStatus('idle');
     setRecMessages([]);
+    setFinalizedCases([]);
+    setCaseBoundaries([]);
     setRecScreenshot(null);
     setRecCurrentUrl('');
     setRecError(null);
@@ -1026,7 +1062,12 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                     : recStatus === 'completing' ? 'Completing recording…'
                     : 'Recording active'}
                 </span>
-                <span className={styles.recStepCount}>{allRecSteps.length} step{allRecSteps.length !== 1 ? 's' : ''}</span>
+                <span className={styles.recStepCount}>
+                  {finalizedCases.length > 0
+                    ? `Case ${currentCaseNumber} · ${allRecSteps.length} step${allRecSteps.length !== 1 ? 's' : ''} (${totalRecSteps} total)`
+                    : `${allRecSteps.length} step${allRecSteps.length !== 1 ? 's' : ''}`
+                  }
+                </span>
               </div>
 
               {/* Image analysis warning banner */}
@@ -1073,11 +1114,27 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                       </motion.div>
                     )}
 
-                    {recMessages.map((msg) => {
+                    {recMessages.map((msg, msgIdx) => {
                       const isCollapsed = collapsedMessages.has(msg.id);
+                      // Which case boundary starts at this message index?
+                      const boundaryIdx = caseBoundaries.indexOf(msgIdx);
+                      // Show a "Case N complete / Case N+1 starts" divider before this message
+                      const showCaseDivider = boundaryIdx !== -1;
+                      const completedCaseNum = boundaryIdx + 1;
+                      const nextCaseNum = boundaryIdx + 2;
                       return (
+                        <React.Fragment key={msg.id}>
+                          {showCaseDivider && (
+                            <div className={styles.caseDivider}>
+                              <div className={styles.caseDividerLine} />
+                              <div className={styles.caseDividerLabel}>
+                                <CheckCircle2 size={12} style={{ color: '#22c55e' }} />
+                                <span>Test Case {completedCaseNum} complete — now recording Test Case {nextCaseNum}</span>
+                              </div>
+                              <div className={styles.caseDividerLine} />
+                            </div>
+                          )}
                         <motion.div
-                          key={msg.id}
                           initial={{ opacity: 0, y: 8 }}
                           animate={{ opacity: 1, y: 0 }}
                         >
@@ -1156,6 +1213,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                             </div>
                           </div>
                         </motion.div>
+                        </React.Fragment>
                       );
                     })}
 
@@ -1171,15 +1229,27 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                     <div ref={messagesEndRef} />
                   </div>
 
-                  {/* Action bar: Complete / Cancel */}
+                  {/* Action bar: Complete / New Case / Cancel */}
                   <div className={styles.chatActionBar}>
                     <button
                       className={styles.btnPrimary}
                       onClick={handleCompleteRecording}
-                      disabled={allRecSteps.length === 0 || recStatus !== 'active'}
+                      disabled={totalRecSteps === 0 || recStatus !== 'active'}
                     >
                       <CheckCircle2 size={14} />
                       Complete Test
+                    </button>
+                    <button
+                      className={styles.btnSecondary}
+                      onClick={handleNewCase}
+                      disabled={allRecSteps.length === 0 || recStatus !== 'active'}
+                      title={`Finalize Case ${currentCaseNumber} and start recording the next case`}
+                    >
+                      <Save size={14} />
+                      Start New Case
+                      {finalizedCases.length > 0 && (
+                        <span className={styles.recExcelBadge}>{finalizedCases.length}</span>
+                      )}
                     </button>
                     <button
                       className={styles.btnSecondary}
@@ -1230,7 +1300,12 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                       <div className={styles.chatInputHint}>
                         <span>Ctrl+Enter to execute</span>
                         {recStatus === 'active' && (
-                          <span>{allRecSteps.length} step{allRecSteps.length !== 1 ? 's' : ''} recorded</span>
+                          <span>
+                            {finalizedCases.length > 0
+                              ? `Case ${currentCaseNumber}: ${allRecSteps.length} step${allRecSteps.length !== 1 ? 's' : ''}`
+                              : `${allRecSteps.length} step${allRecSteps.length !== 1 ? 's' : ''} recorded`
+                            }
+                          </span>
                         )}
                       </div>
                     </div>
@@ -1254,8 +1329,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                     >
                       <FileSpreadsheet size={13} />
                       Excel View
-                      {allRecSteps.length > 0 && (
-                        <span className={styles.recExcelBadge}>{allRecSteps.length}</span>
+                      {totalRecSteps > 0 && (
+                        <span className={styles.recExcelBadge}>{totalRecSteps}</span>
                       )}
                     </button>
                   </div>
@@ -1296,7 +1371,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
                   {recPanelView === 'excel' && (
                     <div className={styles.recExcelGrid}>
-                      {allRecSteps.length === 0 ? (
+                      {totalRecSteps === 0 ? (
                         <div className={styles.recExcelEmpty}>
                           <svg width="36" height="36" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
                             <rect x="4" y="4" width="32" height="32" rx="3" stroke="#cbd5e1" strokeWidth="2" fill="none"/>
@@ -1320,16 +1395,47 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                           {['T.C.No','Test Case','Test Case Steps','Expected Result','Input data','Status','Error'].map(h => (
                             <div key={h} className={`${styles.recExcelCell} ${styles.recExcelHeaderCell}`}>{h}</div>
                           ))}
-                          {/* Data row 1 — the single recorded test case */}
-                          {(() => {
+
+                          {/* Finalized cases — one row each, shown as DONE */}
+                          {finalizedCases.map((fc, idx) => (
+                            <React.Fragment key={`fc-${idx}`}>
+                              <div className={`${styles.recExcelCell} ${styles.recExcelRowNumCell} ${styles.recExcelRowPassed}`}>{idx + 1}</div>
+                              <div className={`${styles.recExcelCell} ${styles.recExcelRowPassed}`}>{idx + 1}</div>
+                              <div className={`${styles.recExcelCell} ${styles.recExcelRowPassed}`}>{fc.name}</div>
+                              <div className={`${styles.recExcelCell} ${styles.recExcelStepsCell} ${styles.recExcelRowPassed}`}>
+                                {fc.steps.map((s, i) => (
+                                  <span key={s.step_number}>
+                                    {`${s.step_number}. ${makeRefInstruction(s)}`}
+                                    {i < fc.steps.length - 1 ? '\n' : ''}
+                                  </span>
+                                ))}
+                              </div>
+                              <div className={`${styles.recExcelCell} ${styles.recExcelRowPassed}`}>All recorded steps execute successfully</div>
+                              <div className={`${styles.recExcelCell} ${styles.recExcelRowPassed}`}>
+                                {Object.entries(fc.steps.reduce((acc, s) => {
+                                  const td = s.test_data || {};
+                                  Object.entries(td).forEach(([k, v]) => { if (v) acc[k] = String(v); });
+                                  return acc;
+                                }, {} as Record<string, string>)).map(([k, v]) => `${k}: ${v}`).join(' | ')}
+                              </div>
+                              <div className={`${styles.recExcelCell} ${styles.recExcelStatusCell} ${styles.recExcelRowPassed}`}>
+                                <span className={styles.recExcelBadgePassed}>✓ DONE</span>
+                              </div>
+                              <div className={`${styles.recExcelCell} ${styles.recExcelErrorCell} ${styles.recExcelRowPassed}`}></div>
+                            </React.Fragment>
+                          ))}
+
+                          {/* Current in-progress case */}
+                          {allRecSteps.length > 0 && (() => {
+                            const rowNum = finalizedCases.length + 1;
                             const rc = recExcelStatus === 'passed' ? styles.recExcelRowPassed
                                      : recExcelStatus === 'failed' ? styles.recExcelRowFailed
                                      : styles.recExcelRowRunning;
                             return (
                               <React.Fragment>
-                                <div className={`${styles.recExcelCell} ${styles.recExcelRowNumCell} ${rc}`}>1</div>
-                                <div className={`${styles.recExcelCell} ${rc}`}>1</div>
-                                <div className={`${styles.recExcelCell} ${rc}`}>Recorded Test</div>
+                                <div className={`${styles.recExcelCell} ${styles.recExcelRowNumCell} ${rc}`}>{rowNum}</div>
+                                <div className={`${styles.recExcelCell} ${rc}`}>{rowNum}</div>
+                                <div className={`${styles.recExcelCell} ${rc}`}>{`Test Case ${rowNum}`}</div>
                                 <div className={`${styles.recExcelCell} ${styles.recExcelStepsCell} ${rc}`}>
                                   {allRecSteps.map((s, i) => (
                                     <span key={s.step_number} className={
@@ -1356,15 +1462,19 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                               </React.Fragment>
                             );
                           })()}
-                          {/* Empty placeholder rows 2-8 (like Excel) */}
-                          {[2,3,4,5,6,7,8].map(n => (
-                            <React.Fragment key={n}>
-                              <div className={`${styles.recExcelCell} ${styles.recExcelRowNumCell}`}>{n}</div>
-                              {[0,1,2,3,4,5,6].map(c => (
-                                <div key={c} className={styles.recExcelCell}></div>
-                              ))}
-                            </React.Fragment>
-                          ))}
+
+                          {/* Empty placeholder rows to fill the grid */}
+                          {Array.from({ length: Math.max(0, 8 - finalizedCases.length - (allRecSteps.length > 0 ? 1 : 0)) }, (_, i) => {
+                            const n = finalizedCases.length + (allRecSteps.length > 0 ? 1 : 0) + i + 1;
+                            return (
+                              <React.Fragment key={`empty-${n}`}>
+                                <div className={`${styles.recExcelCell} ${styles.recExcelRowNumCell}`}>{n}</div>
+                                {[0,1,2,3,4,5,6].map(c => (
+                                  <div key={c} className={styles.recExcelCell}></div>
+                                ))}
+                              </React.Fragment>
+                            );
+                          })}
                         </div>
                       )}
                     </div>

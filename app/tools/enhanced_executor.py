@@ -104,9 +104,18 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
                     "status": "closed"
                 })
 
-            # keep_browser_open=True  → one browser for all test cases (current behaviour)
-            # keep_browser_open=False → fresh browser per test case
+            # keep_browser_open=True  → one browser + one context + one page for ALL test cases
+            #                           page state (URL, cookies, modals) persists between TCs
+            # keep_browser_open=False → fresh browser + context + page per test case
             browser = _launch_browser() if keep_browser_open else None
+
+            # When keeping browser open, create a single persistent context+page up front
+            persistent_context = None
+            persistent_page = None
+            if keep_browser_open:
+                persistent_context = browser.new_context(viewport={"width": 1920, "height": 1080})
+                persistent_page = persistent_context.new_page()
+                print("Persistent browser context created — page state will carry across all test cases")
 
             for idx, test_case in enumerate(test_cases):
                 test_id = test_case.get("id", f"TC_{idx+1}")
@@ -135,6 +144,7 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
                     send_update=send_update,
                     signal_file=signal_file,
                     initial_storage_state=shared_storage_state,
+                    persistent_page=persistent_page,
                 )
                 results.append(result)
 
@@ -168,6 +178,13 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
                 if not keep_browser_open:
                     _close_browser(browser)
                     browser = None
+
+            # Close persistent context (and its page) after all TCs complete
+            if persistent_context:
+                try:
+                    persistent_context.close()
+                except Exception:
+                    pass
 
             # Close the shared browser when keep_browser_open is ON
             if keep_browser_open and browser:
@@ -246,8 +263,15 @@ def _execute_single_test_sync(
     send_update=None,
     signal_file=None,
     initial_storage_state=None,
+    persistent_page=None,
 ) -> Dict[str, Any]:
-    """Execute a single test case from enhanced format (sync version)."""
+    """Execute a single test case from enhanced format (sync version).
+
+    persistent_page: when provided (keep_browser_open=True), reuse this existing
+    page instead of creating a new context. The page retains its URL, cookies, and
+    any open modals from the previous test case — exactly what "session continues"
+    means. The context is NOT closed at the end of this function in that case.
+    """
     test_id = test_case.get("id", "TC_001")
     test_name = test_case.get("name", "Test Case")
     steps = test_case.get("steps", [])
@@ -318,11 +342,20 @@ def _execute_single_test_sync(
         "final_storage_state": None,
     }
 
-    context_kwargs = {"viewport": {"width": 1920, "height": 1080}}
-    if initial_storage_state is not None:
-        context_kwargs["storage_state"] = initial_storage_state
-    context = browser.new_context(**context_kwargs)
-    page = context.new_page()
+    if persistent_page is not None:
+        # Reuse the caller-managed page — browser session continues from where last TC left off
+        page = persistent_page
+        context = page.context
+        owns_context = False
+        print(f"  [persistent] Reusing existing page (current URL: {page.url})")
+    else:
+        # Fresh context+page for this test case (keep_browser_open=False)
+        context_kwargs = {"viewport": {"width": 1920, "height": 1080}}
+        if initial_storage_state is not None:
+            context_kwargs["storage_state"] = initial_storage_state
+        context = browser.new_context(**context_kwargs)
+        page = context.new_page()
+        owns_context = True
 
     try:
         total_steps = len(steps)
@@ -610,7 +643,9 @@ def _execute_single_test_sync(
             result["final_storage_state"] = context.storage_state()
         except Exception:
             pass  # Carry-forward simply won't happen for next test
-        context.close()
+        if owns_context:
+            # Only close the context when we created it (keep_browser_open=False)
+            context.close()
 
     result["finished_at"] = datetime.now().isoformat()
 
