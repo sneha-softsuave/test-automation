@@ -5,7 +5,7 @@ import {
   Play, FileSpreadsheet, AlertCircle, Check,
   Eye, EyeOff, RotateCcw, Video, MonitorPlay, Monitor,
   Circle, CheckCircle2, XCircle, Loader2, Camera, X, Send,
-  Zap, Save
+  Zap, Save, FileJson
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { SaveToProjectModal } from './SaveToProjectModal';
@@ -150,7 +150,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const [recMessages, setRecMessages] = useState<RecorderMessage[]>([]);
   const [recScreenshot, setRecScreenshot] = useState<string | null>(null);
   const [recCurrentUrl, setRecCurrentUrl] = useState('');
-  const [recResult, setRecResult] = useState<{ test_suite: GeneratedSuite; step_count: number } | null>(null);
+  const [recResult, setRecResult] = useState<{ test_suite: GeneratedSuite; step_count: number; export_json?: object } | null>(null);
   const [recInstruction, setRecInstruction] = useState('');
   const [collapsedMessages, setCollapsedMessages] = useState<Set<string>>(new Set());
   const [recPanelView, setRecPanelView] = useState<'browser' | 'excel'>('browser');
@@ -361,6 +361,24 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     }
   };
 
+  const handleExportRecorderJson = (suite: GeneratedSuite, exportJson?: object) => {
+    try {
+      const data = exportJson ?? suite;
+      const project = suite.project.replace(/\s+/g, '_') || 'test_cases';
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const href = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = href;
+      a.download = `${project}.json`;
+      a.click();
+      URL.revokeObjectURL(href);
+      addNotification('success', 'JSON file downloaded');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      addNotification('error', `Export failed: ${msg}`);
+    }
+  };
+
   const handleReset = () => {
     setResult(null);
     setError(null);
@@ -517,7 +535,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         throw new Error(err.detail || 'Failed to complete recording');
       }
       const data = await res.json();
-      setRecResult({ test_suite: data.test_suite, step_count: data.step_count });
+      setRecResult({ test_suite: data.test_suite, step_count: data.step_count, export_json: data.export_json });
       setRecStatus('done');
       addNotification('success', `Recorded test suite saved: ${data.step_count} step(s)`);
     } catch (e: unknown) {
@@ -1549,6 +1567,13 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                     >
                       <FileSpreadsheet size={14} />
                       Export Excel
+                    </button>
+                    <button
+                      className={styles.btnSecondary}
+                      onClick={() => handleExportRecorderJson(recResult.test_suite, recResult.export_json)}
+                    >
+                      <FileJson size={14} />
+                      Export JSON
                     </button>
                     {projectName ? (
                       <button

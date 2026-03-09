@@ -4,10 +4,12 @@ Provides endpoints for the conversational test recorder:
   POST /recorder/start    — launch browser, navigate to URL
   POST /recorder/command  — execute a natural language command on the live page
   POST /recorder/complete — close browser, build + return EnhancedTestSuite
+  POST /recorder/export   — export successful steps as a downloadable JSON file
   POST /recorder/cancel   — close browser, discard session
 """
 import asyncio
 import concurrent.futures
+import json
 import logging
 import threading
 from datetime import datetime
@@ -15,6 +17,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -53,6 +56,12 @@ class CompleteRequest(BaseModel):
 
 class CancelRequest(BaseModel):
     session_id: str
+
+
+class ExportRequest(BaseModel):
+    session_id: str
+    app_name: Optional[str] = None
+    base_url: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -336,11 +345,13 @@ In 1-2 sentences, explain what went wrong and what the user should change in the
             def _run_action(a=action, ss=pre_action_screenshot):
                 agent.execute_action(a, session.page, screenshot_b64=ss)
 
+            action_start = datetime.utcnow()
             try:
                 session.run_in_pw_thread(_run_action)
             except Exception as e:
                 logger.warning(f"Action execution error: {e}")
                 error_msg = str(e)
+            execution_time_ms = int((datetime.utcnow() - action_start).total_seconds() * 1000)
 
             def _pause_and_capture(pre_url=url_before, has_error=bool(error_msg)):
                 import base64 as _b64
@@ -376,7 +387,8 @@ In 1-2 sentences, explain what went wrong and what the user should change in the
                 "test_data": action.get("test_data"),
                 "assertions": action.get("assertions"),
                 "command": request.command,
-                "executed_at": datetime.utcnow().isoformat(),
+                "executed_at": action_start.isoformat(),
+                "execution_time_ms": execution_time_ms,
                 "error": error_msg,
                 "validation_errors": validation_errors,
                 "ai_suggestion": ai_suggestion,
@@ -418,6 +430,7 @@ In 1-2 sentences, explain what went wrong and what the user should change in the
                     "assertions": [{"type": "url", "expected_value": last_url, "playwright_assertion": f"expect(page).to_have_url('{last_url}')"}],
                     "command": request.command,
                     "executed_at": datetime.utcnow().isoformat(),
+                    "execution_time_ms": 0,
                     "error": None,
                 }
                 session.add_step(nav_step)
@@ -508,6 +521,9 @@ async def recorder_complete(request: CompleteRequest):
                 if td.get("password"):
                     test_password = td["password"]
 
+    # Build export JSON (successful steps + execution_time_ms) BEFORE closing session
+    export_json = _build_export_json(session, app_name, base_url)
+
     # Close the browser
     recorder_session_manager.close_session(request.session_id)
 
@@ -532,6 +548,7 @@ async def recorder_complete(request: CompleteRequest):
         "session_id": request.session_id,
         "test_suite": test_suite,
         "step_count": total_steps,
+        "export_json": export_json,
     }
 
 
@@ -569,6 +586,134 @@ async def recorder_new_case(request: CancelRequest):
         "steps_finalized": finalized_count,
         "message": f"{case_name} saved ({finalized_count} step(s)). Recording next case.",
     }
+
+
+def _build_export_json(session, app_name: str, base_url: str) -> dict:
+    """
+    Build the export JSON from a recording session.
+    Only includes successfully executed steps (no error).
+    Preserves test case grouping and adds execution_time_ms to each step.
+    """
+    test_email = "test@example.com"
+    test_password = "password123"
+
+    # Combine finalized cases + any in-progress steps as a final case
+    all_cases = list(session.test_cases)
+    if session.steps:
+        all_cases = all_cases + [{
+            "name": f"Test Case {len(all_cases) + 1}",
+            "steps": list(session.steps),
+        }]
+
+    built_cases = []
+    for idx, tc in enumerate(all_cases):
+        raw_steps = tc.get("steps", [])
+
+        # Keep only steps that executed without error
+        successful_steps = [s for s in raw_steps if not s.get("error")]
+        if not successful_steps:
+            continue
+
+        # Harvest credentials for test_data
+        for s in successful_steps:
+            td = s.get("test_data") or {}
+            if td.get("email"):
+                test_email = td["email"]
+            if td.get("password"):
+                test_password = td["password"]
+
+        tc_steps = []
+        for i, s in enumerate(successful_steps):
+            action_type = s.get("action_type", "")
+            step_test_data = dict(s.get("test_data") or {})
+            if action_type == "goto":
+                url = s.get("value") or s.get("selector") or step_test_data.get("url", "")
+                if url:
+                    step_test_data["url"] = url
+
+            tc_steps.append({
+                "step_number": i + 1,
+                "instruction": _make_ref_instruction(s),
+                "action": {
+                    "type": action_type,
+                    "playwright_method": s.get("playwright_method", ""),
+                },
+                "selector_hints": {
+                    "element_name": s.get("element_name"),
+                    "element_type": s.get("element_type"),
+                    "suggested_selectors": [s["selector"]] if s.get("selector") else [],
+                },
+                "test_data": step_test_data or None,
+                "assertions": s.get("assertions"),
+                "executed_at": s.get("executed_at", ""),
+                "execution_time_ms": s.get("execution_time_ms", 0),
+            })
+
+        built_cases.append({
+            "id": f"TC_{idx + 1:03d}",
+            "name": tc.get("name") or f"Test Case {idx + 1}",
+            "steps": tc_steps,
+            "expected_results": ["All recorded steps execute successfully"],
+        })
+
+    return {
+        "project": app_name,
+        "base_url": base_url,
+        "session_id": session.session_id,
+        "exported_at": datetime.utcnow().isoformat(),
+        "common_selectors": {},
+        "test_data": {
+            "default_credentials": {
+                "email": test_email,
+                "password": test_password,
+            }
+        },
+        "test_cases": built_cases,
+    }
+
+
+@router.post("/recorder/export")
+async def recorder_export(request: ExportRequest):
+    """
+    Export successfully executed steps from the current recording session as a
+    downloadable JSON file. The session stays open — recording continues unaffected.
+
+    Only steps that completed without error are included.
+    Each step carries execution_time_ms (wall-clock ms the action took to run).
+    """
+    session = recorder_session_manager.get_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{request.session_id}' not found.")
+
+    base_url = request.base_url or session.base_url
+    app_name = request.app_name
+    if not app_name:
+        try:
+            parsed = urlparse(base_url)
+            app_name = parsed.netloc.split(".")[0].title() or "Recording"
+        except Exception:
+            app_name = "Recording"
+
+    export_data = _build_export_json(session, app_name, base_url)
+
+    total_steps = sum(len(tc["steps"]) for tc in export_data["test_cases"])
+    if total_steps == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No successfully executed steps to export. Record at least one successful step first.",
+        )
+
+    filename = f"recording_{session.session_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+    logger.info(
+        f"[recorder/export] session={request.session_id} "
+        f"cases={len(export_data['test_cases'])} steps={total_steps}"
+    )
+
+    return FastAPIResponse(
+        content=json.dumps(export_data, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @router.post("/recorder/cancel")

@@ -157,11 +157,18 @@ Rules:
 - NEVER produce a "goto" action whose value is a module name, section name, or anything that is not a real URL — use "click" instead to navigate via the UI
 - NEVER produce a "click" action with an empty selector — if you cannot find the element in the page context, use page.get_by_text('button label from the command', exact=False) as the selector
 - If the paragraph says "Navigate to the X module" or "go to the X section", use action_type "click" with the sidebar/menu element, NOT "goto"
-- For assert_* actions: use the most specific assert type that matches the intent
+- For assert_* actions: use the most specific assert type that matches the SEMANTIC intent of the user's words — do NOT rely on specific trigger words
   - assert_table: selector = page.locator('table') or specific table locator, value = comma-separated expected column header names from the TABLE HEADERS section above
   - assert_text: selector = element containing the text, value = exact expected text
   - assert_visible: selector = element to check, value = ""
   - assert_url: selector = "", value = URL fragment or full URL
+- VAGUE / INFORMAL ASSERTIONS — when the user says things like "see that X happened", "make sure Y worked",
+  "confirm it was done", "the action succeeded", "created successfully" — treat these as result verification:
+  - Use action_type "assert_text"
+  - Extract the key outcome phrase from the user's words (e.g. "created successfully", "user created", "added successfully")
+  - Set value = that key outcome phrase
+  - Set selector = page.get_by_text('<key phrase>', exact=False)
+  - NEVER return empty selector AND empty value for any assertion — always extract something meaningful from the user's intent
 - instruction must be a human-readable description of what this specific atomic step does
 - test_data should capture any user-supplied values (email, name, etc.) or null if none
 - Use REAL selectors from the page context above whenever possible
@@ -275,11 +282,17 @@ Rules:
 - For "click": set value to ""
 - NEVER generate a "goto" action to reload or revisit the CURRENT URL shown above — only "goto" when navigating to a DIFFERENT page
 - NEVER produce a "click" action with an empty selector — if you cannot find the element in the page context, use page.get_by_text('button label from the command', exact=False) as the selector
-- For assert_* actions: pick the most specific type (assert_visible, assert_text, assert_table, etc.)
+- For assert_* actions: pick the most specific type based on the SEMANTIC intent — not just trigger words
   - assert_table: selector = page.locator('table'), value = comma-separated expected column headers
   - assert_text: selector = element containing the text, value = expected text string
   - assert_visible / assert_hidden: selector = element, value = ""
   - assert_url: selector = "", value = URL pattern
+- VAGUE / INFORMAL ASSERTIONS — "see that X", "make sure Y worked", "confirm it was done", "X should have happened":
+  - Use action_type "assert_text"
+  - Extract the key outcome phrase from the command (e.g. "created successfully", "added", "saved")
+  - Set value = that key outcome phrase
+  - Set selector = page.get_by_text('<key phrase>', exact=False)
+  - NEVER return empty selector AND empty value — always extract a meaningful phrase from the user's intent
 - For "wait": set selector to element selector or "" if waiting for time, value to ms or selector text
 - For "press": set selector to the focused element or "" and value to the key name
 - For "drag": set selector = source element, value = target selector expression
@@ -304,25 +317,26 @@ def _scrape_page_context(page: Any) -> Dict[str, Any]:
                 // 1. Label association
                 if (el.labels && el.labels[0]) {
                     const labelText = el.labels[0].innerText.trim();
-                    if (labelText) return "page.get_by_label('" + labelText.replace(/'/g, "\\\\'") + "')";
+                    if (labelText) return "page.get_by_label(" + JSON.stringify(labelText) + ")";
                 }
                 // 2. aria-label
                 const ariaLabel = el.getAttribute('aria-label');
-                if (ariaLabel) return "page.get_by_label('" + ariaLabel.replace(/'/g, "\\\\'") + "')";
+                if (ariaLabel) return "page.get_by_label(" + JSON.stringify(ariaLabel) + ")";
                 // 3. placeholder
                 const ph = el.getAttribute('placeholder');
-                if (ph) return "page.get_by_placeholder('" + ph.replace(/'/g, "\\\\'") + "')";
+                if (ph) return "page.get_by_placeholder(" + JSON.stringify(ph) + ")";
                 // 4. role + name for buttons
                 const role = el.getAttribute('role') || (el.tagName === 'BUTTON' ? 'button' : '');
                 const name = (el.innerText || el.value || '').trim().substring(0, 40);
-                if (role && name) return "page.get_by_role('" + role + "', name='" + name.replace(/'/g, "\\\\'") + "')";
+                if (role && name) return "page.get_by_role(" + JSON.stringify(role) + ", name=" + JSON.stringify(name) + ")";
                 // 5. name attribute
-                if (el.getAttribute('name')) return "page.locator('[name=\"" + el.getAttribute('name') + "\"]')";
+                const attrName = el.getAttribute('name');
+                if (attrName) return "page.locator('[name=" + JSON.stringify(attrName) + "]')";
                 // 6. id
                 if (el.id) return "page.locator('#" + el.id + "')";
                 // 7. type-based
                 const type = el.getAttribute('type');
-                if (type) return "page.locator('input[type=\"" + type + "\"]')";
+                if (type) return "page.locator('input[type=" + JSON.stringify(type) + "]')";
                 return '';
             }
 
@@ -645,23 +659,25 @@ class RecorderAgent(BaseAgent):
                 page.wait_for_timeout(ms)
 
         elif action_type == "assert":
-            # Skip useless empty asserts — LLM sometimes emits assert with no selector and no value
-            if not selector_expr and not value:
-                logger.info("Skipping assert — both selector and value are empty (no-op)")
-                return
             from playwright.sync_api import expect  # type: ignore
             instruction = action.get("instruction", "")
+            # Only skip if there is truly nothing to work with — no selector, no value, no instruction
+            if not selector_expr and not value and not instruction.strip():
+                logger.info("Skipping assert — selector, value, and instruction are all empty (no-op)")
+                return
             if "url" in instruction.lower():
                 if value:
                     expect(page).to_have_url(re.compile(re.escape(value)), timeout=10_000)
                 else:
                     logger.info("Skipping URL assert — expected value is empty")
                     return
-            elif selector_expr:
+            else:
                 # ── Strategy: extract keywords from the user's instruction, scan
                 # the live page for toast/alert/success messages, and match keywords
                 # against actual visible text.  This avoids searching for the user's
                 # exact prompt wording (which is never on the page).
+                # Runs even when selector_expr is empty (e.g. vague prompts like
+                # "see that the user created successfully").
 
                 # 1. Extract meaningful keywords from instruction
                 _skip = {"verify", "check", "assert", "confirm", "ensure", "that",
@@ -836,7 +852,23 @@ class RecorderAgent(BaseAgent):
                 fallback["action_type"] = "assert"
                 self.execute_action(fallback, page, screenshot_b64)
                 return
-            self._execute_targeted_assert(page, action_type, selector_expr, value)
+            try:
+                self._execute_targeted_assert(page, action_type, selector_expr, value)
+            except Exception as _targeted_err:
+                # assert_text: the LLM-extracted phrase may not match the actual page text
+                # (e.g. user typed "user created successfully" but page shows
+                # "Candidate Created Successfully").  Fall back to keyword-scan assert
+                # which matches keywords from the instruction against real page messages.
+                if action_type == "assert_text":
+                    logger.warning(
+                        f"assert_text targeted failed ({value!r}), "
+                        f"falling back to keyword-scan assert: {_targeted_err}"
+                    )
+                    fallback = dict(action)
+                    fallback["action_type"] = "assert"
+                    self.execute_action(fallback, page, screenshot_b64)
+                else:
+                    raise
 
         else:
             raise ValueError(f"Unknown action_type: {action_type!r}")
@@ -1102,19 +1134,9 @@ class RecorderAgent(BaseAgent):
                 raise Exception("assert_visible: selector is required but was empty")
             primary_err: Exception = Exception("primary selector failed")
 
-            # Primary: resolve locator + check visibility (both inside try so any failure is caught)
-            try:
-                _vis_locator = self._resolve_locator(page, selector_expr)
-                expect(_vis_locator).to_be_visible(timeout=timeout)
-                logger.info(f"assert_visible passed: {selector_expr!r}")
-                return
-            except Exception as _e:
-                primary_err = _e
-                logger.warning(f"assert_visible primary selector failed ({selector_expr!r}): {_e}")
-
-            # Fallback 1: extract meaningful name from selector and search by visible text
-            # Priority: name=/label= parameter (e.g. get_by_role('dialog', name='Create Candidate'))
-            # then all quoted strings, skipping Playwright API role keywords
+            # Extract the meaningful label text from the selector expression up front.
+            # Used both for the fast-path pre-check and for Fallback 1.
+            # Priority: name=/label= parameter → last non-keyword quoted string
             _txt = None
             _name_match = re.search(r"(?:name|label)=['\"](.+?)['\"]", selector_expr)
             if _name_match:
@@ -1126,6 +1148,30 @@ class RecorderAgent(BaseAgent):
                 }
                 _all_quoted = re.findall(r"['\"]([^'\"]{2,})['\"]", selector_expr)
                 _txt = next((t for t in reversed(_all_quoted) if t.lower() not in _api_keywords), None)
+
+            # Fast-path: if the selector is get_by_label() try get_by_text first with a
+            # short timeout. Display labels (read-only fields, headings) are plain text nodes —
+            # they have no <label>/<for> association so get_by_label() would always timeout.
+            if "get_by_label" in selector_expr and _txt:
+                try:
+                    expect(page.get_by_text(_txt, exact=False).first).to_be_visible(timeout=2_000)
+                    logger.info(f"assert_visible passed via fast-path text check: {_txt!r}")
+                    return
+                except Exception:
+                    pass  # not found as plain text either — fall through to primary
+
+            # Primary: resolve locator + check visibility with a reduced timeout so the
+            # fallback chain is reached quickly when the selector type is wrong.
+            try:
+                _vis_locator = self._resolve_locator(page, selector_expr)
+                expect(_vis_locator).to_be_visible(timeout=3_000)
+                logger.info(f"assert_visible passed: {selector_expr!r}")
+                return
+            except Exception as _e:
+                primary_err = _e
+                logger.warning(f"assert_visible primary selector failed ({selector_expr!r}): {_e}")
+
+            # Fallback 1: search by visible text (full timeout)
             if _txt:
                 try:
                     expect(page.get_by_text(_txt, exact=False).first).to_be_visible(timeout=timeout)
@@ -1162,7 +1208,9 @@ class RecorderAgent(BaseAgent):
             logger.info(f"assert_hidden passed: {selector_expr!r}")
 
         elif action_type == "assert_text":
-            expect(locator).to_contain_text(value, ignore_case=True, timeout=timeout)
+            # Use a shorter timeout so the keyword-scan fallback in execute_action
+            # is reached quickly when the LLM phrase doesn't match the actual page text.
+            expect(locator).to_contain_text(value, ignore_case=True, timeout=3_000)
             logger.info(f"assert_text passed: {value!r} in {selector_expr!r}")
 
         elif action_type == "assert_value":
@@ -1504,6 +1552,62 @@ class RecorderAgent(BaseAgent):
                 "test_data": None,
             }
 
+    def _repair_truncated_json_array(self, raw: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Try to salvage a truncated LLM response by recovering all complete JSON
+        objects and attempting to close the last incomplete one.
+        Returns a non-empty list on success, None on failure.
+        """
+        arr_start = raw.find("[")
+        if arr_start == -1:
+            arr_start = 0
+        body = raw[arr_start:].lstrip("[").rstrip()
+
+        # --- Pass 1: extract every complete {...} block via bracket counting ---
+        objects: List[str] = []
+        depth = 0
+        obj_start = None
+        for i, ch in enumerate(body):
+            if ch == "{":
+                if depth == 0:
+                    obj_start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and obj_start is not None:
+                    objects.append(body[obj_start: i + 1])
+                    obj_start = None
+
+        complete: List[Dict] = []
+        for o in objects:
+            try:
+                parsed = json.loads(o)
+                if isinstance(parsed, dict):
+                    complete.append(parsed)
+            except json.JSONDecodeError:
+                pass
+
+        # --- Pass 2: try to close the last partial object if present ---
+        if obj_start is not None:
+            partial = body[obj_start:]
+            # Strip trailing comma / whitespace then close
+            for suffix in ("}", "},", "\n}", "\n},"):
+                candidate = partial.rstrip().rstrip(",") + "}"
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict):
+                        complete.append(parsed)
+                        break
+                except json.JSONDecodeError:
+                    pass
+
+        if complete:
+            logger.warning(
+                f"Repaired truncated JSON array — recovered {len(complete)} action(s)"
+            )
+            return complete
+        return None
+
     def _parse_json_array_response(self, raw: str) -> List[Dict[str, Any]]:
         """Extract and parse JSON array from LLM response. Falls back to single-item list."""
         raw = raw.strip()
@@ -1540,6 +1644,11 @@ class RecorderAgent(BaseAgent):
                     return [parsed]
             except json.JSONDecodeError:
                 pass
+
+        # Try to repair a truncated response (LLM cut off mid-JSON)
+        repaired = self._repair_truncated_json_array(raw)
+        if repaired:
+            return repaired
 
         logger.error(f"Could not parse JSON array from response:\n{raw[:300]}")
         # Return a safe fallback — a single wait step
