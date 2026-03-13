@@ -21,6 +21,7 @@ import {
   WifiOff,
   CircleDot,
   Monitor,
+  Layers,
   Globe,
   ExternalLink,
   FileText,
@@ -42,7 +43,7 @@ import {
 } from 'lucide-react';
 import { useStore, useAgentChatStore, LLM_OPTIONS, type LLMProvider } from '../../store/useStore';
 import type { AgentMessage, AgentExecutionLog } from '../../store/useStore';
-import { uploadExcel, executeMultiAgent, chatWithAgent, stopExecution, stepControl, saveActiveSession, clearActiveSession } from '../../services/api';
+import { uploadExcel, executeMultiAgent, chatWithAgent, stopExecution, stepControl, saveActiveSession, clearActiveSession, getLastResult } from '../../services/api';
 import type { TestCaseRaw, UploadResponse, AgentChatResponse } from '../../services/api';
 import { useExecutionWebSocket } from '../../hooks/useExecutionWebSocket';
 import type { ExecutionLog } from '../../hooks/useExecutionWebSocket';
@@ -95,7 +96,7 @@ function toStoreMessage(m: Message): AgentMessage {
 }
 
 export const AgentChat = () => {
-  const { setExecutionResult, setCurrentView, addNotification, setRawTestCases, clearScreenshots, setGeneratedScript, setTestSuite, rawTestCases, llmProvider, setLlmProvider, keepBrowserOpenAgent } = useStore();
+  const { setExecutionResult, setCurrentView, addNotification, setRawTestCases, clearScreenshots, setGeneratedScript, setTestSuite, rawTestCases, llmProvider, setLlmProvider, keepBrowserOpenAgent, setKeepBrowserOpenAgent, liveBrowserEnabled, setLiveBrowserEnabled } = useStore();
 
   // ── Session-persisted state (survives navigation, clears on browser refresh) ──
   const {
@@ -162,6 +163,11 @@ export const AgentChat = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
 
+  // Resolver for the SSE-based result race (large test counts where HTTP may be slow)
+  const sseResultResolverRef = useRef<((data: Record<string, unknown>) => void) | null>(null);
+  // True while handleSendMessage is actively awaiting Promise.race — gates the recovery effect
+  const executionActiveRef = useRef(false);
+
   // Hook for execution logs and browser state
   // Pass agentSessionId so the SSE channel is stable across navigation.
   const {
@@ -179,21 +185,28 @@ export const AgentChat = () => {
     disconnect,
     clearLogs: clearHookLogs,
     addLog: addHookLog,
-  } = useExecutionWebSocket(agentSessionId);
+  } = useExecutionWebSocket(agentSessionId, (data) => {
+    if (sseResultResolverRef.current) {
+      sseResultResolverRef.current(data);
+      sseResultResolverRef.current = null;
+    }
+  });
 
-  // Merge SSE hook logs into the persistent store whenever they change
+  // Merge SSE hook logs into the persistent store whenever they change.
+  // Compare by last-log ID (not just length) so a new run with the same
+  // number of logs as the previous run still triggers a store update.
   useEffect(() => {
-    if (sseHookLogs.length > 0) {
-      // Convert ExecutionLog → AgentExecutionLog (Date → ISO string)
-      const converted: AgentExecutionLog[] = sseHookLogs.map((l) => ({
-        ...l,
-        timestamp: l.timestamp instanceof Date ? l.timestamp.toISOString() : String(l.timestamp),
-      }));
-      // Only update store when we have new logs (avoid infinite loop)
-      if (converted.length !== agentLogs.length) {
-        // Replace store logs with current SSE logs
-        useAgentChatStore.getState().setAgentLogs(converted);
-      }
+    const converted: AgentExecutionLog[] = sseHookLogs.map((l) => ({
+      ...l,
+      timestamp: l.timestamp instanceof Date ? l.timestamp.toISOString() : String(l.timestamp),
+    }));
+
+    const lastSseId = sseHookLogs.length > 0 ? sseHookLogs[sseHookLogs.length - 1].id : null;
+    const lastStoreId = agentLogs.length > 0 ? agentLogs[agentLogs.length - 1].id : null;
+
+    // Sync when: log set is different (new run or new entries) OR logs were cleared
+    if (lastSseId !== lastStoreId || converted.length !== agentLogs.length) {
+      useAgentChatStore.getState().setAgentLogs(converted);
     }
   }, [sseHookLogs]);
 
@@ -223,15 +236,21 @@ export const AgentChat = () => {
     if (sseCurrentStep !== agentCurrentStep) setAgentCurrentStep(sseCurrentStep);
   }, [sseCurrentStep]);
 
-  // Use persisted logs/progress/current when SSE is not active
-  const logs = sseHookLogs.length > 0 ? sseHookLogs : agentLogs.map((l) => ({
-    ...l,
-    timestamp: new Date(l.timestamp),
-  })) as typeof sseHookLogs;
+  // During execution (isExecuting=true): always show live SSE logs — even if
+  // isConnected is briefly false (connecting/reconnecting). Old agentLogs must NOT
+  // bleed through while a new run is in progress.
+  // When idle (isExecuting=false) and disconnected: fall back to persisted store
+  // logs for history view.
+  const logs = (isConnected || agentIsExecuting)
+    ? sseHookLogs
+    : agentLogs.map((l) => ({
+        ...l,
+        timestamp: new Date(l.timestamp),
+      })) as typeof sseHookLogs;
 
-  const progress = isConnected ? sseProgress : agentProgress;
-  const currentTest = isConnected ? sseCurrentTest : agentCurrentTest;
-  const currentStep = isConnected ? sseCurrentStep : agentCurrentStep;
+  const progress = (isConnected || agentIsExecuting) ? sseProgress : agentProgress;
+  const currentTest = (isConnected || agentIsExecuting) ? sseCurrentTest : agentCurrentTest;
+  const currentStep = (isConnected || agentIsExecuting) ? sseCurrentStep : agentCurrentStep;
 
   const clearLogs = useCallback(() => {
     clearHookLogs();
@@ -274,6 +293,66 @@ export const AgentChat = () => {
       setShowLiveLog(true);
     }
     // Only run on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // On mount: if execution was in-progress when we navigated away, poll for the cached result.
+  // This recovers from the case where: execution completed, HTTP/SSE both failed to deliver
+  // the result before the user navigated away, and now agentIsExecuting is stale=true.
+  // executionActiveRef guards against running in parallel with handleSendMessage's own poll.
+  useEffect(() => {
+    if (!agentIsExecuting || executionActiveRef.current) return;
+
+    let stopped = false;
+    const recover = async () => {
+      // Poll rapidly until result is found or execution truly completes
+      for (let i = 0; i < 120 && !stopped; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        try {
+          const cached = await getLastResult(agentSessionId);
+          if (!cached || stopped) continue;
+
+          // Found a cached result — apply it to the UI
+          if (cached.execution_results) setExecutionResult(cached.execution_results);
+          if (cached.parsed_suite) setTestSuite(cached.parsed_suite);
+          if (cached.generated_script) setGeneratedScript(cached.generated_script);
+
+          const summary = cached.summary ?? { total: 0, passed: 0, failed: 0, retries: 0 };
+          const statusIcon = summary.failed > 0 ? '⚠️' : '✅';
+          const resultSummary = cached.execution_results?.results?.map((r: { test_id: string; status: string; steps?: Array<{ status: string }> }) => {
+            const icon = r.status === 'PASSED' ? '✅' : '❌';
+            const stepsInfo = r.steps ? `(${r.steps.filter((s: { status: string }) => s.status === 'PASSED').length}/${r.steps.length} steps)` : '';
+            return `${icon} **${r.test_id}**: ${r.status} ${stepsInfo}`;
+          }).join('\n') || 'No detailed results available';
+
+          useAgentChatStore.getState().addAgentMessage({
+            id: `recovered_${Date.now()}`,
+            type: 'agent',
+            content: `${statusIcon} **Multi-Agent Execution Complete** *(recovered)*\n\n` +
+              `**Results:**\n${resultSummary}\n\n` +
+              `**Summary:** ${summary.passed}/${summary.total} passed` +
+              (summary.retries > 0 ? ` (${summary.retries} retries)` : ''),
+            timestamp: new Date().toISOString(),
+            status: 'complete',
+          });
+
+          addNotification(
+            summary.failed > 0 ? 'warning' : 'success',
+            `Execution complete: ${summary.passed}/${summary.total} passed`
+          );
+
+          useAgentChatStore.getState().setAgentIsExecuting(false);
+          useAgentChatStore.getState().setAgentIsProcessing(false);
+          clearActiveSession();
+          break;
+        } catch {
+          // ignore, keep polling
+        }
+      }
+    };
+
+    recover();
+    return () => { stopped = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -565,6 +644,7 @@ export const AgentChat = () => {
 
     setIsProcessing(true);
     setIsExecuting(true);
+    executionActiveRef.current = true; // signal recovery effect to stay idle
     saveActiveSession(sessionId); // persist so refresh can kill backend
     clearLogs();
     clearAgentState();
@@ -573,6 +653,52 @@ export const AgentChat = () => {
 
     // Connect to SSE for real-time updates
     connect();
+
+    // Register SSE result resolver immediately — BEFORE any awaits — so it is ready
+    // even if deep_agent_complete fires during a long execution (e.g. 100 test cases).
+    const ssePromise = new Promise<import('./../../services/api').MultiAgentResponse>((resolve) => {
+      sseResultResolverRef.current = (data) => {
+        const summary = (data.data as { total: number; passed: number; failed: number; retries?: number }) || { total: 0, passed: 0, failed: 0 };
+        resolve({
+          status: (data.status as 'success' | 'error' | 'completed') || 'completed',
+          message: (data.message as string) || '',
+          validation_status: summary.failed === 0 ? 'passed' : 'failed',
+          summary: {
+            total: summary.total,
+            passed: summary.passed,
+            failed: summary.failed,
+            retries: summary.retries ?? 0,
+          },
+          execution_results: (data.execution_results as import('../../services/api').ExecutionResult) || { total: summary.total, passed: summary.passed, failed: summary.failed, results: [] },
+          parsed_suite: (data.parsed_suite as import('../../services/api').TestSuite) || null,
+          report: null,
+          generated_script: null,
+          orchestration: (data.orchestration as import('../../services/api').MultiAgentResponse['orchestration']) || { iterations: 0, action_history: [], sub_agents_used: ['ReporterAgent'] },
+          errors: [],
+          completed_at: new Date().toISOString(),
+        });
+      };
+    });
+
+    // Polling fallback: if both SSE and HTTP fail (e.g. SSE drops, HTTP times out),
+    // poll the backend result cache every 3s. This is the primary recovery path for
+    // long-running tests where the Vite proxy may silently drop the HTTP connection.
+    let pollingStopped = false;
+    const pollPromise = new Promise<import('./../../services/api').MultiAgentResponse>((resolve) => {
+      const poll = async () => {
+        await new Promise((r) => setTimeout(r, 5000)); // first check after 5s
+        while (!pollingStopped) {
+          try {
+            const cached = await getLastResult(sessionId);
+            if (cached) { resolve(cached); return; }
+          } catch {
+            // ignore individual poll errors, keep polling
+          }
+          await new Promise((r) => setTimeout(r, 3000)); // poll every 3s
+        }
+      };
+      poll();
+    });
 
     // Wait for connection to establish (up to 2 seconds)
     for (let i = 0; i < 20; i++) {
@@ -624,20 +750,28 @@ export const AgentChat = () => {
       addThought('executing', 'ParserAgent analyzing test cases...');
 
       // Call Multi-Agent API - it handles parsing, execution, validation, and reporting
-      // headless: true means browser runs in background, screenshots shown in app
-      const result = await executeMultiAgent(
+      // headless: false when liveBrowserEnabled → real browser window opens on server
+      // ssePromise was registered before any awaits (above) so it catches deep_agent_complete
+      // even for long-running executions where HTTP response may be slow.
+      // httpPromise rejection (timeout/network error) must NOT reject the race —
+      // SSE or poll may still succeed. Swallow the error and let the promise hang.
+      const httpPromise = executeMultiAgent(
         selectedTests,
         sessionId,
         {
           projectName: uploadResponse?.filename || 'Test Project',
           llmProvider: llmProvider,  // Use selected LLM provider
           model: llmOptions[llmProvider].model,  // Use corresponding model
-          headless: !keepBrowserOpenAgent,
+          headless: !liveBrowserEnabled,
           keepBrowserOpen: keepBrowserOpenAgent,
           timeout: 30000,
           maxRetries: 2,
         }
-      );
+      ).catch(() => new Promise<never>(() => {})); // on error: never resolve, let SSE/poll win
+
+      const result = await Promise.race([httpPromise, ssePromise, pollPromise]);
+      // Clear SSE resolver if HTTP/poll won the race (avoid double-resolve)
+      sseResultResolverRef.current = null;
 
       // Log API response
       addLog({
@@ -746,6 +880,9 @@ export const AgentChat = () => {
         message: `Execution failed: ${errorMsg}`,
       });
     } finally {
+      pollingStopped = true; // stop the polling loop
+      executionActiveRef.current = false; // allow recovery effect on next mount
+      sseResultResolverRef.current = null; // prevent stale resolver from firing
       setIsProcessing(false);
       clearActiveSession(); // execution done — no orphan to kill on next refresh
       // Disconnect SSE after execution
@@ -1752,6 +1889,15 @@ export const AgentChat = () => {
         </AnimatePresence>
       </div>
 
+      {/* Status notes — shown above input area when toggles are on */}
+      {(liveBrowserEnabled || keepBrowserOpenAgent) && (
+        <div className={styles.liveBrowserNote}>
+          {liveBrowserEnabled && <><Monitor size={12} /><span>Browser window will open on the server machine during execution</span></>}
+          {liveBrowserEnabled && keepBrowserOpenAgent && <span style={{ margin: '0 8px', opacity: 0.4 }}>·</span>}
+          {keepBrowserOpenAgent && <><Layers size={12} /><span>Browser session shared across all test cases — login once, stay logged in</span></>}
+        </div>
+      )}
+
       {/* Input Area */}
       <div className={styles.inputArea}>
         <input
@@ -1761,6 +1907,30 @@ export const AgentChat = () => {
           onChange={(e) => e.target.files?.[0] && handleFileSelect(e.target.files[0])}
           className={styles.fileInput}
         />
+
+        {/* Live Browser Toggle */}
+        <button
+          className={`${styles.liveBrowserToggle} ${liveBrowserEnabled ? styles.liveBrowserToggleOn : ''}`}
+          onClick={() => setLiveBrowserEnabled(!liveBrowserEnabled)}
+          disabled={isExecuting || isProcessing}
+          title={liveBrowserEnabled ? 'Live Browser ON — real browser window opens on server during execution' : 'Live Browser OFF — browser runs headless, screenshots streamed in-app'}
+          type="button"
+        >
+          <Monitor size={16} />
+          <span>Live Browser</span>
+        </button>
+
+        {/* Keep Session Toggle */}
+        <button
+          className={`${styles.keepSessionToggle} ${keepBrowserOpenAgent ? styles.keepSessionToggleOn : ''}`}
+          onClick={() => setKeepBrowserOpenAgent(!keepBrowserOpenAgent)}
+          disabled={isExecuting || isProcessing}
+          title={keepBrowserOpenAgent ? 'Keep Session ON — browser stays open across all test cases, login once and reuse' : 'Keep Session OFF — fresh browser for each test case'}
+          type="button"
+        >
+          <Layers size={16} />
+          <span>Keep Session</span>
+        </button>
 
         <motion.button
           className={styles.uploadButton}

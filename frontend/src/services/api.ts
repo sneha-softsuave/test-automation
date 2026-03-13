@@ -378,6 +378,16 @@ export const executeMultiAgent = async (
   return response.data;
 };
 
+export const getLastResult = async (sessionId: string): Promise<MultiAgentResponse | null> => {
+  try {
+    const response = await api.get(`/deep-agent/last-result/${sessionId}`, { timeout: 10000 });
+    if (response.data?.status === 'not_found') return null;
+    return response.data as MultiAgentResponse;
+  } catch {
+    return null;
+  }
+};
+
 export const executeFromParsed = async (
   testSuite: object,
   sessionId: string,

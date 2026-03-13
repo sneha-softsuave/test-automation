@@ -678,7 +678,8 @@ class MultiAgentOrchestrator:
         keep_browser_open: bool = True,
         timeout: int = 30000,
         max_retries: int = 2,
-        broadcast_func: Optional[Callable] = None
+        broadcast_func: Optional[Callable] = None,
+        stop_event=None,
     ) -> Dict[str, Any]:
         """
         ALTERNATIVE: Run with TRUE SEQUENTIAL processing (parse one, execute one).
@@ -705,6 +706,7 @@ class MultiAgentOrchestrator:
             model=self.model,
             broadcast_func=broadcast_func
         )
+        self._stop_event = stop_event  # Allow sub-agents to check for stop signal
 
         # Initialize sub-agents
         self._init_sub_agents(broadcast_func)
@@ -726,16 +728,17 @@ class MultiAgentOrchestrator:
         # Auth state (cookies + localStorage) carried forward across tests
         shared_storage_state = None
 
-        # Process each test case ONE AT A TIME: Parse → Execute → Retry
+        # PHASE 1: Parse ALL test cases first
+        print(f"[Supervisor] Phase 1: Parsing all {total_tests} test cases...")
         for test_index, raw_test_case in enumerate(raw_data):
+            if stop_event and stop_event.is_set():
+                print(f"[Supervisor] Stop requested during parsing — aborting")
+                self._broadcast({"type": "execution_stopped", "message": "Test execution stopped by user"})
+                return {"status": "stopped", "errors": ["Stopped by user"], "generated_script": None, "report_data": None}
+
             test_num = test_index + 1
             raw_test_id = raw_test_case.get("T.C.No", f"TC_{test_num:03d}")
             raw_test_name = raw_test_case.get("Test Case", "Unknown Test")
-
-            self.state.current_test_index = test_index
-            self.state.current_test_retry_count = 0
-
-            print(f"\n[Supervisor] ========== Test {test_num}/{total_tests}: {raw_test_id} - {raw_test_name} ==========")
 
             self._broadcast({
                 "type": "agent_phase",
@@ -743,8 +746,7 @@ class MultiAgentOrchestrator:
                 "message": f"Parsing test {test_num}/{total_tests}: {raw_test_name}"
             })
 
-            # STEP 1: Parse this single test case
-            print(f"[Supervisor] Step 1: Parsing single test case...")
+            print(f"[Supervisor] Parsing test {test_num}/{total_tests}: {raw_test_id}...")
             parse_result = self._parse_single_test(
                 raw_test_case=raw_test_case,
                 test_index=test_index,
@@ -761,51 +763,129 @@ class MultiAgentOrchestrator:
                     "error": f"Parsing failed: {parse_result.get('error', 'Unknown error')}",
                     "steps_results": []
                 })
+                # Append a placeholder so indices stay aligned
+                all_parsed_test_cases.append(None)
                 continue
 
             parsed_test_case = parse_result["parsed_test_case"]
             all_parsed_test_cases.append(parsed_test_case)
 
-            test_id = parsed_test_case.get("id", raw_test_id)
-            test_name = parsed_test_case.get("name", raw_test_name)
-
             self._broadcast({
                 "type": "thoughts",
-                "message": f"Parsed {test_id}: {len(parsed_test_case.get('steps', []))} steps"
+                "message": f"Parsed {parsed_test_case.get('id', raw_test_id)}: {len(parsed_test_case.get('steps', []))} steps"
             })
 
-            # STEP 2: Execute this single test (with retries if needed)
-            print(f"[Supervisor] Step 2: Executing test {test_id}...")
+        # PHASE 2: Execute — strategy depends on keep_browser_open
+        if stop_event and stop_event.is_set():
+            print(f"[Supervisor] Stop requested before execution — aborting")
+            self._broadcast({"type": "execution_stopped", "message": "Test execution stopped by user"})
+            return {"status": "stopped", "errors": ["Stopped by user"], "generated_script": None, "report_data": None}
 
+        valid_parsed = [tc for tc in all_parsed_test_cases if tc is not None]
+
+        if keep_browser_open and len(valid_parsed) > 0:
+            # Single execute_enhanced call with all tests → one browser stays open for all
+            print(f"[Supervisor] keep_browser_open=True: running all {len(valid_parsed)} tests in one browser session")
             self._broadcast({
                 "type": "agent_phase",
                 "phase": "execute",
-                "message": f"Executing test {test_num}/{total_tests}: {test_name}"
+                "message": f"Executing all {len(valid_parsed)} tests in a single browser session..."
             })
 
-            test_result = self._execute_single_test_with_retry(
-                test_case=parsed_test_case,
-                test_index=test_index,
-                total_tests=total_tests,
-                initial_storage_state=shared_storage_state
-            )
+            base_suite = self.state.parsed_suite or {}
+            full_suite = {
+                "project": base_suite.get("project", project_name),
+                "base_url": base_suite.get("base_url", base_url or ""),
+                "common_selectors": base_suite.get("common_selectors", {}),
+                "test_data": base_suite.get("test_data", {}),
+                "test_cases": valid_parsed
+            }
 
-            # Store the result
-            self.state.all_test_results.append(test_result)
-
-            # Carry authentication state forward to next test
-            next_state = test_result.get("final_storage_state")
-            if next_state is not None:
-                shared_storage_state = next_state
-                print(f"[Supervisor] Auth state carried forward ({len(next_state.get('cookies', []))} cookies)")
-
-            status = "PASSED" if test_result.get("status") == "PASSED" else "FAILED"
-            print(f"[Supervisor] Test {test_id} final status: {status}")
-
-            self._broadcast({
-                "type": "thoughts",
-                "message": f"Test {test_num}/{total_tests} ({test_id}): {status}"
+            exec_result = self.executor_agent.execute({
+                "parsed_suite": full_suite,
+                "headless": headless,
+                "keep_browser_open": True,
+                "timeout": timeout,
+                "base_url": base_url,
+                "initial_storage_state": shared_storage_state,
+                "stop_event": stop_event,
             })
+
+            if exec_result["success"]:
+                execution_results = exec_result.get("execution_results") or {}
+                batch_results = execution_results.get("results", [])
+                for test_result in batch_results:
+                    self.state.all_test_results.append(test_result)
+                    status = "PASSED" if test_result.get("status") == "PASSED" else "FAILED"
+                    tid = test_result.get("test_id", "?")
+                    print(f"[Supervisor] {tid}: {status}")
+                    self._broadcast({
+                        "type": "thoughts",
+                        "message": f"{tid}: {status}"
+                    })
+                # Carry forward final auth state
+                final_storage = exec_result.get("final_storage_state") or execution_results.get("final_storage_state")
+                if final_storage:
+                    shared_storage_state = final_storage
+            else:
+                print(f"[Supervisor] Batch execution error: {exec_result.get('error')}")
+                for tc in valid_parsed:
+                    self.state.all_test_results.append({
+                        "test_id": tc.get("id", "?"),
+                        "test_name": tc.get("name", "Unknown"),
+                        "status": "FAILED",
+                        "error": exec_result.get("error", "Execution failed"),
+                        "steps_results": []
+                    })
+
+        else:
+            # Original sequential behaviour: one browser per test (or keep_browser_open=False)
+            print(f"[Supervisor] keep_browser_open=False: running tests sequentially (fresh browser per test)")
+            for test_index, raw_test_case in enumerate(raw_data):
+                test_num = test_index + 1
+                raw_test_id = raw_test_case.get("T.C.No", f"TC_{test_num:03d}")
+                raw_test_name = raw_test_case.get("Test Case", "Unknown Test")
+                parsed_test_case = all_parsed_test_cases[test_index] if test_index < len(all_parsed_test_cases) else None
+
+                if parsed_test_case is None:
+                    # Already recorded as failed during parse phase
+                    continue
+
+                test_id = parsed_test_case.get("id", raw_test_id)
+                test_name = parsed_test_case.get("name", raw_test_name)
+
+                self.state.current_test_index = test_index
+                self.state.current_test_retry_count = 0
+
+                print(f"\n[Supervisor] ========== Test {test_num}/{total_tests}: {test_id} - {test_name} ==========")
+
+                self._broadcast({
+                    "type": "agent_phase",
+                    "phase": "execute",
+                    "message": f"Executing test {test_num}/{total_tests}: {test_name}"
+                })
+
+                test_result = self._execute_single_test_with_retry(
+                    test_case=parsed_test_case,
+                    test_index=test_index,
+                    total_tests=total_tests,
+                    initial_storage_state=shared_storage_state
+                )
+
+                self.state.all_test_results.append(test_result)
+
+                next_state = test_result.get("final_storage_state")
+                if next_state is not None:
+                    shared_storage_state = next_state
+                    print(f"[Supervisor] Auth state carried forward ({len(next_state.get('cookies', []))} cookies)")
+
+                status = "PASSED" if test_result.get("status") == "PASSED" else "FAILED"
+                print(f"[Supervisor] Test {test_id} final status: {status}")
+
+                self._broadcast({
+                    "type": "thoughts",
+                    "message": f"Test {test_num}/{total_tests} ({test_id}): {status}"
+                })
 
         # STEP 3: Build final execution results from all test results
         print(f"\n[Supervisor] ========== Building Final Results ==========")
@@ -849,7 +929,10 @@ class MultiAgentOrchestrator:
             "type": "deep_agent_complete",
             "status": "success" if self.state.validation_status == "passed" else "completed",
             "message": f"Sequential execution complete: {passed}/{total_tests} passed",
-            "data": final_result["summary"]
+            "data": final_result["summary"],
+            "execution_results": final_result["execution_results"],
+            "parsed_suite": final_result["parsed_suite"],
+            "orchestration": final_result["orchestration"],
         })
 
         return final_result
@@ -944,8 +1027,13 @@ class MultiAgentOrchestrator:
                 # SUCCESS! Return the single parsed test case
                 parsed_test_case = test_cases[0]
 
-                # Ensure ID is normalized
-                if "id" not in parsed_test_case or not parsed_test_case["id"]:
+                # Ensure ID is set correctly — prefer the original T.C.No from raw data
+                # so TC_011, TC_012 are preserved when running a subset of tests.
+                raw_tc_no = raw_test_case.get("T.C.No") or raw_test_case.get("tc_no")
+                if raw_tc_no:
+                    nums = ''.join(filter(str.isdigit, str(raw_tc_no)))
+                    parsed_test_case["id"] = f"TC_{int(nums):03d}" if nums else f"TC_{test_index + 1:03d}"
+                elif "id" not in parsed_test_case or not parsed_test_case["id"]:
                     parsed_test_case["id"] = f"TC_{test_index + 1:03d}"
 
                 if attempt > 0:
@@ -1249,7 +1337,10 @@ class MultiAgentOrchestrator:
             "type": "deep_agent_complete",
             "status": "success" if self.state.validation_status == "passed" else "completed",
             "message": f"Multi-agent orchestration complete: {final_result['summary']['passed']}/{final_result['summary']['total']} passed",
-            "data": final_result["summary"]
+            "data": final_result["summary"],
+            "execution_results": final_result["execution_results"],
+            "parsed_suite": final_result["parsed_suite"],
+            "orchestration": final_result["orchestration"],
         })
 
         return final_result
@@ -1319,7 +1410,7 @@ def run_multi_agent(
         model=model
     )
 
-    return orchestrator.run(
+    return orchestrator.run_sequential(
         raw_data=raw_data,
         project_name=project_name,
         base_url=base_url,

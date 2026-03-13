@@ -73,7 +73,7 @@ class ExecutorAgent(BaseSubAgent):
             "message": f"ExecutorAgent running {test_count} tests (headless={headless})..."
         })
 
-        self.log(f"Starting execution: {test_count} tests, headless={headless}, timeout={timeout}")
+        self.log(f"Starting execution: {test_count} tests, headless={headless}, keep_browser_open={keep_browser_open}, timeout={timeout}")
 
         # Validate input
         if not parsed_suite:

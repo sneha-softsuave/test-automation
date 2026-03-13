@@ -87,7 +87,7 @@ export interface ExecutionResult {
   executed_at: string;
 }
 
-type View = 'generate' | 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest' | 'loadtest-logs' | 'loadtest-reports' | 'loadtest-insights' | 'settings' | 'projects' | 'project-workspace';
+type View = 'generate' | 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest' | 'loadtest-logs' | 'loadtest-reports' | 'loadtest-insights' | 'settings' | 'projects';
 
 export interface ProjectSummary { name: string; test_count: number; }
 
@@ -322,6 +322,8 @@ interface AppState {
   // Browser Behaviour Settings
   keepBrowserOpenAgent: boolean;  // Functional Test Agent: default false (close between test cases)
   setKeepBrowserOpenAgent: (enabled: boolean) => void;
+  liveBrowserEnabled: boolean;    // Show real browser window on server (headless=false)
+  setLiveBrowserEnabled: (enabled: boolean) => void;
 
   // Image Analysis (Vision) Settings
   imageAnalysisEnabled: boolean;
@@ -668,6 +670,8 @@ export const useStore = create<AppState>()(
       // Browser Behaviour Settings
       keepBrowserOpenAgent: false,  // default OFF: browser closes between test cases
       setKeepBrowserOpenAgent: (enabled) => set({ keepBrowserOpenAgent: enabled }),
+      liveBrowserEnabled: false,    // default OFF: headless (screenshots in-app)
+      setLiveBrowserEnabled: (enabled) => set({ liveBrowserEnabled: enabled }),
 
       // Projects
       selectedProjectName: null,
@@ -681,9 +685,9 @@ export const useStore = create<AppState>()(
         set((state) => ({ projectActiveSuites: { ...state.projectActiveSuites, [projectName]: suite } })),
       clearProjectActiveSuite: (projectName) =>
         set((state) => {
-          const updated = { ...state.projectActiveSuites };
-          delete updated[projectName];
-          return { projectActiveSuites: updated };
+          const next = { ...state.projectActiveSuites };
+          delete next[projectName];
+          return { projectActiveSuites: next };
         }),
       projectExecutionResults: {},
       setProjectExecutionResult: (projectName, result) =>
@@ -763,6 +767,7 @@ export const useStore = create<AppState>()(
         defaultLandingPage: state.defaultLandingPage,
         // Browser behaviour settings
         keepBrowserOpenAgent: state.keepBrowserOpenAgent,
+        liveBrowserEnabled: state.liveBrowserEnabled,
         // Image analysis settings
         imageAnalysisEnabled: state.imageAnalysisEnabled,
         // screenshots excluded - base64 images exceed localStorage quota

@@ -191,7 +191,10 @@ export interface UseExecutionWebSocketReturn {
   addLog: (log: Omit<ExecutionLog, 'id' | 'timestamp'>) => void;
 }
 
-export const useExecutionWebSocket = (fixedSessionId?: string): UseExecutionWebSocketReturn => {
+export const useExecutionWebSocket = (
+  fixedSessionId?: string,
+  onDeepAgentComplete?: (data: Record<string, unknown>) => void,
+): UseExecutionWebSocketReturn => {
   const [isConnected, setIsConnected] = useState(false);
   const [logs, setLogs] = useState<ExecutionLog[]>([]);
   const [currentTest, setCurrentTest] = useState<string | null>(null);
@@ -216,6 +219,8 @@ export const useExecutionWebSocket = (fixedSessionId?: string): UseExecutionWebS
   const [liveExcelRows, setLiveExcelRows] = useState<LiveExcelRow[]>([]);
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const onDeepAgentCompleteRef = useRef(onDeepAgentComplete);
+  onDeepAgentCompleteRef.current = onDeepAgentComplete;
   // Use the provided fixed session ID (for persistence) or generate a new one
   const sessionIdRef = useRef<string>(
     fixedSessionId ?? `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
@@ -463,6 +468,10 @@ export const useExecutionWebSocket = (fixedSessionId?: string): UseExecutionWebS
             type: 'execution_complete',
             message: `[Deep Agent] ${data.message}`,
           });
+          // Notify caller so it can resolve the result without waiting for HTTP response
+          if (onDeepAgentCompleteRef.current) {
+            onDeepAgentCompleteRef.current(data);
+          }
           break;
 
         case 'execution_started':
@@ -731,8 +740,13 @@ export const useExecutionWebSocket = (fixedSessionId?: string): UseExecutionWebS
   }, [addLog, mapToActiveAgent]);
 
   const connect = useCallback(() => {
+    // Always close any existing connection before opening a new one.
+    // Avoids the stale-connection bug where a second run gets no events
+    // because the old EventSource is still assigned but the server session ended.
     if (eventSourceRef.current) {
-      return;
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+      setIsConnected(false);
     }
 
     const sessionId = sessionIdRef.current;
@@ -757,10 +771,14 @@ export const useExecutionWebSocket = (fixedSessionId?: string): UseExecutionWebS
       eventSource.onmessage = handleMessage;
 
       eventSource.onerror = (error) => {
-        console.error('❌ SSE error:', error);
+        console.error('❌ SSE error:', error, 'readyState:', eventSource.readyState);
+        // Only mark as disconnected when fully closed — not during transient
+        // CONNECTING states which the browser handles automatically.
         if (eventSource.readyState === EventSource.CLOSED) {
+          console.log('📡 SSE closed, marking disconnected');
           setIsConnected(false);
         }
+        // If readyState is CONNECTING (0), the browser is auto-reconnecting — stay connected.
       };
     } catch (error) {
       console.error('SSE connection error:', error);

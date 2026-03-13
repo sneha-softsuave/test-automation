@@ -123,10 +123,13 @@ Allowed action_type values:
   "assert_checked"   — verify checkbox/radio is checked
   "assert_attribute" — verify element has attribute=value (value = "attr=expected_val")
   "assert_table"     — verify table headers are visible; selector = table locator, value = comma-separated expected column names
+  Use assert_all_rows with validation="unique" when user says "verify no duplicate values" or "all IDs are unique"
 
   — OTHER —
   "wait"           — wait for element or time; value = ms number OR state like "visible"
   "screenshot"     — capture a screenshot
+  "date_picker"    — click a date picker/calendar widget and select a specific date; value = target date in MM/DD/YYYY
+  "capture"        — read and STORE a value from an element/column/URL for use in subsequent steps (value is available to fill steps via source:"context")
 
 SELECTOR RULES — MANDATORY:
 - Each input/button in the page context above has a "→ USE: ..." suggested selector
@@ -146,6 +149,12 @@ IMPORTANT — Custom dropdown / list items:
   use action_type "click" with selector page.get_by_text('X', exact=True).
 - Do NOT use action_type "select" for custom (non-native) dropdowns — use "click" instead.
 - For native <select> elements still use action_type "select".
+
+IMPORTANT — Dropdown trigger vs navigation button disambiguation:
+- When the user says "click the X dropdown" or "click the X filter" or "open the X dropdown", they mean the DROPDOWN TRIGGER (a filter/form control), NOT a sidebar or navigation button that happens to contain the word X.
+- Sidebar/navigation buttons (e.g. "Our Project", "Incident", "Dashboard") are navigation items — NEVER use them when the user says "dropdown", "filter", or "select [from dropdown]".
+- Prefer selectors that target dropdown triggers: page.get_by_role('combobox', name='X'), page.get_by_label('X'), locator('label:has-text("X") ~ * button'), or locator('[class*="dropdown"]') over a plain text button match.
+- If the page context shows a button whose text happens to match a word in the user's command but the user explicitly says "dropdown", ignore that button and use a label-based or role-based selector for the dropdown instead.
 
 Rules:
 - ONLY generate actions that are EXPLICITLY described in the user paragraph — never add, infer, or assume extra steps
@@ -241,6 +250,7 @@ Pick exactly ONE of these action_type values:
   "assert_checked"   — checkbox is checked
   "assert_attribute" — has attribute (value = "attr=expected_val")
   "assert_table"     — table headers visible; value = comma-separated column names
+  Use assert_all_rows with validation="unique" when user says "verify no duplicate values" or "all IDs are unique"
   "wait"           — wait for element/time
   "screenshot"     — capture screenshot
 
@@ -262,6 +272,12 @@ IMPORTANT — Custom dropdown / list items:
   use action_type "click" with selector page.get_by_text('X', exact=True).
 - Do NOT use action_type "select" for custom (non-native) dropdowns — use "click" instead.
 - For native <select> elements still use action_type "select".
+
+IMPORTANT — Dropdown trigger vs navigation button disambiguation:
+- When the command says "click the X dropdown" or "click the X filter" or "open the X dropdown", they mean the DROPDOWN TRIGGER (a filter/form control), NOT a sidebar or navigation button that happens to contain the word X.
+- Sidebar/navigation buttons (e.g. "Our Project", "Incident", "Dashboard") are navigation items — NEVER use them when the user says "dropdown", "filter", or "select [from dropdown]".
+- Prefer selectors that target dropdown triggers: page.get_by_role('combobox', name='X'), page.get_by_label('X'), locator('label:has-text("X") ~ * button'), or locator('[class*="dropdown"]') over a plain text button match.
+- If the page context shows a button whose text happens to match a word in the command but the command explicitly says "dropdown", ignore that button and use a label-based or role-based selector for the dropdown instead.
 
 Return ONLY valid JSON starting with {{ and ending with }}:
 {{
@@ -576,7 +592,8 @@ class RecorderAgent(BaseAgent):
 
         logger.info(f"RecorderAgent parsing multi-step: {paragraph!r}")
         raw = self.call_llm(prompt)
-        return self._parse_json_array_response(raw)
+        actions = self._parse_json_array_response(raw)
+        return self._fix_recorder_action_types(actions)
 
     def parse_command(self, command: str, page: Any) -> Dict[str, Any]:
         """
@@ -592,6 +609,86 @@ class RecorderAgent(BaseAgent):
         logger.info(f"RecorderAgent parsing: {command!r}")
         raw = self.call_llm(prompt)
         return self._parse_json_response(raw)
+
+    def _fix_recorder_action_types(self, actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Post-process the LLM-parsed action list to fix common misclassifications.
+
+        Key rule: collapse consecutive row-iteration steps
+        ("capture all rows", "for each row fetch X", "validate not null")
+        into a single assert_all_rows action — mirroring what enhanced_json_parser
+        does via _fix_action_types for the functional test agent.
+        """
+        ROW_ITER_KEYWORDS = [
+            "for each row", "for every row", "each row", "all rows", "every row",
+            "capture all", "iterate row", "fetch.*column", "validate.*row",
+            "not null", "not empty",
+        ]
+        SKIP_WORDS = {"click", "press", "tap", "open", "close", "the", "a", "an", "on",
+                      "button", "link", "element", "icon", "menu", "dropdown", "select",
+                      "in", "to", "at", "of", "for", "with", "by", "as", "or", "and",
+                      "validate", "verify", "check", "fetch", "capture", "value", "is",
+                      "not", "null", "empty", "row", "rows", "each", "every", "all"}
+
+        fixed: List[Dict[str, Any]] = []
+        pending_assert_all: Optional[Dict[str, Any]] = None  # accumulates row-iteration context
+
+        for action in actions:
+            instr = (action.get("instruction") or "").lower()
+            atype = action.get("action_type", "")
+
+            is_row_iter = any(re.search(kw, instr) for kw in ROW_ITER_KEYWORDS)
+
+            if is_row_iter:
+                # Extract column name from instruction if possible
+                col_match = re.search(r'["\']([^"\']+)["\']', instr)
+                col_name = col_match.group(1).strip() if col_match else None
+                if not col_name:
+                    col_match2 = re.search(r'(?:fetch|column|value)\s+(?:of\s+)?([A-Za-z][A-Za-z0-9 _-]{2,})', instr)
+                    col_name = col_match2.group(1).strip() if col_match2 else None
+
+                if pending_assert_all is None:
+                    # Start accumulating
+                    pending_assert_all = {
+                        "action_type": "assert_all_rows",
+                        "selector": "",
+                        "value": col_name or "",
+                        "instruction": action.get("instruction", ""),
+                        "test_data": {
+                            "column_name": col_name or "",
+                            "validation": "not_empty",
+                            "min_rows": 1,
+                        },
+                    }
+                else:
+                    # Merge: update column_name and instruction if we now have better info
+                    if col_name and not pending_assert_all["test_data"].get("column_name"):
+                        pending_assert_all["test_data"]["column_name"] = col_name
+                        pending_assert_all["value"] = col_name
+                    pending_assert_all["instruction"] += " + " + action.get("instruction", "")
+                # Don't emit yet — keep accumulating
+                continue
+
+            # Non-row-iter action: flush any pending assert_all_rows first
+            if pending_assert_all is not None:
+                logger.info(
+                    f"[fix_recorder] Collapsed row-iter steps → assert_all_rows "
+                    f"(column='{pending_assert_all['test_data'].get('column_name')}')"
+                )
+                fixed.append(pending_assert_all)
+                pending_assert_all = None
+
+            fixed.append(action)
+
+        # Flush at end
+        if pending_assert_all is not None:
+            logger.info(
+                f"[fix_recorder] Collapsed row-iter steps → assert_all_rows "
+                f"(column='{pending_assert_all['test_data'].get('column_name')}')"
+            )
+            fixed.append(pending_assert_all)
+
+        return fixed
 
     def execute_action(self, action: Dict[str, Any], page: Any, screenshot_b64: str = "") -> None:
         """
@@ -657,6 +754,37 @@ class RecorderAgent(BaseAgent):
             else:
                 ms = int(value) if value and value.isdigit() else 1000
                 page.wait_for_timeout(ms)
+
+        elif action_type == "assert_all_rows":
+            # Delegate to the same implementation used by the functional test agent
+            from app.tools.enhanced_executor import _execute_assert_all_rows_sync
+            test_data = action.get("test_data") or {}
+            # Allow value field to carry column_name when test_data is absent
+            if not test_data.get("column_name") and value:
+                test_data["column_name"] = value
+            _execute_assert_all_rows_sync(page, test_data, timeout=30_000)
+
+        elif action_type == "capture":
+            # Read a value from an element/column/URL — mirrors enhanced_executor capture logic
+            from app.tools.enhanced_executor import _read_cell_value_from_column
+            test_data = action.get("test_data") or {}
+            source = test_data.get("source", "element")
+            if source == "column":
+                col = test_data.get("column_name", "") or value
+                result_val = _read_cell_value_from_column(page, col) if col else None
+                logger.info(f"capture: column='{col}' → '{result_val}'")
+            elif source == "url":
+                logger.info(f"capture: url='{page.url}'")
+            else:
+                if selector_expr:
+                    try:
+                        loc = self._resolve_locator(page, selector_expr)
+                        result_val = loc.text_content(timeout=8_000)
+                        logger.info(f"capture: element text='{result_val}'")
+                    except Exception as _cap_err:
+                        logger.warning(f"capture element failed: {_cap_err}")
+                else:
+                    logger.info(f"capture: url fallback='{page.url}'")
 
         elif action_type == "assert":
             from playwright.sync_api import expect  # type: ignore
@@ -1288,6 +1416,52 @@ class RecorderAgent(BaseAgent):
         else:
             logger.warning(f"Empty selector received for click — going straight to fallbacks (instruction={instruction!r})")
 
+        # Fallback 0: if instruction mentions "dropdown" / "filter" / "combobox",
+        # use the same label-adjacent pattern that the functional test agent uses in
+        # _get_best_selector_sync (element_type="dropdown" branch).
+        # Extract the label from the instruction, then try:
+        #   label:has-text("X") ~ div button  (custom dropdown widget pattern)
+        # This must run BEFORE generic text/role fallbacks so we never land on a
+        # sidebar nav button that happens to share a word with the dropdown label.
+        _instr_lower_f0 = (instruction or "").lower()
+        if any(kw in _instr_lower_f0 for kw in ("dropdown", "filter", "combobox")):
+            _lbl_match = re.search(
+                r'(?:click|open|select|press|tap)\s+(?:the\s+)?(.+?)\s+(?:dropdown|filter|combobox)',
+                _instr_lower_f0
+            )
+            _lbl_f0 = _lbl_match.group(1).strip() if _lbl_match else None
+            if not _lbl_f0:
+                # Fallback: take all meaningful words (not stop-words) from instruction
+                _sw = {"click", "press", "tap", "open", "close", "the", "a", "an", "on",
+                       "button", "link", "element", "icon", "menu", "dropdown", "filter",
+                       "combobox", "select", "in", "to", "at", "of", "for", "with", "by"}
+                _lbl_f0 = " ".join(
+                    w.strip("'\".,") for w in _instr_lower_f0.split()
+                    if w.strip("'\".,") and w.strip("'\".,") not in _sw and len(w) > 2
+                )
+            if _lbl_f0:
+                # Mirror exactly the label_candidates logic from _get_best_selector_sync
+                _lbl_candidates = [_lbl_f0]
+                _cleaned = _lbl_f0.replace("dropdown", "").replace("select", "").strip()
+                if _cleaned and _cleaned != _lbl_f0:
+                    _lbl_candidates.append(_cleaned)
+                for _lbl in _lbl_candidates:
+                    for _lbl_sel in [
+                        f'label:has-text("{_lbl}") ~ div button',
+                        f'label:has-text("{_lbl}") + div button',
+                        f'label:has-text("{_lbl}") ~ button',
+                        f'label:has-text("{_lbl}") + button',
+                    ]:
+                        try:
+                            _loc = page.locator(_lbl_sel)
+                            if _loc.count() > 0:
+                                _loc.first.scroll_into_view_if_needed(timeout=2_000)
+                                _loc.first.click(timeout=8_000)
+                                logger.info(f"[dropdown priority] Click succeeded via label-adjacent: {_lbl_sel!r}")
+                                return
+                        except Exception:
+                            pass
+
         # Fallback 1: use value as text if provided (common for dropdown item clicks)
         if value and value.strip():
             try:
@@ -1334,6 +1508,40 @@ class RecorderAgent(BaseAgent):
         _skip_words = {"click", "press", "tap", "open", "close", "the", "a", "an", "on",
                        "button", "link", "element", "icon", "menu", "dropdown", "select",
                        "in", "to", "at", "of", "for", "with", "by", "as", "or", "and"}
+
+        # If the instruction mentions "dropdown" or "filter", try label-based dropdown selectors
+        # BEFORE falling back to plain button text — avoids matching sidebar nav buttons
+        _instr_lower = (instruction or "").lower()
+        _is_dropdown_instruction = any(kw in _instr_lower for kw in ("dropdown", "filter", "combobox"))
+        if _is_dropdown_instruction and instruction:
+            # Extract the label word(s): everything between verb and "dropdown"/"filter"
+            _label_match = re.search(
+                r'(?:click|open|select|press|tap)\s+(?:the\s+)?(.+?)\s+(?:dropdown|filter|combobox)',
+                _instr_lower
+            )
+            _label = _label_match.group(1).strip() if _label_match else None
+            if not _label:
+                # Fallback: all meaningful words from instruction
+                _label_words = [w.strip("'\".,") for w in _instr_lower.split()
+                                if w not in _skip_words and len(w) > 2]
+                _label = " ".join(_label_words) if _label_words else None
+
+            if _label:
+                _dropdown_attempts = [
+                    lambda: page.get_by_role("combobox", name=re.compile(_label, re.IGNORECASE)).first.click(timeout=5_000),
+                    lambda: page.locator(f"label:has-text('{_label}') ~ div button").first.click(timeout=5_000),
+                    lambda: page.locator(f"label:has-text('{_label}') ~ * button").first.click(timeout=5_000),
+                    lambda: page.locator(f"[aria-label*='{_label}' i][role='combobox']").first.click(timeout=5_000),
+                    lambda: page.locator(f"[placeholder*='{_label}' i]").first.click(timeout=5_000),
+                ]
+                for _attempt in _dropdown_attempts:
+                    try:
+                        _attempt()
+                        logger.info(f"Click succeeded via dropdown label fallback for label={_label!r}")
+                        return
+                    except Exception:
+                        pass
+
         if instruction:
             words = [w.strip("'\".,") for w in instruction.lower().split()]
             # Build candidate phrases: pairs of consecutive meaningful words, then singles
@@ -1347,6 +1555,21 @@ class RecorderAgent(BaseAgent):
                         candidates.append(phrase)
 
             for phrase in candidates:
+                # When instruction was about a dropdown/filter, skip single-word button matches
+                # that would catch sidebar nav buttons (e.g. "Our Project" matching "project")
+                if _is_dropdown_instruction and len(phrase.split()) == 1:
+                    # Only allow if a label-adjacent element exists — skip plain button role match
+                    try:
+                        _lbl_loc = page.locator(f"label:has-text('{phrase}') ~ div button")
+                        if _lbl_loc.count() > 0:
+                            _lbl_loc.first.click(timeout=5_000)
+                            logger.info(f"Click succeeded via label-adjacent for phrase={phrase!r}")
+                            return
+                    except Exception:
+                        pass
+                    # Skip the generic get_by_role(button) for single-word dropdown searches
+                    continue
+
                 # Try button role FIRST — avoids falsely "clicking" non-interactive
                 # text elements like modal titles that contain the same keyword
                 try:

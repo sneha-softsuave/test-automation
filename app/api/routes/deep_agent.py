@@ -41,6 +41,23 @@ import tempfile as _tempfile
 import os as _os
 _step_control_files: Dict[str, str] = {}  # session_id -> temp file path
 
+# Result cache: session_id -> final result dict
+# Stored so clients can retrieve the result even if SSE was disconnected when it fired.
+_result_cache: Dict[str, Dict] = {}
+
+
+@router.get("/last-result/{session_id}")
+async def get_last_result(session_id: str):
+    """
+    Return the cached final result for a session (if available).
+    Used by the frontend to recover the result when SSE was disconnected
+    before deep_agent_complete was received.
+    """
+    result = _result_cache.get(session_id)
+    if result is None:
+        return {"status": "not_found"}
+    return result
+
 
 @router.post("/stop-execution")
 async def stop_execution(session_id: str = Query(...)):
@@ -763,6 +780,7 @@ async def run_multi_agent_endpoint(
     - deep_agent_complete: Workflow finished
     """
     print(f"[Multi-Agent] Received request for session {session_id}")
+    print(f"[Multi-Agent] Config: headless={headless}, keep_browser_open={keep_browser_open}")
 
     try:
         # Extract raw_data
@@ -810,6 +828,29 @@ async def run_multi_agent_endpoint(
 
     def broadcast_wrapper(event: Dict[str, Any]):
         try:
+            # Populate result cache immediately when deep_agent_complete fires
+            # so polling fallback can find it even before the HTTP response returns.
+            if event.get("type") == "deep_agent_complete":
+                summary = event.get("data") or {}
+                _result_cache[session_id] = {
+                    "status": event.get("status", "completed"),
+                    "message": event.get("message", ""),
+                    "validation_status": "passed" if summary.get("failed", 1) == 0 else "failed",
+                    "summary": {
+                        "total": summary.get("total", 0),
+                        "passed": summary.get("passed", 0),
+                        "failed": summary.get("failed", 0),
+                        "retries": summary.get("retries", 0),
+                    },
+                    "execution_results": event.get("execution_results"),
+                    "parsed_suite": event.get("parsed_suite"),
+                    "report": None,
+                    "generated_script": None,
+                    "orchestration": event.get("orchestration", {}),
+                    "errors": [],
+                    "completed_at": datetime.now().isoformat(),
+                }
+                print(f"[Multi-Agent] Result cached for session {session_id}: {summary}")
             main_loop.call_soon_threadsafe(event_queue.put_nowait, event)
         except Exception as e:
             print(f"SSE broadcast error: {e}")
@@ -884,7 +925,7 @@ async def run_multi_agent_endpoint(
         failed = execution_results.get("failed", 0) if isinstance(execution_results, dict) else 0
         total = execution_results.get("total", len(raw_data)) if isinstance(execution_results, dict) else len(raw_data)
 
-        return {
+        final_response = {
             "status": result.get("status", "completed"),
             "message": f"Multi-Agent completed - {passed}/{total} passed",
             "validation_status": result.get("validation_status"),
@@ -902,6 +943,11 @@ async def run_multi_agent_endpoint(
             "errors": result.get("errors", []),
             "completed_at": datetime.now().isoformat()
         }
+
+        # Cache result so frontend can retrieve it even if SSE was disconnected
+        _result_cache[session_id] = final_response
+
+        return final_response
 
     except HTTPException:
         raise

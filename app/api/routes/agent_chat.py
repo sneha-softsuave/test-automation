@@ -152,9 +152,13 @@ RESPONSE RULES:
 4. For "help": explain available commands and that natural language is understood.
 5. For "unknown": ask the user to clarify what they need.
 6. If no test data is available and user wants to execute: set intent to "question", response = "Please upload a test file first."
-7. For "execute": extract ALL test IDs mentioned using the EXACT ID string from the test list (e.g. "T.C.01", "T.C.02").
+7. For "execute": extract ALL test IDs mentioned using the EXACT ID string from the test list (e.g. "T.C.01", "T.C.11").
    Map user shorthand to exact IDs: "test 1" -> "T.C.01", "TC_01" -> "T.C.01", "T.C.01" -> "T.C.01".
-   Example: "run test 1 and 3" -> execute_tests: ["T.C.01", "T.C.03"]
+   IMPORTANT: treat each comma/space-separated number as a separate test. "1,2,11" means THREE tests: 1, 2, and 11.
+   Examples:
+   - "run test 1 and 3" -> execute_tests: ["T.C.01", "T.C.03"]
+   - "execute 1,2,11" -> execute_tests: ["T.C.01", "T.C.02", "T.C.11"]
+   - "run tests 1, 2, 12" -> execute_tests: ["T.C.01", "T.C.02", "T.C.12"]
 8. Use markdown formatting (bold, lists) in response for readability.
 
 CRITICAL: Return ONLY the JSON object. No markdown code blocks, no explanation text.
@@ -619,6 +623,24 @@ async def chat_with_agent(request: ChatRequest):
             )
 
         test_numbers = parsed.get("execute_tests")
+
+        # Merge: always re-extract numbers from the raw user message and union with
+        # what the LLM returned. This catches cases where the LLM drops multi-digit
+        # numbers (e.g. "1,2,11" → LLM returns only ["T.C.01","T.C.02"]).
+        if test_numbers is not None:
+            raw_nums = re.findall(r'\d+', message)
+            llm_raw_nums = set()
+            for t in test_numbers:
+                d = re.search(r'\d+', str(t))
+                if d:
+                    llm_raw_nums.add(int(d.group()))
+            merged = list(test_numbers)  # start with LLM result
+            for rn in raw_nums:
+                if int(rn) not in llm_raw_nums:
+                    merged.append(_normalize_test_id(rn))
+            if len(merged) > len(test_numbers):
+                print(f"[AgentChat] Merged missing test IDs from user message: {test_numbers} -> {merged}")
+                test_numbers = merged
 
         if test_numbers is None:
             # Execute all

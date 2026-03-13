@@ -30,6 +30,62 @@ class _StepControlSignal(Exception):
         super().__init__(f"Step control: {action}")
 
 
+def _parse_multi_value_assertion(value: str) -> list:
+    """
+    Parse an assertion expected_value that may contain multiple items into a clean list.
+
+    Handles any format an LLM might produce:
+      - Python list repr:  "['EmergeX Case ID', 'Reported by']"
+      - JSON array:        '["EmergeX Case ID", "Reported by"]'
+      - Unquoted list:     "[EmergeX Case ID, Reported by]"
+      - Plain CSV:         "EmergeX Case ID, Reported by, Date Reported"
+      - Semicolon-sep:     "EmergeX Case ID; Reported by"
+      - Newline-sep:       "EmergeX Case ID\nReported by"
+
+    Returns a list of stripped, non-empty strings.
+    Single-value strings are returned as a one-element list.
+    """
+    value = value.strip()
+
+    # Remove outer list brackets if present: [...] or (...)
+    if (value.startswith('[') and value.endswith(']')) or \
+       (value.startswith('(') and value.endswith(')')):
+        value = value[1:-1].strip()
+
+    # Try JSON parse first (handles ["a","b"] and ['a','b'] after quote normalisation)
+    try:
+        import json
+        # Normalise single quotes to double quotes for JSON parser
+        normalised = value.replace("'", '"')
+        parsed = json.loads(f'[{normalised}]')
+        if isinstance(parsed, list):
+            items = [str(i).strip() for i in parsed if str(i).strip()]
+            if items:
+                return items
+    except Exception:
+        pass
+
+    # Detect separator: prefer the one that appears most
+    newline_count = value.count('\n')
+    semicolon_count = value.count(';')
+    comma_count = value.count(',')
+
+    if newline_count > 0 and newline_count >= comma_count:
+        raw_items = value.split('\n')
+    elif semicolon_count > 0 and semicolon_count >= comma_count:
+        raw_items = value.split(';')
+    else:
+        raw_items = value.split(',')
+
+    # Strip whitespace and surrounding quotes from each item
+    items = []
+    for part in raw_items:
+        part = part.strip().strip('"').strip("'").strip()
+        if part:
+            items.append(part)
+    return items
+
+
 def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue, update_queue=None, signal_file=None, initial_storage_state=None, keep_browser_open: bool = True):
     """
     Run Playwright tests in a separate process.
@@ -56,6 +112,7 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
     print(f"Base URL: {test_suite.get('base_url', 'N/A')}")
     print(f"Test cases: {len(test_suite.get('test_cases', []))}")
     print(f"Headless: {headless}")
+    print(f"Keep browser open: {keep_browser_open}")
     print(f"Timeout: {timeout}ms")
     print(f"{'='*60}\n")
 
@@ -104,18 +161,21 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
                     "status": "closed"
                 })
 
-            # keep_browser_open=True  → one browser + one context + one page for ALL test cases
+            # keep_browser_open=True  → one browser + one shared context + one page for ALL test cases
             #                           page state (URL, cookies, modals) persists between TCs
             # keep_browser_open=False → fresh browser + context + page per test case
             browser = _launch_browser() if keep_browser_open else None
 
-            # When keeping browser open, create a single persistent context+page up front
-            persistent_context = None
-            persistent_page = None
-            if keep_browser_open:
-                persistent_context = browser.new_context(viewport={"width": 1920, "height": 1080})
-                persistent_page = persistent_context.new_page()
-                print("Persistent browser context created — page state will carry across all test cases")
+            # Create one shared context+page up front when keeping the session alive
+            shared_context = None
+            shared_page = None
+            if keep_browser_open and browser:
+                ctx_kwargs = {"viewport": {"width": 1920, "height": 1080}}
+                if initial_storage_state is not None:
+                    ctx_kwargs["storage_state"] = initial_storage_state
+                shared_context = browser.new_context(**ctx_kwargs)
+                shared_page = shared_context.new_page()
+                print("Shared browser context + page created — session persists across all test cases")
 
             for idx, test_case in enumerate(test_cases):
                 test_id = test_case.get("id", f"TC_{idx+1}")
@@ -144,7 +204,7 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
                     send_update=send_update,
                     signal_file=signal_file,
                     initial_storage_state=shared_storage_state,
-                    persistent_page=persistent_page,
+                    shared_page=shared_page,
                 )
                 results.append(result)
 
@@ -179,16 +239,21 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
                     _close_browser(browser)
                     browser = None
 
-            # Close persistent context (and its page) after all TCs complete
-            if persistent_context:
-                try:
-                    persistent_context.close()
-                except Exception:
-                    pass
-
-            # Close the shared browser when keep_browser_open is ON
-            if keep_browser_open and browser:
-                _close_browser(browser)
+            # Close shared page → context → browser after all TCs complete
+            if keep_browser_open:
+                if shared_page:
+                    try:
+                        shared_page.close()
+                    except Exception:
+                        pass
+                if shared_context:
+                    try:
+                        shared_context.close()
+                        print("Shared browser context closed")
+                    except Exception:
+                        pass
+                if browser:
+                    _close_browser(browser)
 
         final_result = {
             "project": test_suite.get("project", "Unknown"),
@@ -263,14 +328,14 @@ def _execute_single_test_sync(
     send_update=None,
     signal_file=None,
     initial_storage_state=None,
-    persistent_page=None,
+    shared_page=None,
 ) -> Dict[str, Any]:
     """Execute a single test case from enhanced format (sync version).
 
-    persistent_page: when provided (keep_browser_open=True), reuse this existing
-    page instead of creating a new context. The page retains its URL, cookies, and
-    any open modals from the previous test case — exactly what "session continues"
-    means. The context is NOT closed at the end of this function in that case.
+    shared_page: when provided (keep_browser_open=True), reuse this existing
+    page instead of creating a new context. The page retains its URL, cookies,
+    and any open modals from the previous test case — session continues seamlessly.
+    The context is NOT closed at the end of this function in that case.
     """
     test_id = test_case.get("id", "TC_001")
     test_name = test_case.get("name", "Test Case")
@@ -342,14 +407,14 @@ def _execute_single_test_sync(
         "final_storage_state": None,
     }
 
-    if persistent_page is not None:
+    if shared_page is not None:
         # Reuse the caller-managed page — browser session continues from where last TC left off
-        page = persistent_page
+        page = shared_page
         context = page.context
         owns_context = False
-        print(f"  [persistent] Reusing existing page (current URL: {page.url})")
+        print(f"  Reusing shared page (current URL: {page.url})")
     else:
-        # Fresh context+page for this test case (keep_browser_open=False)
+        # Fresh context + page for this test case (keep_browser_open=False)
         context_kwargs = {"viewport": {"width": 1920, "height": 1080}}
         if initial_storage_state is not None:
             context_kwargs["storage_state"] = initial_storage_state
@@ -359,6 +424,10 @@ def _execute_single_test_sync(
 
     try:
         total_steps = len(steps)
+        # Mutable context dict shared across all steps in this test run.
+        # Used to pass information between consecutive steps (e.g. last fill value
+        # used by a subsequent assert_all_rows step).
+        run_context: Dict = {}
         for step in steps:
             step_num = step.get("step_number", 0)
             instruction = step.get("instruction", "")
@@ -477,6 +546,7 @@ def _execute_single_test_sync(
                         sync_expect=sync_expect,
                         instruction=instruction,
                         signal_file=signal_file,
+                        run_context=run_context,
                     )
 
                     # Success!
@@ -577,6 +647,34 @@ def _execute_single_test_sync(
                         capture_and_send_screenshot(page, step_num, "failed")
                     else:
                         print(f"    [FINAL ATTEMPT FAILED] {error_msg}")
+                        # Final attempt failed — try IR vision fallback for UI actions
+                        if action_type in ("fill", "click", "select"):
+                            print(f"    [IR-Rescue] All DOM-based attempts failed, trying vision fallback...")
+                            ir_success = _ir_selector_rescue(
+                                page=page,
+                                action_type=action_type,
+                                instruction=instruction,
+                                selector_hints=current_selector_hints,
+                                failed_selectors=failed_selectors,
+                                step_test_data=step_test_data,
+                                suite_test_data=suite_test_data,
+                                timeout=current_timeout,
+                                sync_expect=sync_expect,
+                                run_context=run_context,
+                            )
+                            if ir_success:
+                                step_passed = True
+                                step_result["selector_used"] = "ir_vision_rescue"
+                                step_result["retry_count"] = attempt
+                                capture_and_send_screenshot(page, step_num, "passed")
+                                step_update("step_completed", {
+                                    "message": f"Step {step_num} succeeded via IR vision fallback",
+                                    "step_number": step_num,
+                                    "status": "PASSED",
+                                    "duration": round(step_time.time() - step_start, 2),
+                                    "retry_count": attempt,
+                                })
+                                break
 
             # After retry loop
             if step_passed:
@@ -643,9 +741,13 @@ def _execute_single_test_sync(
             result["final_storage_state"] = context.storage_state()
         except Exception:
             pass  # Carry-forward simply won't happen for next test
+        # Only close the context when we created it (keep_browser_open=False)
+        # When shared, _run_in_process closes it after all tests finish
         if owns_context:
-            # Only close the context when we created it (keep_browser_open=False)
-            context.close()
+            try:
+                context.close()
+            except Exception:
+                pass
 
     result["finished_at"] = datetime.now().isoformat()
 
@@ -663,7 +765,31 @@ def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = N
     """
     suggested = selector_hints.get("suggested_selectors", [])
     element_name = selector_hints.get("element_name")
-    element_type = selector_hints.get("element_type")
+    element_type = selector_hints.get("element_type", "")
+
+    # For dropdown/select elements, try label-adjacent button patterns FIRST
+    # This catches custom dropdown widgets like <label>Select Project</label><div><button>…</button></div>
+    # before the LLM's suggested selectors (which may target the wrong element).
+    if element_type and element_type.lower() in ("dropdown", "select") and element_name and action_type in ("click", "select", "fill"):
+        label_candidates = [element_name]
+        cleaned = element_name.lower().replace("dropdown", "").replace("select", "").strip()
+        if cleaned and cleaned != element_name.lower():
+            label_candidates.append(cleaned)
+
+        for label_text in label_candidates:
+            for lbl_sel in [
+                f'label:has-text("{label_text}") ~ div button',
+                f'label:has-text("{label_text}") + div button',
+                f'label:has-text("{label_text}") ~ button',
+                f'label:has-text("{label_text}") + button',
+            ]:
+                try:
+                    loc = page.locator(lbl_sel)
+                    if loc.count() > 0:
+                        print(f"    [dropdown priority] Found via label-adjacent: {lbl_sel}")
+                        return f'locator::{lbl_sel}'
+                except Exception:
+                    pass
 
     # Try each suggested selector
     for selector in suggested:
@@ -933,6 +1059,66 @@ def _find_selector_dynamically_sync(page, selector_hints: Dict, test_data: Dict 
                             return f'locator::textarea[placeholder*="{ta["placeholder"][:20]}"]'
                         return 'locator::textarea'
 
+        # For dropdown/select elements: try label-adjacent button FIRST
+        # This handles cases like <label>Select Project</label><div><button>...</button></div>
+        # which are custom dropdown triggers that look like buttons in the DOM.
+        if element_type in ("dropdown", "select") and element_name and action_type in ("click", "select", "fill"):
+            # Build candidate label texts: full name + name without "dropdown"/"select" suffix
+            label_candidates = [element_name]
+            cleaned = element_name.replace("dropdown", "").replace("select", "").strip()
+            if cleaned and cleaned != element_name:
+                label_candidates.append(cleaned)
+
+            for label_text in label_candidates:
+                # Try sibling combinator: label ~ div button and label + div button
+                for selector in [
+                    f'label:has-text("{label_text}") ~ div button',
+                    f'label:has-text("{label_text}") + div button',
+                    f'label:has-text("{label_text}") ~ button',
+                    f'label:has-text("{label_text}") + button',
+                ]:
+                    try:
+                        loc = page.locator(selector)
+                        if loc.count() > 0:
+                            print(f"        Found dropdown via label-adjacent selector: {selector}")
+                            return f'locator::{selector}'
+                    except Exception:
+                        pass
+
+                # Also try: find the label, then look for the next sibling button-like element
+                try:
+                    label_loc = page.locator(f'label:has-text("{label_text}")')
+                    if label_loc.count() > 0:
+                        # Use evaluate to find sibling
+                        sibling_sel = page.evaluate(f"""
+                        () => {{
+                            const label = document.evaluate(
+                                '//label[contains(text(), "{label_text}")]',
+                                document, null,
+                                XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                            ).singleNodeValue;
+                            if (!label) return null;
+                            // Walk siblings
+                            let sib = label.nextElementSibling;
+                            while (sib) {{
+                                const btn = sib.tagName === 'BUTTON' ? sib : sib.querySelector('button');
+                                if (btn) {{
+                                    if (btn.id) return '#' + btn.id;
+                                    const cls = btn.className.split(' ').find(c => c.length > 3 && !c.includes(':'));
+                                    if (cls) return 'label:has-text("{label_text}") ~ div button, label:has-text("{label_text}") + button';
+                                    return null;
+                                }}
+                                sib = sib.nextElementSibling;
+                            }}
+                            return null;
+                        }}
+                        """)
+                        if sibling_sel and sibling_sel.startswith('#'):
+                            print(f"        Found dropdown via label sibling id: {sibling_sel}")
+                            return f'locator::{sibling_sel}'
+                except Exception:
+                    pass
+
         # For button/click actions, search buttons first
         if element_type == "button" or action_type == "click":
             # Extract keywords from instruction for icon button matching
@@ -994,10 +1180,24 @@ def _find_selector_dynamically_sync(page, selector_hints: Dict, test_data: Dict 
                 # FIXED: Changed 'elif' to 'if not matched and' to enable keyword fallback
                 # when element_name exists but didn't match directly
                 if not matched and keywords:
+                    # Skip sidebar/nav buttons when looking for a dropdown — they are
+                    # navigation items, not form controls.  A nav button has an alt that
+                    # looks like a page name ("Our Project", "Incident", etc.) while its
+                    # text is the same nav label.  Heuristic: if the button's text equals
+                    # its alt and neither is empty, it is a nav item → skip for dropdowns.
+                    if element_type == "dropdown":
+                        nav_btn = (
+                            btn_alt and btn_text and
+                            btn_alt.lower().strip() == btn_text.lower().strip()
+                        )
+                        if nav_btn:
+                            continue  # Skip sidebar nav buttons for dropdown searches
+
                     # Count how many keywords match (case-insensitive)
                     match_count = sum(1 for kw in keywords if kw in all_attrs_lower)
-                    # Require at least 1 keyword to match for fallback
-                    threshold = 1
+                    # Require ≥2 keywords for dropdown elements (tighter match needed)
+                    # to avoid false positives like sidebar nav buttons
+                    threshold = 2 if element_type == "dropdown" else 1
                     if match_count >= threshold:
                         matched = True
                         match_reason = f"keywords({match_count}/{len(keywords)})"
@@ -1536,6 +1736,103 @@ Return ONLY the JSON array, no explanation."""
         return []
 
 
+def _ir_selector_rescue(
+    page,
+    action_type: str,
+    instruction: str,
+    selector_hints: Dict,
+    failed_selectors: List[str],
+    step_test_data: Dict,
+    suite_test_data: Dict,
+    timeout: int,
+    sync_expect,
+    run_context: Dict = None,
+) -> bool:
+    """
+    Last-resort IR fallback: capture a screenshot, ask the vision model to
+    identify the element, then attempt the action with each suggestion.
+    Returns True if any suggestion succeeded, False otherwise.
+    Never raises — all failures are caught internally.
+    """
+    try:
+        from app.core.config import settings
+        if not settings.IMAGE_ANALYSIS_ENABLED:
+            return False
+
+        from app.agents.image_analyzer import analyze_screenshot_for_selector
+        import base64
+
+        # Capture screenshot as base64
+        screenshot_bytes = page.screenshot(type="png")
+        screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+
+        # Use the last failed selector as context for the vision model
+        failed_selector = failed_selectors[-1] if failed_selectors else selector_hints.get("suggested_selectors", [""])[0]
+        error_hint = f"Element not found after {len(failed_selectors)} selector attempt(s)"
+
+        suggestions = analyze_screenshot_for_selector(
+            screenshot_b64=screenshot_b64,
+            action_type=action_type,
+            instruction=instruction,
+            selector=failed_selector,
+            error=error_hint,
+        )
+
+        if not suggestions:
+            print(f"    [IR-Rescue] Vision model returned no suggestions")
+            return False
+
+        print(f"    [IR-Rescue] Vision model returned {len(suggestions)} suggestion(s)")
+
+        for suggestion in suggestions:
+            sel = suggestion.get("selector", "")
+            interaction = suggestion.get("interaction", action_type)
+            reasoning = suggestion.get("reasoning", "")
+            if not sel:
+                continue
+
+            print(f"    [IR-Rescue] Trying: {sel} (interaction={interaction}) — {reasoning}")
+
+            # Build a minimal selector_hints dict for this suggestion
+            ir_hints = {
+                "suggested_selectors": [sel],
+                "element_name": selector_hints.get("element_name", ""),
+                "element_type": suggestion.get("widget_type", selector_hints.get("element_type", "")),
+            }
+
+            # Map vision interaction to our action_type if needed
+            effective_action = action_type
+            if action_type == "fill" and interaction in ("select_option", "click"):
+                effective_action = interaction
+            elif action_type == "click" and interaction == "fill":
+                effective_action = "click"  # keep original intent
+
+            try:
+                _execute_action_sync(
+                    page=page,
+                    action_type=effective_action,
+                    selector_hints=ir_hints,
+                    step_test_data=step_test_data,
+                    assertions=[],
+                    suite_test_data=suite_test_data,
+                    timeout=timeout,
+                    sync_expect=sync_expect,
+                    instruction=instruction,
+                    signal_file=None,
+                    run_context=run_context,
+                )
+                print(f"    [IR-Rescue] Succeeded via vision: {sel!r}")
+                return True
+            except Exception as ir_err:
+                print(f"    [IR-Rescue] Suggestion failed: {ir_err}")
+                continue
+
+    except Exception as e:
+        print(f"    [IR-Rescue] Vision fallback error: {e}")
+
+    return False
+
+
 def _extract_button_name_from_instruction(instruction: str) -> Optional[str]:
     """Extract button/element name from instruction text."""
     if not instruction:
@@ -1682,6 +1979,137 @@ def _extract_fill_value_from_instruction(instruction: str) -> Optional[str]:
     return None
 
 
+# Words stripped from element_name before using it as a label search keyword.
+# Keeps only the meaningful noun/identifier part (e.g. "Select Project dropdown" → "Project").
+_DROPDOWN_LABEL_STOPWORDS = {
+    'select', 'choose', 'pick', 'dropdown', 'field', 'input', 'the', 'a', 'an',
+    'box', 'list', 'menu', 'option', 'value', 'item',
+}
+
+# Selectors for actual progress/loader indicator elements (used by wait action)
+# Deliberately narrow — avoids matching CSS '%' values in raw HTML
+_PROGRESS_SELECTORS = [
+    '[role="progressbar"]',
+    '[class*="progress"]',
+    '[class*="loader"]',
+    '[class*="loading"]',
+    '[aria-label*="progress" i]',
+    '[aria-valuenow]',
+]
+
+# Selectors for dropdown popup containers, ordered most-specific first.
+# These are used to scope option searches so we don't match nav/sidebar elements.
+_DROPDOWN_POPUP_SELECTORS = [
+    'div.absolute.z-50',      # Tailwind: absolute + high z-index (most specific)
+    'div.fixed.z-50',
+    'div.absolute',           # Tailwind absolute-positioned overlay
+    'div.fixed',              # Fixed overlay
+    'div[class*="dropdown"]', # Explicit dropdown class
+    'div[class*="menu"]',     # Menu overlay
+    'ul[role="listbox"]',     # ARIA listbox
+    'div[role="listbox"]',
+    'div.z-50',               # High z-index overlay
+    'div.overflow-y-auto',    # Scrollable list
+    'div[class*="popover"]',
+    'div[class*="popup"]',
+]
+
+# Option item selector used INSIDE a scoped popup container.
+# cursor-pointer is safe here because we're already inside the dropdown element.
+_DROPDOWN_OPTION_SELECTOR_SCOPED = (
+    '[role="option"], '
+    'div[class*="option"], '
+    'li[class*="option"], '
+    'li, '
+    'div.cursor-pointer, '
+    'div.hover\\:bg-green-50'
+)
+
+# Option item selector for page-wide use (no cursor-pointer — too broad on full page)
+_DROPDOWN_OPTION_SELECTOR = (
+    '[role="option"], '
+    'div[class*="option"], '
+    'li[class*="option"], '
+    'div.hover\\:bg-green-50'
+)
+
+
+def _snapshot_option_count(page) -> int:
+    """Count currently visible dropdown option elements across the whole page."""
+    try:
+        return page.locator(_DROPDOWN_OPTION_SELECTOR).count()
+    except Exception:
+        return 0
+
+
+def _get_dropdown_popup_container(page):
+    """Return the first visible popup container element, or None."""
+    for container_sel in _DROPDOWN_POPUP_SELECTORS:
+        try:
+            container = page.locator(container_sel).first
+            if container.is_visible(timeout=500):
+                return container
+        except Exception:
+            continue
+    return None
+
+
+def _get_dropdown_popup_options(page) -> list:
+    """Return option elements from the active dropdown popup.
+
+    Searches inside the popup container first (scoped) using the broader
+    scoped selector that includes cursor-pointer — safe because we're inside
+    the dropdown, not the full page.  Falls back to full-page scan if no
+    container is found.
+    """
+    container = _get_dropdown_popup_container(page)
+    if container is not None:
+        try:
+            opts = container.locator(_DROPDOWN_OPTION_SELECTOR_SCOPED).all()
+            if opts:
+                return opts
+        except Exception:
+            pass
+    # Full-page fallback (narrower selector, no cursor-pointer)
+    try:
+        return page.locator(_DROPDOWN_OPTION_SELECTOR).all()
+    except Exception:
+        return []
+
+
+def _wait_for_dropdown_options(page, baseline: int = 0, timeout_ms: int = 8000, poll_ms: int = 200) -> None:
+    """Wait until the dropdown popup container appears and contains options.
+
+    Uses the popup container as the primary signal — more reliable than counting
+    option elements page-wide (which are polluted by nav/sidebar elements).
+    Falls back to baseline-delta check on the page-wide selector.
+
+    Works for any custom dropdown, including API-loaded ones.
+    """
+    elapsed = 0
+    while elapsed < timeout_ms:
+        try:
+            container = _get_dropdown_popup_container(page)
+            if container is not None:
+                opts = container.locator(_DROPDOWN_OPTION_SELECTOR_SCOPED).all()
+                if opts:
+                    print(f"    Dropdown options ready ({len(opts)} in popup after ~{elapsed}ms)")
+                    return
+        except Exception:
+            pass
+        # Secondary: page-wide delta check
+        try:
+            current = page.locator(_DROPDOWN_OPTION_SELECTOR).count()
+            if current > baseline:
+                print(f"    Dropdown options ready ({current} found, +{current - baseline} new, after ~{elapsed}ms)")
+                return
+        except Exception:
+            pass
+        page.wait_for_timeout(poll_ms)
+        elapsed += poll_ms
+    print(f"    Dropdown options did not appear within {timeout_ms}ms, proceeding anyway")
+
+
 def _execute_action_sync(
     page,
     action_type: str,
@@ -1693,6 +2121,7 @@ def _execute_action_sync(
     sync_expect,
     instruction: str = "",
     signal_file=None,
+    run_context: Dict = None,
 ) -> Optional[str]:
     """Execute a single action from enhanced format (sync version)."""
     selector_used = None
@@ -1701,6 +2130,27 @@ def _execute_action_sync(
         url = step_test_data.get("url", "")
         if not url:
             raise ValueError("No URL provided for goto action")
+
+        # Replace parser fallback placeholder URLs with the real base URL from the
+        # current page. This happens when the parser couldn't extract the real URL
+        # and fell back to "https://example.com" or similar generic domains.
+        PLACEHOLDER_HOSTS = {"example.com", "your-app.com", "localhost", "your-domain.com"}
+        try:
+            from urllib.parse import urlparse as _urlparse
+            parsed = _urlparse(url)
+            if parsed.hostname in PLACEHOLDER_HOSTS:
+                current = page.url
+                current_parsed = _urlparse(current)
+                if current_parsed.scheme and current_parsed.netloc:
+                    # Keep the path from the placeholder URL (e.g. /dashboard)
+                    # but use the real host from the currently authenticated session
+                    real_base = f"{current_parsed.scheme}://{current_parsed.netloc}"
+                    real_url = real_base + (parsed.path or "/")
+                    print(f"    [goto] Replaced placeholder URL {url!r} → {real_url!r}")
+                    url = real_url
+        except Exception:
+            pass  # Never block navigation over a URL-fix heuristic
+
         print(f"    Navigating to: {url}")
         # Use load (all resources) then try networkidle briefly.
         # domcontentloaded is too early for React SPA — the JS bundle hasn't
@@ -1718,15 +2168,40 @@ def _execute_action_sync(
     elif action_type == "fill":
         # Get value to fill first - check common keys and fallback to any string value
         value = ""
-        # Check common keys first
-        for key in ["email", "password", "text", "value", "username", "input", "content", "data", "message"]:
-            if key in step_test_data:
-                value = step_test_data[key]
-                break
+
+        # If test_data signals "read from table column", fetch the live cell value first
+        if step_test_data.get("source") == "table" and step_test_data.get("column_name"):
+            col_name = step_test_data["column_name"]
+            live_value = _read_cell_value_from_column(page, col_name)
+            if live_value:
+                value = live_value
+                print(f"    [fill] Using live table value '{live_value}' from column '{col_name}'")
+                # Store in run_context so the subsequent assert_all_rows step can use it
+                if run_context is not None:
+                    run_context["last_fill_value"] = live_value
+                    run_context["last_fill_column"] = col_name
+
+        elif step_test_data.get("source") == "context":
+            context_key = step_test_data.get("capture_key", "captured_value")
+            live_value = (run_context or {}).get(f"captured_{context_key}") or (run_context or {}).get("captured_value")
+            if live_value:
+                value = live_value
+                print(f"    [fill] Using captured context value '{live_value}' (key='{context_key}')")
+
+        # Check common keys first (skipped if value already resolved from table)
+        if not value:
+            for key in ["email", "password", "text", "value", "username", "input", "content", "data", "message"]:
+                if key in step_test_data:
+                    value = step_test_data[key]
+                    break
 
         # If no common key found, use the first string value in test_data
+        # Skip keys that are structural markers (source, column_name) to avoid using them as fill values
         if not value and step_test_data:
+            skip_keys = {"source", "column_name"}
             for key, val in step_test_data.items():
+                if key in skip_keys:
+                    continue
                 if isinstance(val, str) and val:
                     value = val
                     print(f"    Using test_data['{key}'] as fill value")
@@ -2025,9 +2500,26 @@ def _execute_action_sync(
                 raise click_error
 
         # Wait for navigation/redirect after click (max 10 seconds)
+        # While waiting, opportunistically check for toast/alert on the NEXT step
+        # so we catch short-lived toasts before the page navigates away.
         print(f"    Waiting for page navigation (max 10s)...")
         current_url = page.url
         navigated = False
+        _toast_caught_during_nav: Dict = {}  # keyed by step_number → caught text
+        # Store on page so the subsequent assert step can read it
+        if not hasattr(page, '_toast_cache'):
+            page._toast_cache = {}
+
+
+        # Peek at upcoming toast assertions so we can verify them during the nav wait
+        _pending_toast_checks = []
+        if 'steps' in locals() and 'step_num' in locals():
+            for _peek in steps:
+                if _peek.get("step_number", 0) > step_num:
+                    for _a in (_peek.get("assertions") or []):
+                        if _a.get("type") == "toast":
+                            _pending_toast_checks.append((_peek["step_number"], _a.get("expected_value", "")))
+
         try:
             # Wait for URL to change or timeout
             for i in range(20):  # 20 * 500ms = 10 seconds
@@ -2036,6 +2528,29 @@ def _execute_action_sync(
                 if ctrl in ("next", "skip"):
                     print(f"    Step control '{ctrl}' received — skipping navigation wait")
                     raise _StepControlSignal(ctrl)
+
+                # During first 3 seconds, check for toasts from upcoming steps
+                if i < 6 and _pending_toast_checks:
+                    for (_t_step_num, _t_value) in list(_pending_toast_checks):
+                        if _t_step_num in _toast_caught_during_nav:
+                            continue
+                        _toast_text = str(_t_value).strip().strip('"').strip("'").strip('"').strip()
+                        _toast_selectors = ["[role='alert']", "[role='status']", ".Toastify__toast",
+                                            "[class*='toast']", "[class*='Toast']", "[class*='notification']",
+                                            "[class*='success']", "[class*='snack']"]
+                        for _sel in _toast_selectors:
+                            try:
+                                _loc = page.locator(_sel).first
+                                if _loc.count() > 0:
+                                    _text = (_loc.inner_text() or "").strip()
+                                    if _toast_text.lower() in _text.lower():
+                                        print(f"    [Toast pre-check] Caught toast for step {_t_step_num}: '{_text}'")
+                                        _toast_caught_during_nav[_t_step_num] = _text
+                                        page._toast_cache[_t_step_num] = _text
+                                        break
+                            except Exception:
+                                pass
+
                 new_url = page.url
                 if new_url != current_url:
                     print(f"    Page navigated to: {new_url} (after {i * 0.5:.1f}s)")
@@ -2069,14 +2584,29 @@ def _execute_action_sync(
         wait_timeout = step_test_data.get("timeout", WAIT_TIMEOUT)
 
         # Check for percentage loader on the page (e.g., "24%", "50%", "100%")
+        # Only match visible progress indicator elements — not raw HTML/CSS which always contains '%'
         print(f"    Checking for percentage loader...")
         try:
-            # Look for any element showing a percentage
             percentage_found = False
             for _ in range(5):  # Quick check
-                page_text = page.content()
-                if re.search(r'\d{1,3}%', page_text):
-                    percentage_found = True
+                for psel in _PROGRESS_SELECTORS:
+                    try:
+                        elems = page.locator(psel).all()
+                        for elem in elems:
+                            try:
+                                if not elem.is_visible():
+                                    continue
+                                txt = (elem.text_content() or "").strip()
+                                if re.search(r'\b\d{1,3}%', txt):
+                                    percentage_found = True
+                                    break
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
+                    if percentage_found:
+                        break
+                if percentage_found:
                     break
                 page.wait_for_timeout(500)
 
@@ -2129,19 +2659,38 @@ def _execute_action_sync(
                         except Exception:
                             pass
 
-                        # Find element with percentage text
-                        percent_elem = page.locator("text=/\\d{1,3}%/").first
-                        if percent_elem.count() > 0:
-                            text = percent_elem.text_content() or ""
-                            match = re.search(r'(\d{1,3})%', text)
-                            if match:
-                                percent = int(match.group(1))
-                                if i % 10 == 0:  # Print every 5 seconds
-                                    print(f"    Progress: {percent}%")
-                                if percent >= 100:
-                                    print(f"    Loader reached 100%!")
-                                    page.wait_for_timeout(2000)  # Wait a bit more after 100%
-                                    break
+                        # Find percentage value from progress indicator elements only
+                        percent = None
+                        for psel in _PROGRESS_SELECTORS:
+                            try:
+                                elems = page.locator(psel).all()
+                                for elem in elems:
+                                    try:
+                                        if not elem.is_visible():
+                                            continue
+                                        txt = (elem.text_content() or "").strip()
+                                        m = re.search(r'\b(\d{1,3})%', txt)
+                                        if m:
+                                            percent = int(m.group(1))
+                                            break
+                                        # Also check aria-valuenow attribute
+                                        val = elem.get_attribute("aria-valuenow")
+                                        if val and val.isdigit():
+                                            percent = int(val)
+                                            break
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                continue
+                            if percent is not None:
+                                break
+                        if percent is not None:
+                            if i % 10 == 0:
+                                print(f"    Progress: {percent}%")
+                            if percent >= 100:
+                                print(f"    Loader reached 100%!")
+                                page.wait_for_timeout(2000)  # Wait a bit more after 100%
+                                break
                     except Exception:
                         pass
                     page.wait_for_timeout(500)
@@ -2229,6 +2778,9 @@ def _execute_action_sync(
             # Step 1: Find and click the dropdown trigger
             dropdown_clicked = False
 
+            # Snapshot BEFORE opening — used by _wait_for_dropdown_options to detect new items
+            _option_baseline = _snapshot_option_count(page)
+
             # PRIORITY 1: Try suggested_selectors from step definition first
             for suggested_sel in suggested_selectors:
                 if not suggested_sel or dropdown_clicked:
@@ -2239,16 +2791,23 @@ def _execute_action_sync(
                         trigger.click(timeout=5000)
                         dropdown_clicked = True
                         print(f"    Clicked dropdown using suggested selector: {suggested_sel}")
-                        page.wait_for_timeout(300)
+                        _wait_for_dropdown_options(page, baseline=_option_baseline)
                         break
                 except Exception as e:
                     print(f"    Suggested selector failed: {suggested_sel} - {str(e)[:50]}")
                     continue
 
             # PRIORITY 2: Try label-based detection (for dropdowns with associated labels)
-            if not dropdown_clicked and element_name:
+            # Guard: skip if element_name looks like the value being selected (LLM mis-generation)
+            # e.g. element_name="Project_Test_001" when it should be "Project"
+            _element_name_is_value = (
+                element_name and value and
+                (element_name.lower() == value.lower() or
+                 element_name.lower().replace(" ", "_") == value.lower().replace(" ", "_"))
+            )
+            if not dropdown_clicked and element_name and not _element_name_is_value:
                 # Extract meaningful keywords from element_name (e.g., "Select Project" -> "Project")
-                label_keywords = [w for w in element_name.split() if w.lower() not in ['select', 'choose', 'pick', 'dropdown', 'field', 'input', 'the', 'a', 'an']]
+                label_keywords = [w for w in element_name.split() if w.lower() not in _DROPDOWN_LABEL_STOPWORDS]
                 label_text = ' '.join(label_keywords) if label_keywords else element_name
 
                 print(f"    Looking for dropdown by label: '{label_text}'")
@@ -2276,68 +2835,68 @@ def _execute_action_sync(
                             trigger.click(timeout=5000)
                             dropdown_clicked = True
                             print(f"    Clicked dropdown by label pattern: {pattern}")
-                            page.wait_for_timeout(300)
+                            _wait_for_dropdown_options(page, baseline=_option_baseline)
                             break
                     except Exception:
                         continue
 
-            # PRIORITY 3: Try to find dropdown trigger by various fallback methods
-            dropdown_triggers = [
-                # By element name in button/div text
-                f'button:has-text("{element_name}")' if element_name else None,
-                f'div[class*="select"]:has-text("{element_name}")' if element_name else None,
-                # Common dropdown patterns
-                'button:has(svg[class*="rotate"])',  # Button with rotating arrow
-                'button[class*="select"]',
-                'div[class*="select"] > button',
-                '[role="combobox"]',
-                '[role="listbox"]',
-                'button:has([class*="chevron"])',
-                'button:has([class*="arrow"])',
-                # Additional patterns for custom dropdowns without ARIA roles
-                'button.rounded-full:has(svg)',  # Rounded buttons with SVG (common Tailwind pattern)
-                'button[class*="rounded"]:has(svg[viewBox])',  # Any rounded button with SVG icon
-                'div.relative > button:has(svg)',  # Button in relative container with SVG
-                'button[class*="justify-between"]:has(svg)',  # Flex button with space-between and SVG
-                'button:has(svg[class*="transition"])',  # Button with SVG that has transition (rotate animation)
-                'button[class*="cursor-pointer"]:has(svg)',  # Clickable button with SVG
-            ]
+            # PRIORITY 3: Generic trigger patterns — only if PRIORITY 1 & 2 both failed
+            if not dropdown_clicked:
+                dropdown_triggers = [
+                    # By element name in button/div text
+                    f'button:has-text("{element_name}")' if element_name else None,
+                    f'div[class*="select"]:has-text("{element_name}")' if element_name else None,
+                    # Common dropdown patterns
+                    'button:has(svg[class*="rotate"])',
+                    'button[class*="select"]',
+                    'div[class*="select"] > button',
+                    '[role="combobox"]',
+                    '[role="listbox"]',
+                    'button:has([class*="chevron"])',
+                    'button:has([class*="arrow"])',
+                    'button.rounded-full:has(svg)',
+                    'button[class*="rounded"]:has(svg[viewBox])',
+                    'div.relative > button:has(svg)',
+                    'button[class*="justify-between"]:has(svg)',
+                    'button:has(svg[class*="transition"])',
+                    'button[class*="cursor-pointer"]:has(svg)',
+                ]
 
-            for trigger_selector in dropdown_triggers:
-                if not trigger_selector:
-                    continue
+                for trigger_selector in dropdown_triggers:
+                    if not trigger_selector:
+                        continue
+                    try:
+                        trigger = page.locator(trigger_selector).first
+                        if trigger.is_visible(timeout=2000):
+                            trigger.click(timeout=5000)
+                            dropdown_clicked = True
+                            print(f"    Clicked dropdown trigger: {trigger_selector}")
+                            _wait_for_dropdown_options(page, baseline=_option_baseline)
+                            break
+                    except Exception:
+                        continue
+
+            # DEBUG: log what's in the popup after opening (runs after any successful trigger click)
+            if dropdown_clicked:
                 try:
-                    trigger = page.locator(trigger_selector).first
-                    if trigger.is_visible(timeout=2000):
-                        trigger.click(timeout=5000)
-                        dropdown_clicked = True
-                        print(f"    Clicked dropdown trigger: {trigger_selector}")
-                        page.wait_for_timeout(1000)  # Wait for dropdown options to load (increased from 300ms)
-
-                        # DEBUG: Log visible options after dropdown opens
+                    visible_opts = _get_dropdown_popup_options(page)
+                    print(f"    DEBUG: Found {len(visible_opts)} potential options after dropdown open")
+                    for i, opt in enumerate(visible_opts[:10]):
                         try:
-                            visible_opts = page.locator('[role="option"], div[class*="option"], li[class*="option"], .cursor-pointer, div.hover\\:bg-green-50').all()
-                            print(f"    DEBUG: Found {len(visible_opts)} potential options after dropdown open")
-                            for i, opt in enumerate(visible_opts[:10]):  # Show first 10
-                                try:
-                                    opt_text = (opt.text_content() or "").strip()[:50]
-                                    if opt_text:
-                                        print(f"      Option[{i}]: '{opt_text}'")
-                                except:
-                                    pass
-                        except Exception as dbg_e:
-                            print(f"    DEBUG: Could not enumerate options: {dbg_e}")
-
-                        break
-                except Exception:
-                    continue
+                            opt_text = (opt.text_content() or "").strip()[:50]
+                            if opt_text:
+                                print(f"      Option[{i}]: '{opt_text}'")
+                        except:
+                            pass
+                except Exception as dbg_e:
+                    print(f"    DEBUG: Could not enumerate options: {dbg_e}")
 
             # If no trigger found by patterns, try context-based detection
             if not dropdown_clicked:
                 try:
                     # SMART DETECTION: Find dropdown by nearby label/text containing element_name keywords
                     # Extract keywords from element_name (e.g., "Project dropdown" -> "project")
-                    keywords = [w.lower() for w in element_name.split() if w.lower() not in ['dropdown', 'select', 'field', 'input', 'box']]
+                    keywords = [w.lower() for w in element_name.split() if w.lower() not in _DROPDOWN_LABEL_STOPWORDS]
 
                     if keywords:
                         print(f"    Searching for dropdown with context keywords: {keywords}")
@@ -2363,7 +2922,7 @@ def _execute_action_sync(
                                         trigger.click(timeout=5000)
                                         dropdown_clicked = True
                                         print(f"    Clicked dropdown by label context: {pattern}")
-                                        page.wait_for_timeout(1000)  # Increased from 300ms
+                                        _wait_for_dropdown_options(page, baseline=_option_baseline)
                                         break
                                 except Exception:
                                     continue
@@ -2385,7 +2944,7 @@ def _execute_action_sync(
                                 btn.click(timeout=5000)
                                 dropdown_clicked = True
                                 print(f"    Clicked button with SVG (fallback): '{btn_text[:30]}'")
-                                page.wait_for_timeout(1000)  # Increased from 300ms
+                                _wait_for_dropdown_options(page, baseline=_option_baseline)
                                 break
                         except Exception:
                             continue
@@ -2418,70 +2977,88 @@ def _execute_action_sync(
             if dropdown_clicked:
                 option_clicked = False
 
-                # Try various option selectors (expanded list)
-                option_selectors = [
-                    f'div:text-is("{value}")',  # Exact match
-                    f'div:has-text("{value}")',  # Contains
-                    f'span:text-is("{value}")',  # Span with exact text
-                    f'span:has-text("{value}")',  # Span contains text
-                    f'li:text-is("{value}")',
-                    f'li:has-text("{value}")',
-                    f'[role="option"]:has-text("{value}")',
-                    f'[role="option"] >> text="{value}"',  # Option containing text element
-                    f'div[class*="option"]:has-text("{value}")',
-                    f'div[class*="item"]:has-text("{value}")',
-                    f'.cursor-pointer:has-text("{value}")',  # Common Tailwind pattern
-                    f'div.hover\\:bg-green-50:has-text("{value}")',  # Tailwind hover class
-                    f'div.overflow-y-auto div:has-text("{value}")',  # Inside scrollable container
-                    f'div[class*="dropdown"] >> text="{value}"',  # Inside dropdown container
-                    f'ul[role="listbox"] >> text="{value}"',  # Inside listbox
-                    f'div.absolute >> text="{value}"',  # Inside absolute positioned container
-                ]
-
-                for opt_selector in option_selectors:
+                def _try_click_option(locator) -> bool:
+                    """Scroll into view and click; return True on success."""
                     try:
-                        option = page.locator(opt_selector).first
-                        if option.is_visible(timeout=2000):
-                            # Try to scroll option into view first (for scrollable dropdowns)
+                        if locator.is_visible(timeout=2000):
                             try:
-                                option.scroll_into_view_if_needed(timeout=1000)
-                            except:
-                                pass  # Ignore scroll errors
-                            option.click(timeout=5000)
-                            option_clicked = True
-                            selector_used = f"custom_dropdown::{opt_selector}"
-                            print(f"    Selected option: '{value}' using {opt_selector}")
-                            break
+                                locator.scroll_into_view_if_needed(timeout=1000)
+                            except Exception:
+                                pass
+                            locator.click(timeout=5000)
+                            return True
                     except Exception:
-                        continue
+                        pass
+                    return False
 
-                # If exact selectors fail, try finding by text content
+                # PRIORITY 1: Search inside the popup container (scoped, most reliable)
+                # Covers any dropdown whose options are inside an overlay/absolute element
+                popup = _get_dropdown_popup_container(page)
+                if popup is not None:
+                    # Exact text match inside popup
+                    for tag in ("div", "li", "span", "[role='option']"):
+                        try:
+                            opt = popup.locator(f"{tag}:text-is('{value}')").first
+                            if _try_click_option(opt):
+                                option_clicked = True
+                                selector_used = f"popup::{tag}:text-is('{value}')"
+                                print(f"    Selected option '{value}' inside popup container")
+                                break
+                        except Exception:
+                            continue
+
+                    # Partial text match inside popup (if exact failed)
+                    if not option_clicked:
+                        try:
+                            opt = popup.get_by_text(value, exact=True).first
+                            if _try_click_option(opt):
+                                option_clicked = True
+                                selector_used = f"popup::get_by_text(exact)"
+                                print(f"    Selected option '{value}' in popup by exact text")
+                        except Exception:
+                            pass
+
+                # PRIORITY 2: Page-wide selectors (fallback for non-overlay dropdowns)
+                if not option_clicked:
+                    option_selectors = [
+                        f'[role="option"]:has-text("{value}")',
+                        f'div[class*="option"]:has-text("{value}")',
+                        f'li:text-is("{value}")',
+                        f'li:has-text("{value}")',
+                        f'div:text-is("{value}")',
+                        f'span:text-is("{value}")',
+                        f'div.hover\\:bg-green-50:has-text("{value}")',
+                        f'div.overflow-y-auto div:text-is("{value}")',
+                        f'div.absolute div:text-is("{value}")',
+                        f'div.fixed div:text-is("{value}")',
+                        f'ul[role="listbox"] >> text="{value}"',
+                    ]
+                    for opt_selector in option_selectors:
+                        try:
+                            opt = page.locator(opt_selector).first
+                            if _try_click_option(opt):
+                                option_clicked = True
+                                selector_used = f"custom_dropdown::{opt_selector}"
+                                print(f"    Selected option: '{value}' using {opt_selector}")
+                                break
+                        except Exception:
+                            continue
+
+                # PRIORITY 3: get_by_text on full page
                 if not option_clicked:
                     try:
-                        # Find all visible divs and look for matching text
                         option = page.get_by_text(value, exact=True).first
-                        if option.is_visible(timeout=2000):
-                            try:
-                                option.scroll_into_view_if_needed(timeout=1000)
-                            except:
-                                pass
-                            option.click(timeout=5000)
+                        if _try_click_option(option):
                             option_clicked = True
                             selector_used = f"custom_dropdown::text={value}"
                             print(f"    Selected option by text: '{value}'")
                     except Exception as e:
                         print(f"    Could not find option '{value}' by exact text: {e}")
 
-                # Try partial text match (contains) as fallback
                 if not option_clicked:
                     try:
                         option = page.get_by_text(value, exact=False).first
-                        if option.is_visible(timeout=2000):
-                            try:
-                                option.scroll_into_view_if_needed(timeout=1000)
-                            except:
-                                pass
-                            option.click(timeout=5000)
+                        if _try_click_option(option):
                             option_clicked = True
                             selector_used = f"custom_dropdown::partial_text={value}"
                             print(f"    Selected option by partial text: '{value}'")
@@ -2530,24 +3107,653 @@ def _execute_action_sync(
             raise ValueError("Missing selector or file_path for upload action")
 
     elif action_type == "capture":
-        selector = _get_best_selector_sync(page, selector_hints, step_test_data)
-        if selector:
-            locator = _create_locator_sync(page, selector)
-            captured = locator.text_content(timeout=timeout)
-            print(f"      Captured: {captured}")
-        else:
+        source = step_test_data.get("source", "element")
+        capture_key = step_test_data.get("capture_key", "captured_value")
+        captured = None
+
+        if source == "column":
+            col_name = step_test_data.get("column_name", "")
+            if col_name:
+                captured = _read_cell_value_from_column(page, col_name)
+                print(f"      Captured from column '{col_name}': {captured}")
+        elif source == "url":
             captured = page.url
             print(f"      Captured URL: {captured}")
+        else:
+            selector = _get_best_selector_sync(page, selector_hints, step_test_data)
+            if selector:
+                locator = _create_locator_sync(page, selector)
+                captured = locator.text_content(timeout=timeout)
+                print(f"      Captured from element: {captured}")
+            else:
+                captured = page.url
+                print(f"      No selector found — captured URL: {captured}")
+
+        if captured and run_context is not None:
+            captured = str(captured).strip()
+            run_context["captured_value"] = captured
+            run_context[f"captured_{capture_key}"] = captured
+            run_context["last_fill_value"] = captured
+            print(f"      Stored as run_context['{capture_key}'] = '{captured}'")
+
+    elif action_type == "date_picker":
+        _execute_date_picker_sync(page, selector_hints, step_test_data, timeout)
 
     elif action_type == "screenshot":
         filename = step_test_data.get("filename", f"screenshot_{datetime.now().strftime('%H%M%S')}.png")
         page.screenshot(path=filename)
         print(f"      Screenshot saved: {filename}")
 
+    elif action_type == "assert_all_rows":
+        _execute_assert_all_rows_sync(page, step_test_data, timeout, run_context=run_context)
+
     else:
         print(f"      Unknown action type: {action_type}, skipping...")
 
     return selector_used
+
+
+def _read_cell_value_from_column(page, column_name: str) -> Optional[str]:
+    """
+    Read the first non-empty data cell from a named table column.
+    Reuses the same table/header discovery logic as _execute_assert_all_rows_sync.
+    Returns the cell text, or None if the column/table cannot be found.
+    """
+    TABLE_SELECTORS = [
+        "table",
+        "[role='grid']",
+        "[role='table']",
+        ".table",
+        "[class*='table']",
+        "[class*='Table']",
+        "[class*='grid']",
+    ]
+
+    col_lower = column_name.lower()
+
+    for tsel in TABLE_SELECTORS:
+        tables = page.locator(tsel)
+        if tables.count() == 0:
+            continue
+
+        for t_idx in range(tables.count()):
+            tbl = tables.nth(t_idx)
+
+            headers = tbl.locator("th")
+            if headers.count() == 0:
+                first_row_cells = tbl.locator("tr").first.locator("td")
+                if first_row_cells.count() > 0:
+                    headers = first_row_cells
+
+            h_count = headers.count()
+            if h_count == 0:
+                continue
+
+            texts = [(headers.nth(i).inner_text() or "").strip() for i in range(h_count)]
+
+            matched_idx = None
+            for i, txt in enumerate(texts):
+                if txt.lower() == col_lower or col_lower in txt.lower() or txt.lower() in col_lower:
+                    matched_idx = i
+                    break
+
+            if matched_idx is None:
+                continue
+
+            # Found the column — read first non-empty data cell
+            tbody_rows = tbl.locator("tbody tr")
+            row_count = tbody_rows.count()
+            data_row_start = 0
+            if row_count == 0:
+                all_rows = tbl.locator("tr")
+                tbody_rows = all_rows
+                row_count = tbody_rows.count()
+                data_row_start = 1  # skip header
+
+            for i in range(data_row_start, tbody_rows.count()):
+                row = tbody_rows.nth(i)
+                cells = row.locator("td, th")
+                cell_count = cells.count()
+                if cell_count == 0:
+                    continue
+                # Skip colspan placeholder rows
+                if cell_count == 1:
+                    try:
+                        colspan_val = cells.nth(0).get_attribute("colspan")
+                        if colspan_val and int(colspan_val) > 1:
+                            continue
+                    except Exception:
+                        pass
+                if matched_idx >= cell_count:
+                    continue
+                cell_text = (cells.nth(matched_idx).inner_text() or "").strip()
+                if cell_text:
+                    print(f"    [read_cell] Column '{column_name}' → '{cell_text}' (table {tsel}, row {i})")
+                    return cell_text
+
+    print(f"    [read_cell] Could not find column '{column_name}' in any table on {page.url}")
+    return None
+
+
+def _execute_date_picker_sync(page, selector_hints: Dict, step_test_data: Dict, timeout: int) -> None:
+    """
+    Open a date picker widget, navigate to the target month/year, and click the target day.
+    Falls back to direct fill() if calendar UI is not detected.
+    """
+    import re as _re_dp
+    from datetime import datetime as _dt
+
+    # ── Step 1: Parse target date ─────────────────────────────────────────────
+    date_str = step_test_data.get("date", "")
+    target_day = target_month = target_year = None
+
+    if date_str:
+        for fmt in ("%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                parsed = _dt.strptime(date_str, fmt)
+                target_day, target_month, target_year = parsed.day, parsed.month, parsed.year
+                break
+            except ValueError:
+                pass
+
+    if target_day is None:
+        # Fallback to explicit fields
+        try:
+            target_day   = int(step_test_data.get("day", 0))
+            target_month = int(step_test_data.get("month", 0))
+            target_year  = int(step_test_data.get("year", 0))
+        except (ValueError, TypeError):
+            pass
+
+    if not (target_day and target_month and target_year):
+        print(f"    [date_picker] Could not parse target date from test_data: {step_test_data}")
+        return
+
+    print(f"    [date_picker] Target date: {target_year}-{target_month:02d}-{target_day:02d}")
+
+    # ── Step 2: Open the date picker ─────────────────────────────────────────
+    selector = _get_best_selector_sync(page, selector_hints, step_test_data, action_type="click")
+    if selector:
+        try:
+            locator = _create_locator_sync(page, selector)
+            locator.click(timeout=timeout)
+            print(f"    [date_picker] Clicked trigger: {selector}")
+        except Exception as e:
+            print(f"    [date_picker] Trigger click failed: {e}")
+
+    # Wait for calendar to appear
+    calendar_selectors = [
+        "[role='dialog']", "[class*='calendar']", "[class*='datepicker']",
+        "[class*='date-picker']", "[class*='react-datepicker']", ".flatpickr-calendar",
+        "[class*='picker']", "[class*='DayPicker']",
+    ]
+    calendar = None
+    for csel in calendar_selectors:
+        try:
+            loc = page.locator(csel)
+            loc.first.wait_for(state="visible", timeout=3000)
+            if loc.count() > 0:
+                calendar = loc.first
+                print(f"    [date_picker] Calendar detected: {csel}")
+                break
+        except Exception:
+            pass
+
+    if calendar is None:
+        print(f"    [date_picker] No calendar widget detected — falling back to fill()")
+        if selector and date_str:
+            try:
+                locator = _create_locator_sync(page, selector)
+                locator.fill(date_str, timeout=timeout)
+                print(f"    [date_picker] Fallback fill: '{date_str}'")
+            except Exception as e:
+                print(f"    [date_picker] Fallback fill failed: {e}")
+        return
+
+    # ── Step 3: Navigate to correct month/year ────────────────────────────────
+    MONTH_NAMES = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+    }
+
+    header_selectors = [
+        ".react-datepicker__current-month",
+        "[class*='month-header']",
+        "[class*='calendar-header']",
+        "[class*='datepicker-header']",
+        "[class*='CurrentMonth']",
+        "[class*='month'][class*='year']",
+    ]
+
+    prev_selectors = [
+        "[aria-label*='previous' i]", "[aria-label*='prev' i]",
+        ".react-datepicker__navigation--previous",
+        "[class*='prev-month']", "[class*='left-arrow']",
+        "button[class*='prev']",
+    ]
+    next_selectors = [
+        "[aria-label*='next' i]",
+        ".react-datepicker__navigation--next",
+        "[class*='next-month']", "[class*='right-arrow']",
+        "button[class*='next']",
+    ]
+
+    def _get_displayed_month_year():
+        for hsel in header_selectors:
+            try:
+                header_loc = page.locator(hsel)
+                if header_loc.count() > 0:
+                    text = (header_loc.first.inner_text() or "").strip()
+                    if text:
+                        # Try "Month YYYY" or "YYYY-MM"
+                        m = _re_dp.search(r'(\w+)\s+(\d{4})', text)
+                        if m:
+                            mon_str = m.group(1).lower()
+                            yr = int(m.group(2))
+                            mon = MONTH_NAMES.get(mon_str)
+                            if mon:
+                                return mon, yr
+                        # Try "MM/YYYY"
+                        m = _re_dp.search(r'(\d{1,2})[/\-](\d{4})', text)
+                        if m:
+                            return int(m.group(1)), int(m.group(2))
+            except Exception:
+                pass
+        return None, None
+
+    max_nav = 24
+    nav_count = 0
+    while nav_count < max_nav:
+        cur_month, cur_year = _get_displayed_month_year()
+        if cur_month is None:
+            print(f"    [date_picker] Could not read calendar header — skipping navigation")
+            break
+
+        if cur_year == target_year and cur_month == target_month:
+            print(f"    [date_picker] Correct month/year displayed")
+            break
+
+        # Determine direction
+        cur_total  = cur_year * 12 + cur_month
+        tgt_total  = target_year * 12 + target_month
+        go_next = tgt_total > cur_total
+
+        nav_sels = next_selectors if go_next else prev_selectors
+        clicked = False
+        for nsel in nav_sels:
+            try:
+                nloc = page.locator(nsel)
+                if nloc.count() > 0:
+                    nloc.first.click(timeout=3000)
+                    page.wait_for_timeout(300)
+                    clicked = True
+                    break
+            except Exception:
+                pass
+
+        if not clicked:
+            print(f"    [date_picker] Could not click navigation arrow — aborting")
+            break
+        nav_count += 1
+
+    # ── Step 4: Click the target day ─────────────────────────────────────────
+    import calendar as _cal
+    month_name = _cal.month_name[target_month]  # e.g. "March"
+    full_date_str = f"{month_name} {target_day}, {target_year}"
+    dd = f"{target_day:02d}"
+
+    day_selectors = [
+        f"[aria-label*='{full_date_str}']",
+        f".react-datepicker__day--0{dd}:not([class*='outside']):not([class*='disabled'])",
+        f"td[data-day='{target_day}']",
+        f"[class*='day']:not([class*='outside']):not([class*='disabled'])",
+    ]
+
+    clicked_day = False
+    for dsel in day_selectors:
+        try:
+            dloc = page.locator(dsel)
+            count = dloc.count()
+            if count > 0:
+                # Try to find exact day text match to avoid off-month days
+                for j in range(count):
+                    cell = dloc.nth(j)
+                    cell_text = (cell.inner_text() or "").strip()
+                    if cell_text == str(target_day):
+                        cell.click(timeout=3000)
+                        print(f"    [date_picker] Clicked day {target_day} via selector: {dsel}")
+                        clicked_day = True
+                        break
+                if clicked_day:
+                    break
+        except Exception:
+            pass
+
+    if not clicked_day:
+        # Last resort: get_by_role gridcell
+        try:
+            page.get_by_role("gridcell", name=str(target_day)).first.click(timeout=3000)
+            print(f"    [date_picker] Clicked day {target_day} via get_by_role gridcell")
+            clicked_day = True
+        except Exception:
+            pass
+
+    if not clicked_day:
+        print(f"    [date_picker] WARNING: Could not click day {target_day} — falling back to fill")
+        if selector and date_str:
+            try:
+                locator = _create_locator_sync(page, selector)
+                locator.fill(date_str, timeout=timeout)
+            except Exception as e:
+                print(f"    [date_picker] Fallback fill also failed: {e}")
+    else:
+        # Wait for picker to close
+        page.wait_for_timeout(500)
+        print(f"    [date_picker] Date {date_str or full_date_str} selected successfully")
+
+
+def _execute_assert_all_rows_sync(page, step_test_data: Dict, timeout: int, run_context: Dict = None) -> None:
+    """
+    Assert a condition on every data row in a table.
+
+    step_test_data keys:
+      column_name  (str)  – header text of the column to inspect.
+                            Accepts a positional int string ("0", "1") as fallback.
+      validation   (str)  – one of: not_empty | not_null | contains | equals | matches_pattern
+      expected_value (str)– required for 'contains', 'equals', 'matches_pattern'
+      min_rows     (int)  – minimum visible rows required (default 1). 0 = allow empty table.
+    """
+    import re as _re
+
+    column_name    = str(step_test_data.get("column_name") or "").strip()
+    validation     = str(step_test_data.get("validation") or "not_empty").strip().lower()
+    expected_value = str(step_test_data.get("expected_value") or "").strip()
+    min_rows       = int(step_test_data.get("min_rows", 1))
+
+    # Aliases
+    if validation == "not_null":
+        validation = "not_empty"
+    if validation == "no_duplicates":
+        validation = "unique"
+
+    # If expected_value is not set (or equals the column name — a common parser mistake),
+    # and the previous step was a fill-from-table on this same column,
+    # use the actual value that was filled so the assert checks real search results.
+    if run_context:
+        last_fill_value = run_context.get("last_fill_value")
+        if last_fill_value:
+            _expected_is_empty = not expected_value
+            _expected_is_col_name = (
+                column_name and expected_value and expected_value.lower() == column_name.lower()
+            )
+            if _expected_is_empty or _expected_is_col_name:
+                print(f"    [assert_all_rows] expected='{last_fill_value}' (resolved from last fill value; "
+                      f"was: '{expected_value or '(empty)'}')")
+                expected_value = last_fill_value
+                if validation == "not_empty":
+                    validation = "contains"
+
+    # Empty column_name means this is a pure "capture rows" setup step with no
+    # column to validate yet (the actual column assertion is a subsequent step).
+    # Treat it as a pass — just verify the table exists with at least min_rows rows.
+    if not column_name:
+        print(f"    [assert_all_rows] No column_name — verifying table has ≥{min_rows} row(s)...")
+        TABLE_QUICK = ["table", "[role='grid']", "[role='table']", "[class*='table']"]
+        found_rows = 0
+        for tsel in TABLE_QUICK:
+            tbody = page.locator(f"{tsel} tbody tr")
+            n = tbody.count()
+            if n > 0:
+                found_rows = n
+                break
+            alltr = page.locator(f"{tsel} tr")
+            n = alltr.count()
+            if n > 1:  # >1 means at least one data row beyond header
+                found_rows = n - 1
+                break
+        if found_rows < min_rows:
+            raise AssertionError(
+                f"[assert_all_rows] Table has {found_rows} row(s) but min_rows={min_rows} (URL: {page.url})"
+            )
+        print(f"    [assert_all_rows] Table found with {found_rows} row(s). PASS (no column to validate)")
+        return
+
+    print(f"    [assert_all_rows] column='{column_name}', validation='{validation}', "
+          f"expected='{expected_value}', min_rows={min_rows}")
+
+    # ── STEP 1: Locate the table ──────────────────────────────────────────────
+    # Try multiple table patterns; pick the one that contains our target column header.
+    TABLE_SELECTORS = [
+        "table",
+        "[role='grid']",
+        "[role='table']",
+        ".table",
+        "[class*='table']",
+        "[class*='Table']",
+        "[class*='grid']",
+    ]
+
+    # Find all rows including header row candidates
+    found_table = None
+    col_index   = None   # 0-based index of the target column
+    header_texts: List[str] = []
+
+    for tsel in TABLE_SELECTORS:
+        tables = page.locator(tsel)
+        count = tables.count()
+        if count == 0:
+            continue
+
+        for t_idx in range(count):
+            tbl = tables.nth(t_idx)
+
+            # Try to find headers: th elements, or first tr's td elements
+            headers = tbl.locator("th")
+            if headers.count() == 0:
+                # No <th>? Try first row's <td> as headers
+                first_row_cells = tbl.locator("tr").first.locator("td")
+                if first_row_cells.count() > 0:
+                    headers = first_row_cells
+
+            h_count = headers.count()
+            if h_count == 0:
+                continue
+
+            # Collect header texts
+            texts = []
+            for i in range(h_count):
+                txt = (headers.nth(i).inner_text() or "").strip()
+                texts.append(txt)
+
+            # Try to match column_name to one of the headers (case-insensitive)
+            matched_idx = None
+            col_lower = column_name.lower()
+            for i, txt in enumerate(texts):
+                if txt.lower() == col_lower or col_lower in txt.lower() or txt.lower() in col_lower:
+                    matched_idx = i
+                    break
+
+            # Positional fallback: if column_name is a digit string
+            if matched_idx is None and column_name.isdigit():
+                pos = int(column_name)
+                if 0 <= pos < h_count:
+                    matched_idx = pos
+
+            if matched_idx is not None:
+                found_table  = tbl
+                col_index    = matched_idx
+                header_texts = texts
+                print(f"    [assert_all_rows] Found column '{column_name}' at index {col_index} "
+                      f"in table selector '{tsel}' (headers: {texts})")
+                break
+
+        if found_table is not None:
+            break
+
+    if found_table is None:
+        # Last resort: find any table-like structure and try by position
+        fallback = page.locator("table").first
+        if fallback.count() > 0 and column_name.isdigit():
+            found_table = fallback
+            col_index   = int(column_name)
+            print(f"    [assert_all_rows] Fallback: using first table, column index {col_index}")
+        else:
+            all_headers = header_texts or []
+            raise AssertionError(
+                f"[assert_all_rows] Could not find column '{column_name}' in any table on page {page.url}. "
+                f"Headers found: {all_headers or 'none'}"
+            )
+
+    # ── STEP 2: Collect data rows ─────────────────────────────────────────────
+    # Data rows = <tbody> rows, or all <tr>s minus the header row(s).
+    tbody_rows = found_table.locator("tbody tr")
+    row_count  = tbody_rows.count()
+
+    if row_count == 0:
+        # No <tbody>? Fall back to all <tr> minus the first (header)
+        all_rows  = found_table.locator("tr")
+        row_count = all_rows.count() - 1   # exclude header row
+        tbody_rows = all_rows
+
+        # We'll slice manually: start from row index 1
+        data_row_start = 1
+    else:
+        data_row_start = 0
+
+    print(f"    [assert_all_rows] Found {row_count} data row(s)")
+
+    # ── STEP 3: Enforce min_rows ──────────────────────────────────────────────
+    if row_count < min_rows:
+        raise AssertionError(
+            f"[assert_all_rows] Table has {row_count} row(s) but min_rows={min_rows}. "
+            f"Page: {page.url}"
+        )
+
+    if row_count == 0:
+        print(f"    [assert_all_rows] 0 rows — min_rows=0, nothing to validate. PASS")
+        return
+
+    # ── STEP 4: Validate each row ────────────────────────────────────────────
+    failures: List[str] = []
+    total_actual_rows = tbody_rows.count()
+    # For "unique" validation: track seen values across all rows
+    seen_values: Dict[str, int] = {}  # value → first row number it appeared
+
+    for i in range(data_row_start, total_actual_rows):
+        row = tbody_rows.nth(i)
+
+        # Get the target cell by column index — include both <td> and <th> (row-scoped headers)
+        cells = row.locator("td, th")
+        cell_count = cells.count()
+
+        if cell_count == 0:
+            # Skip spacer/separator rows
+            continue
+
+        # Skip colspan placeholder rows (e.g. "No data", "Loading..." spanning all columns)
+        if cell_count == 1:
+            try:
+                colspan_val = cells.nth(0).get_attribute("colspan")
+                if colspan_val and int(colspan_val) > 1:
+                    print(f"      Row {i - data_row_start + 1}: skipping colspan placeholder row")
+                    continue
+            except Exception:
+                pass
+
+        if col_index >= cell_count:
+            failures.append(
+                f"Row {i - data_row_start + 1}: only {cell_count} cell(s) but column index is {col_index}"
+            )
+            continue
+
+        cell_text = (cells.nth(col_index).inner_text() or "").strip()
+        row_label = f"Row {i - data_row_start + 1}"
+        print(f"      {row_label}: cell text = '{cell_text}'")
+
+        # Parse expected_value: if it looks like a list literal, treat it as a list
+        import ast as _ast
+        expected_list: list | None = None
+        if isinstance(expected_value, list):
+            expected_list = [str(v).strip() for v in expected_value]
+        elif isinstance(expected_value, str) and expected_value.startswith("[") and expected_value.endswith("]"):
+            try:
+                parsed = _ast.literal_eval(expected_value)
+                if isinstance(parsed, list):
+                    expected_list = [str(v).strip() for v in parsed]
+            except Exception:
+                pass
+
+        # Apply validation
+        if validation == "not_empty":
+            if not cell_text:
+                failures.append(f"{row_label}: value is empty/null (column '{column_name}')")
+
+        elif validation == "contains":
+            # For a list: cell must contain at least one of the values
+            if expected_list is not None:
+                if not any(v.lower() in cell_text.lower() for v in expected_list):
+                    failures.append(
+                        f"{row_label}: '{cell_text}' does not contain any of {expected_list}"
+                    )
+            else:
+                if expected_value.lower() not in cell_text.lower():
+                    failures.append(
+                        f"{row_label}: '{cell_text}' does not contain '{expected_value}'"
+                    )
+
+        elif validation == "equals":
+            # For a list: cell must equal one of the allowed values
+            if expected_list is not None:
+                if cell_text not in expected_list:
+                    failures.append(
+                        f"{row_label}: '{cell_text}' is not one of allowed values {expected_list}"
+                    )
+            else:
+                if cell_text != expected_value:
+                    failures.append(
+                        f"{row_label}: '{cell_text}' != '{expected_value}'"
+                    )
+
+        elif validation == "matches_pattern":
+            # For a list: cell must match at least one pattern
+            if expected_list is not None:
+                if not any(_re.search(p, cell_text) for p in expected_list):
+                    failures.append(
+                        f"{row_label}: '{cell_text}' does not match any pattern in {expected_list}"
+                    )
+            else:
+                if not _re.search(expected_value, cell_text):
+                    failures.append(
+                        f"{row_label}: '{cell_text}' does not match pattern '{expected_value}'"
+                    )
+
+        elif validation == "unique":
+            if not cell_text:
+                failures.append(f"{row_label}: value is empty/null — cannot check uniqueness")
+            elif cell_text in seen_values:
+                failures.append(
+                    f"{row_label}: '{cell_text}' is a duplicate (first seen at Row {seen_values[cell_text]})"
+                )
+            else:
+                seen_values[cell_text] = (i - data_row_start + 1)
+
+        else:
+            print(f"      Unknown validation '{validation}' — skipping row check")
+
+    # ── STEP 5: Report ───────────────────────────────────────────────────────
+    validated_rows = total_actual_rows - data_row_start
+    passed_rows    = validated_rows - len(failures)
+    print(f"    [assert_all_rows] Result: {passed_rows}/{validated_rows} rows passed")
+
+    if failures:
+        failure_detail = "\n  ".join(failures)
+        raise AssertionError(
+            f"[assert_all_rows] {len(failures)}/{validated_rows} row(s) failed validation "
+            f"(column='{column_name}', validation='{validation}'):\n  {failure_detail}"
+        )
+
+    print(f"    [assert_all_rows] All {validated_rows} row(s) PASSED ({validation} on '{column_name}')")
 
 
 def _extract_selector_from_assertion(playwright_assertion: str) -> Optional[str]:
@@ -2637,14 +3843,28 @@ def _execute_assertions_sync(
                     except Exception as e:
                         raise AssertionError(f"Dynamic ID pattern search failed: {e} (URL: {page.url})")
             else:
-                # Use exact match to avoid strict mode violations
-                text_locator = page.get_by_text(expected_value_str, exact=True)
-                if text_locator.count() == 0:
-                    text_locator = page.get_by_text(expected_value_str)
-                if text_locator.count() > 1:
-                    print(f"      Multiple matches for text, using first")
-                    text_locator = text_locator.first
-                sync_expect(text_locator).to_be_visible(timeout=timeout)
+                # Parse expected_value — LLMs may produce lists in various formats:
+                # Python list repr, JSON array, plain CSV, semicolon- or newline-separated
+                comma_items = _parse_multi_value_assertion(expected_value_str)
+                if len(comma_items) >= 2:
+                    print(f"      Multi-value assertion: checking {len(comma_items)} items individually")
+                    for item in comma_items:
+                        item_locator = page.get_by_text(item, exact=True)
+                        if item_locator.count() == 0:
+                            item_locator = page.get_by_text(item)
+                        if item_locator.count() > 1:
+                            item_locator = item_locator.first
+                        sync_expect(item_locator).to_be_visible(timeout=timeout)
+                        print(f"      [OK] '{item}' found")
+                else:
+                    # Use exact match to avoid strict mode violations
+                    text_locator = page.get_by_text(expected_value_str, exact=True)
+                    if text_locator.count() == 0:
+                        text_locator = page.get_by_text(expected_value_str)
+                    if text_locator.count() > 1:
+                        print(f"      Multiple matches for text, using first")
+                        text_locator = text_locator.first
+                    sync_expect(text_locator).to_be_visible(timeout=timeout)
 
         elif assertion_type == "heading":
             heading_found = False
@@ -2686,53 +3906,68 @@ def _execute_assertions_sync(
             # e.g. '""Login successful""' → 'Login successful'
             toast_text = str(expected_value).strip().strip('"').strip("'").strip('"').strip()
 
-            toast_selectors = [
-                "[role='alert']",
-                "[role='status']",
-                ".Toastify__toast",
-                "[class*='toast']",
-                "[class*='Toast']",
-                ".toast",
-                ".Toastify",
-                "[class*='snack']",
-                "[class*='Snack']",
-                "[class*='notification']",
-                "[class*='alert']",
-                "[class*='success']",
-                "[data-testid*='toast']",
-                "[id*='toast']",
-            ]
-            toast_found = False
+            # Check if this toast was already captured during the previous click's nav wait
+            # (toasts disappear fast — we pre-catch them while polling for navigation)
+            _toast_cache = getattr(page, '_toast_cache', {})
+            # Find this assertion's step number from the enclosing context via the cache keys
+            # Try every cached entry — if any matches the expected text, accept it
+            _pre_caught = False
+            for _cached_step, _cached_text in list(_toast_cache.items()):
+                if toast_text.lower() in _cached_text.lower():
+                    print(f"      Toast found (pre-captured during navigation): '{_cached_text}'")
+                    _toast_cache.pop(_cached_step, None)
+                    _pre_caught = True
+                    break
+            if _pre_caught:
+                pass  # assertion passes — skip live DOM search, fall through to next assertion
+            else:
+                toast_selectors = [
+                    "[role='alert']",
+                    "[role='status']",
+                    ".Toastify__toast",
+                    "[class*='toast']",
+                    "[class*='Toast']",
+                    ".toast",
+                    ".Toastify",
+                    "[class*='snack']",
+                    "[class*='Snack']",
+                    "[class*='notification']",
+                    "[class*='alert']",
+                    "[class*='success']",
+                    "[data-testid*='toast']",
+                    "[id*='toast']",
+                ]
+                toast_found = False
 
-            # Toasts appear briefly — poll for up to 5s across all selectors
-            for toast_sel in toast_selectors:
-                try:
-                    locator = page.locator(toast_sel).first
-                    if locator.count() > 0:
-                        text = (locator.inner_text() or "").strip()
-                        if toast_text.lower() in text.lower():
+                # Toasts appear briefly — poll for up to 5s across all selectors
+                for toast_sel in toast_selectors:
+                    try:
+                        locator = page.locator(toast_sel).first
+                        if locator.count() > 0:
+                            text = (locator.inner_text() or "").strip()
+                            if toast_text.lower() in text.lower():
+                                toast_found = True
+                                print(f"      Toast found with selector: {toast_sel} | text: '{text}'")
+                                break
+                            # Also try Playwright contains_text for partial match
+                            sync_expect(locator).to_contain_text(toast_text, timeout=3000)
                             toast_found = True
-                            print(f"      Toast found with selector: {toast_sel} | text: '{text}'")
+                            print(f"      Toast found with selector: {toast_sel}")
                             break
-                        # Also try Playwright contains_text for partial match
-                        sync_expect(locator).to_contain_text(toast_text, timeout=3000)
+                    except Exception:
+                        continue
+
+                if not toast_found:
+                    # Try to find the text anywhere on the page
+                    try:
+                        sync_expect(page.get_by_text(toast_text, exact=False)).to_be_visible(timeout=3000)
                         toast_found = True
-                        print(f"      Toast found with selector: {toast_sel}")
-                        break
-                except Exception:
-                    continue
+                        print(f"      Toast text found directly on page: '{toast_text}'")
+                    except Exception:
+                        pass
 
-            if not toast_found:
-                # Try to find the text anywhere on the page
-                try:
-                    sync_expect(page.get_by_text(toast_text, exact=False)).to_be_visible(timeout=3000)
-                    toast_found = True
-                    print(f"      Toast text found directly on page: '{toast_text}'")
-                except Exception:
-                    pass
-
-            if not toast_found:
-                raise AssertionError(f"Toast message '{toast_text}' not found on page (URL: {page.url})")
+                if not toast_found:
+                    raise AssertionError(f"Toast message '{toast_text}' not found on page (URL: {page.url})")
 
         elif assertion_type in ["element", "visible"]:
             selector = _get_best_selector_sync(page, selector_hints, step_test_data)
