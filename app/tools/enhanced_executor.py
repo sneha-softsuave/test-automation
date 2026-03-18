@@ -2165,6 +2165,30 @@ def _execute_action_sync(
         actual_url = page.url
         print(f"    Landed on: {actual_url}")
 
+        # Detect auth-redirect: if the server sent us to a DIFFERENT path than
+        # requested (e.g. already-logged-in user hitting /login → /dashboard),
+        # clear cookies + storage and retry so subsequent fill steps work.
+        try:
+            from urllib.parse import urlparse as _up_goto
+            _req = _up_goto(url)
+            _act = _up_goto(actual_url)
+            _same_host = _req.netloc == _act.netloc
+            _req_path = _req.path.rstrip("/") or "/"
+            _act_path = _act.path.rstrip("/") or "/"
+            if _same_host and _req_path != _act_path:
+                print(f"    [goto] Redirected {_req_path!r} → {_act_path!r}; clearing auth state and retrying")
+                page.context.clear_cookies()
+                page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e) {} }")
+                page.goto(url, wait_until="load", timeout=timeout)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                actual_url = page.url
+                print(f"    [goto] After auth-clear, landed on: {actual_url}")
+        except Exception as _redir_err:
+            print(f"    [goto] Auth-redirect check failed (non-fatal): {_redir_err}")
+
     elif action_type == "fill":
         # Get value to fill first - check common keys and fallback to any string value
         value = ""
@@ -2702,14 +2726,111 @@ def _execute_action_sync(
                 if failure_detected:
                     raise ValueError(f"Operation failed during loading: {failure_message}")
             else:
-                # No percentage loader, use regular wait
-                selector = _get_best_selector_sync(page, selector_hints, step_test_data)
-                if selector:
-                    locator = _create_locator_sync(page, selector)
-                    locator.wait_for(state="hidden", timeout=wait_timeout)
+                # No percentage loader — check instruction for loader/spinner keywords
+                instruction_lower = instruction.lower()
+                _loader_keywords = ["loader", "loading", "spinner", "processing", "disappear", "wait until"]
+                _wants_loader_gone = any(kw in instruction_lower for kw in _loader_keywords)
+
+                # Selectors that cover common loader/spinner patterns (Material UI, Tailwind, custom)
+                _SPINNER_SELECTORS = [
+                    "[class*='loader']",
+                    "[class*='loading']",
+                    "[class*='spinner']",
+                    "[class*='progress']",
+                    "[role='progressbar']",
+                    "[aria-busy='true']",
+                    "[class*='circular']",
+                    "[class*='Circular']",
+                    "[class*='skeleton']",
+                    "[class*='Skeleton']",
+                    "[class*='overlay']",
+                    "[class*='Loader']",
+                    "[class*='Loading']",
+                    "[class*='Spinner']",
+                ]
+
+                # Detect any currently-visible loader on the page
+                active_loaders = []
+                if _wants_loader_gone:
+                    for _lsel in _SPINNER_SELECTORS:
+                        try:
+                            _locs = page.locator(_lsel).all()
+                            for _loc in _locs:
+                                try:
+                                    if _loc.is_visible():
+                                        active_loaders.append((_lsel, _loc))
+                                        break  # one instance per selector is enough
+                                except Exception:
+                                    continue
+                        except Exception:
+                            continue
+
+                if active_loaders:
+                    # Wait up to 120 s for every detected loader to disappear
+                    LOADER_MAX_WAIT_S = 120
+                    print(f"    Loader/spinner detected ({len(active_loaders)} element(s)), waiting up to {LOADER_MAX_WAIT_S}s for them to disappear...")
+                    for _elapsed in range(LOADER_MAX_WAIT_S * 2):  # poll every 500 ms
+                        ctrl = _check_step_control(signal_file)
+                        if ctrl in ("next", "skip"):
+                            print(f"    Step control '{ctrl}' received — skipping loader wait")
+                            raise _StepControlSignal(ctrl)
+                        all_gone = True
+                        for (_lsel, _) in active_loaders:
+                            try:
+                                if page.locator(_lsel).first.is_visible():
+                                    all_gone = False
+                                    break
+                            except Exception:
+                                pass
+                        if all_gone:
+                            print(f"    All loaders gone after {_elapsed * 0.5:.1f}s")
+                            break
+                        if _elapsed % 20 == 0:
+                            print(f"    Still waiting for loader... ({_elapsed * 0.5:.0f}s elapsed)")
+                        page.wait_for_timeout(500)
+                    else:
+                        print(f"    Loader did not disappear within {LOADER_MAX_WAIT_S}s, continuing...")
+
+                    # Extra small buffer so the UI can finish its transition
+                    page.wait_for_timeout(1000)
+
+                    # If instruction also expects a "continue" button to become visible,
+                    # wait up to 30 more seconds for it to appear
+                    _wants_continue = any(w in instruction_lower for w in ["continue", "continue button"])
+                    if _wants_continue:
+                        print(f"    Waiting for 'Continue' button to become visible (max 30s)...")
+                        _continue_selectors = [
+                            "button:has-text('Continue')",
+                            "[role='button']:has-text('Continue')",
+                            "text=Continue",
+                        ]
+                        _continue_visible = False
+                        for _ci in range(60):  # 60 * 500ms = 30 s
+                            ctrl = _check_step_control(signal_file)
+                            if ctrl in ("next", "skip"):
+                                raise _StepControlSignal(ctrl)
+                            for _csel in _continue_selectors:
+                                try:
+                                    if page.locator(_csel).first.is_visible(timeout=300):
+                                        print(f"    'Continue' button is now visible after {_ci * 0.5:.1f}s")
+                                        _continue_visible = True
+                                        break
+                                except Exception:
+                                    continue
+                            if _continue_visible:
+                                break
+                            page.wait_for_timeout(500)
+                        if not _continue_visible:
+                            print(f"    'Continue' button did not appear within 30s, proceeding...")
                 else:
-                    print(f"    Waiting {wait_timeout}ms...")
-                    page.wait_for_timeout(wait_timeout)
+                    # No visible loader — fall back to selector-based hidden wait or fixed timeout
+                    selector = _get_best_selector_sync(page, selector_hints, step_test_data)
+                    if selector:
+                        locator = _create_locator_sync(page, selector)
+                        locator.wait_for(state="hidden", timeout=wait_timeout)
+                    else:
+                        print(f"    Waiting {wait_timeout}ms...")
+                        page.wait_for_timeout(wait_timeout)
         except _StepControlSignal:
             raise  # Let Next/Skip propagate to retry loop
         except Exception as e:
@@ -3809,6 +3930,22 @@ def _execute_assertions_sync(
             import time as _t
             _t.sleep(1)  # Allow any post-action redirect to settle
             current_url = page.url
+
+            # Replace placeholder hosts (e.g. example.com) with the real host from
+            # the live page — same logic as the goto handler above.
+            _PLACEHOLDER_HOSTS = {"example.com", "your-app.com", "localhost", "your-domain.com"}
+            try:
+                from urllib.parse import urlparse as _up
+                _ep = _up(expected_value_str)
+                if _ep.hostname in _PLACEHOLDER_HOSTS:
+                    _cp = _up(current_url)
+                    if _cp.scheme and _cp.netloc:
+                        _real_base = f"{_cp.scheme}://{_cp.netloc}"
+                        expected_value_str = _real_base + (_ep.path or "/")
+                        print(f"      [url assert] Replaced placeholder → '{expected_value_str}'")
+            except Exception:
+                pass
+
             if expected_value_str:
                 base_expected = expected_value_str.split('?')[0].rstrip('/')
                 base_current = current_url.split('?')[0].rstrip('/')

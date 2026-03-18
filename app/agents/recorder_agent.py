@@ -545,9 +545,11 @@ class RecorderAgent(BaseAgent):
             anthropic_api_key=settings.ANTHROPIC_API_KEY,
             openai_api_key=settings.OPENAI_API_KEY,
             groq_api_key=settings.GROQ_API_KEY,
+            waymore_api_key=settings.WAYMORE_API_KEY,
             groq_model=model or settings.GROQ_MODEL,
             openai_model=model or settings.OPENAI_MODEL,
             anthropic_model=model or settings.ANTHROPIC_MODEL,
+            waymore_model=model or settings.WAYMORE_MODEL,
             # RecorderAgent generates large JSON arrays for multi-step commands;
             # ensure token limit is high enough to avoid truncated responses.
             openai_max_tokens=max(settings.OPENAI_MAX_TOKENS, 16000),

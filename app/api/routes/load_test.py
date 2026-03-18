@@ -51,7 +51,8 @@ def validate_provider_config(provider: LLMProvider) -> None:
     validation_map = {
         LLMProvider.OPENAI: (settings.OPENAI_API_KEY, "OPENAI_API_KEY"),
         LLMProvider.GROQ: (settings.GROQ_API_KEY, "GROQ_API_KEY"),
-        LLMProvider.ANTHROPIC: (settings.ANTHROPIC_API_KEY, "ANTHROPIC_API_KEY")
+        LLMProvider.ANTHROPIC: (settings.ANTHROPIC_API_KEY, "ANTHROPIC_API_KEY"),
+        LLMProvider.WAYMORE: (settings.WAYMORE_API_KEY, "WAYMORE_API_KEY"),
     }
 
     api_key, key_name = validation_map[provider]
@@ -784,6 +785,12 @@ async def generate_ai_insights_background(
                 provider=provider,
                 openai_api_key=settings.OPENAI_API_KEY,
                 openai_model=settings.OPENAI_MODEL
+            )
+        elif provider == LLMProvider.WAYMORE:
+            analyzer = AnalyzerAgent(
+                provider=provider,
+                waymore_api_key=settings.WAYMORE_API_KEY,
+                waymore_model=settings.WAYMORE_MODEL
             )
         else:  # ANTHROPIC
             analyzer = AnalyzerAgent(
@@ -1871,6 +1878,12 @@ async def get_test_analysis(test_id: str, llm_provider: str = "groq", force_rege
                     provider=provider,
                     openai_api_key=settings.OPENAI_API_KEY,
                     openai_model=settings.OPENAI_MODEL
+                )
+            elif provider == LLMProvider.WAYMORE:
+                analyzer = AnalyzerAgent(
+                    provider=provider,
+                    waymore_api_key=settings.WAYMORE_API_KEY,
+                    waymore_model=settings.WAYMORE_MODEL
                 )
             else:  # ANTHROPIC
                 analyzer = AnalyzerAgent(

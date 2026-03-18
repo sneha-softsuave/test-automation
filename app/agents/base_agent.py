@@ -57,6 +57,7 @@ class LLMProvider(str, Enum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     GROQ = "groq"
+    WAYMORE = "waymore"
 
 
 class BaseAgent(ABC):
@@ -68,21 +69,25 @@ class BaseAgent(ABC):
         anthropic_api_key: str = None,
         openai_api_key: str = None,
         groq_api_key: str = None,
+        waymore_api_key: str = None,
         openai_model: str = None,
         openai_max_tokens: int = None,
         groq_model: str = None,
         anthropic_model: str = None,
+        waymore_model: str = None,
     ):
         self.provider = provider
         self.anthropic_api_key = anthropic_api_key
         self.openai_api_key = openai_api_key
         self.groq_api_key = groq_api_key
+        self.waymore_api_key = waymore_api_key
 
         # Use settings from config if not provided
         self.openai_model = openai_model or settings.OPENAI_MODEL
         self.openai_max_tokens = openai_max_tokens or settings.OPENAI_MAX_TOKENS
         self.groq_model = groq_model or settings.GROQ_MODEL
         self.anthropic_model = anthropic_model or settings.ANTHROPIC_MODEL
+        self.waymore_model = waymore_model or settings.WAYMORE_MODEL
 
         # Initialize the appropriate client
         self._init_client()
@@ -115,6 +120,18 @@ class BaseAgent(ABC):
             Groq_cls = _get_groq()
             self.client = Groq_cls(api_key=self.groq_api_key)
             self.model = self.groq_model.strip()
+            self.max_tokens = 8000
+        elif self.provider == LLMProvider.WAYMORE:
+            if not self.waymore_api_key:
+                raise ValueError(
+                    "Waymore provider selected but WAYMORE_API_KEY is not set in .env"
+                )
+            openai_sdk = _get_openai()
+            self.client = openai_sdk.OpenAI(
+                api_key=self.waymore_api_key,
+                base_url=settings.WAYMORE_BASE_URL
+            )
+            self.model = self.waymore_model
             self.max_tokens = 8000
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
@@ -151,6 +168,15 @@ class BaseAgent(ABC):
         )
         return response.choices[0].message.content.strip()
 
+    def _call_waymore(self, prompt: str) -> str:
+        """Call Waymore API (OpenAI-compatible)."""
+        response = self.client.chat.completions.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.choices[0].message.content.strip()
+
     def call_llm(self, prompt: str) -> str:
         """Call the appropriate LLM based on provider."""
         print(f"Calling {self.provider.value} API with model: {self.model}...")
@@ -161,6 +187,8 @@ class BaseAgent(ABC):
             return self._call_openai(prompt)
         elif self.provider == LLMProvider.GROQ:
             return self._call_groq(prompt)
+        elif self.provider == LLMProvider.WAYMORE:
+            return self._call_waymore(prompt)
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
 

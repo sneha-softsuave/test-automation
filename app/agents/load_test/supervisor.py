@@ -79,7 +79,8 @@ class LoadTestSupervisor:
         models = {
             LLMProvider.GROQ: settings.GROQ_MODEL,
             LLMProvider.OPENAI: settings.OPENAI_MODEL,
-            LLMProvider.ANTHROPIC: settings.ANTHROPIC_MODEL
+            LLMProvider.ANTHROPIC: settings.ANTHROPIC_MODEL,
+            LLMProvider.WAYMORE: settings.WAYMORE_MODEL,
         }
         return models.get(provider, settings.GROQ_MODEL)
 
@@ -96,6 +97,12 @@ class LoadTestSupervisor:
                 provider=self.provider,
                 openai_api_key=settings.OPENAI_API_KEY,
                 openai_model=self.model
+            )
+        elif self.provider == LLMProvider.WAYMORE:
+            return agent_class(
+                provider=self.provider,
+                waymore_api_key=settings.WAYMORE_API_KEY,
+                waymore_model=self.model
             )
         else:  # ANTHROPIC
             return agent_class(

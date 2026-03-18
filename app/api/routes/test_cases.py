@@ -22,7 +22,7 @@ router = APIRouter()
 
 def validate_llm_provider(provider_name: str) -> str:
     """Validate and return the LLM provider name."""
-    valid_providers = ["anthropic", "openai", "groq"]
+    valid_providers = ["anthropic", "openai", "groq", "waymore"]
     if provider_name.lower() not in valid_providers:
         raise HTTPException(
             status_code=400,
@@ -37,6 +37,7 @@ def validate_api_key(provider: str) -> None:
         "anthropic": (settings.ANTHROPIC_API_KEY, "your_anthropic_api_key_here"),
         "openai": (settings.OPENAI_API_KEY, "your_openai_api_key_here"),
         "groq": (settings.GROQ_API_KEY, "your_groq_api_key_here"),
+        "waymore": (settings.WAYMORE_API_KEY, "your_waymore_api_key_here"),
     }
 
     api_key, placeholder = api_key_map[provider]

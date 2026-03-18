@@ -181,6 +181,12 @@ class RecorderSession:
         step["step_number"] = len(self._current_steps) + 1
         self._current_steps.append(step)
 
+    def truncate_steps(self, keep_count: int) -> None:
+        """Keep only the first `keep_count` in-progress steps, discard the rest."""
+        self._current_steps = self._current_steps[:keep_count]
+        for i, s in enumerate(self._current_steps):
+            s["step_number"] = i + 1
+
     def close(self) -> None:
         """Stop the browser and playwright thread."""
         def _close():

@@ -95,13 +95,14 @@ export interface ProjectSummary { name: string; test_count: number; }
 export type ExecutionMode = 'multi-agent';
 
 // LLM Provider type
-export type LLMProvider = 'groq' | 'openai' | 'anthropic';
+export type LLMProvider = 'groq' | 'openai' | 'anthropic' | 'waymore';
 
 // LLM Options with models
 export const LLM_OPTIONS: Record<LLMProvider, { label: string; model: string }> = {
   groq: { label: 'Groq (Llama)', model: 'llama-3.1-8b-instant' },
   openai: { label: 'OpenAI (GPT-4o)', model: 'gpt-4o' },
   anthropic: { label: 'Anthropic (Claude)', model: 'claude-sonnet-4-20250514' },
+  waymore: { label: 'Waymore AI', model: 'Waymore-A1-Instruct-1011' },
 };
 
 // Raw Excel data for reports
@@ -530,7 +531,7 @@ export const useStore = create<AppState>()(
           if (response.ok) {
             const config = await response.json();
             const provider = config.default_provider as LLMProvider;
-            if (provider && ['groq', 'openai', 'anthropic'].includes(provider)) {
+            if (provider && ['groq', 'openai', 'anthropic', 'waymore'].includes(provider)) {
               set({ llmProvider: provider });
               console.log(`🤖 Initialized LLM provider from backend: ${provider}`);
             } else {

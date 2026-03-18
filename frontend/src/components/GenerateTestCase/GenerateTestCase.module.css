@@ -372,8 +372,51 @@
   margin-bottom: 16px;
 }
 
+/* Wrapper that reveals action icons on hover */
+.chatUserBubbleWrap {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 80%;
+}
+
+/* Copy + Edit icon buttons — hidden until hover */
+.chatUserActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+  margin-bottom: 2px;
+}
+
+.chatUserBubbleWrap:hover .chatUserActions {
+  opacity: 1;
+}
+
+.chatUserActionBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: none;
+  background: #f1f5f9;
+  color: #64748b;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.chatUserActionBtn:hover {
+  background: #e2e8f0;
+  color: #334155;
+}
+
 .chatUserBubble {
-  max-width: 75%;
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
   color: white;
   padding: 10px 16px;
@@ -381,6 +424,80 @@
   font-size: 0.9rem;
   line-height: 1.5;
   word-break: break-word;
+}
+
+/* ── Inline edit box ───────────────────────────────────────────── */
+.chatEditBox {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 12px 14px 10px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chatEditTextarea {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #334155;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  resize: none;
+  width: 100%;
+  font-family: inherit;
+  min-height: 60px;
+}
+
+.chatEditActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.chatEditCancel {
+  padding: 5px 14px;
+  border-radius: 20px;
+  border: 1px solid #e2e8f0;
+  background: transparent;
+  color: #64748b;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.chatEditCancel:hover {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.chatEditRerun {
+  padding: 5px 14px;
+  border-radius: 20px;
+  border: none;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.chatEditRerun:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.chatEditRerun:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Copy button — green tint when showing Copied feedback */
+.chatUserActionBtnCopied {
+  background: #dcfce7 !important;
+  color: #16a34a !important;
 }
 
 /* AI/system message (left-aligned) */
@@ -436,8 +553,16 @@
   background: rgba(99, 102, 241, 0.03);
 }
 
-.chatStepParagraph {
+/* Wraps the "Completed N steps" label + confirm button together on the left */
+.chatStepLabelGroup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex: 1;
+  min-width: 0;
+}
+
+.chatStepParagraph {
   font-size: 0.875rem;
   color: #334155;
   font-weight: 500;
@@ -458,6 +583,38 @@
   background: #e2e8f0;
   padding: 1px 7px;
   border-radius: 8px;
+}
+
+/* Confirm (tick) button — approves a message's steps for export */
+.confirmBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  padding: 0;
+  flex-shrink: 0;
+  background: transparent;
+}
+
+.confirmBtnActive {
+  background: #22c55e;
+  border-color: #22c55e;
+  color: #fff;
+}
+
+.confirmBtnInactive {
+  border-color: #cbd5e1;
+  color: #cbd5e1;
+}
+
+.confirmBtnInactive:hover {
+  border-color: #22c55e;
+  color: #22c55e;
 }
 
 /* Expanded sub-steps */

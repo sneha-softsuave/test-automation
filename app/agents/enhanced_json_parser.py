@@ -440,9 +440,11 @@ class EnhancedJsonParserAgent(BaseAgent):
             anthropic_api_key=settings.ANTHROPIC_API_KEY,
             openai_api_key=settings.OPENAI_API_KEY,
             groq_api_key=settings.GROQ_API_KEY,
+            waymore_api_key=settings.WAYMORE_API_KEY,
             openai_model=model if provider == LLMProvider.OPENAI else None,
             groq_model=model if provider == LLMProvider.GROQ else None,
             anthropic_model=model if provider == LLMProvider.ANTHROPIC else None,
+            waymore_model=model if provider == LLMProvider.WAYMORE else None,
         )
 
     def execute(self, raw_data: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:

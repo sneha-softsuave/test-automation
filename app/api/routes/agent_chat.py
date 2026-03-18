@@ -25,6 +25,7 @@ class ChatLLM:
         anthropic_api_key: Optional[str] = None,
         openai_api_key: Optional[str] = None,
         groq_api_key: Optional[str] = None,
+        waymore_api_key: Optional[str] = None,
     ):
         self.provider = provider
         self.model = model
@@ -40,6 +41,12 @@ class ChatLLM:
         elif provider == LLMProvider.GROQ:
             from groq import Groq
             self.client = Groq(api_key=groq_api_key)
+        elif provider == LLMProvider.WAYMORE:
+            import openai
+            self.client = openai.OpenAI(
+                api_key=waymore_api_key,
+                base_url=settings.WAYMORE_BASE_URL
+            )
 
     def call_llm(self, prompt: str) -> str:
         """Call the LLM with the given prompt."""
@@ -52,15 +59,7 @@ class ChatLLM:
                 )
                 return response.content[0].text.strip()
 
-            elif self.provider == LLMProvider.OPENAI:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.choices[0].message.content.strip()
-
-            elif self.provider == LLMProvider.GROQ:
+            elif self.provider in (LLMProvider.OPENAI, LLMProvider.GROQ, LLMProvider.WAYMORE):
                 response = self.client.chat.completions.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
@@ -467,6 +466,7 @@ async def chat_with_agent(request: ChatRequest):
             "openai": settings.OPENAI_MODEL,
             "anthropic": settings.ANTHROPIC_MODEL,
             "groq": settings.GROQ_MODEL,
+            "waymore": settings.WAYMORE_MODEL,
         }
         model = model_map.get(provider_str, settings.GROQ_MODEL)
 
@@ -476,6 +476,7 @@ async def chat_with_agent(request: ChatRequest):
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
         openai_api_key=settings.OPENAI_API_KEY,
         groq_api_key=settings.GROQ_API_KEY,
+        waymore_api_key=settings.WAYMORE_API_KEY,
     )
 
     # ------------------------------------------------------------------ #

@@ -48,6 +48,12 @@ class OrchestratorLLM:
         elif provider == LLMProvider.GROQ:
             from groq import Groq
             self.client = Groq(api_key=groq_api_key)
+        elif provider == LLMProvider.WAYMORE:
+            import openai
+            self.client = openai.OpenAI(
+                api_key=settings.WAYMORE_API_KEY,
+                base_url=settings.WAYMORE_BASE_URL
+            )
 
     def call_llm(self, prompt: str) -> str:
         """Call the LLM with the given prompt."""
@@ -60,15 +66,7 @@ class OrchestratorLLM:
                 )
                 return response.content[0].text.strip()
 
-            elif self.provider == LLMProvider.OPENAI:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.choices[0].message.content.strip()
-
-            elif self.provider == LLMProvider.GROQ:
+            elif self.provider in (LLMProvider.OPENAI, LLMProvider.GROQ, LLMProvider.WAYMORE):
                 response = self.client.chat.completions.create(
                     model=self.model,
                     max_tokens=self.max_tokens,

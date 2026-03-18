@@ -105,7 +105,7 @@ async def step_control(
 
 def validate_llm_provider(provider_name: str) -> str:
     """Validate and return the LLM provider name."""
-    valid_providers = ["anthropic", "openai", "groq"]
+    valid_providers = ["anthropic", "openai", "groq", "waymore"]
     if provider_name.lower() not in valid_providers:
         raise HTTPException(
             status_code=400,
@@ -121,6 +121,7 @@ def validate_api_key(provider: str) -> None:
             "anthropic": (getattr(settings, 'ANTHROPIC_API_KEY', None), "your_anthropic_api_key_here"),
             "openai": (getattr(settings, 'OPENAI_API_KEY', None), "your_openai_api_key_here"),
             "groq": (getattr(settings, 'GROQ_API_KEY', None), "your_groq_api_key_here"),
+            "waymore": (getattr(settings, 'WAYMORE_API_KEY', None), "your_waymore_api_key_here"),
         }
 
         if provider not in api_key_map:
@@ -252,6 +253,7 @@ async def run_deep_agent_endpoint(
             "anthropic": settings.ANTHROPIC_MODEL,
             "openai": settings.OPENAI_MODEL,
             "groq": settings.GROQ_MODEL,
+            "waymore": settings.WAYMORE_MODEL,
         }
         model = model_defaults.get(provider_name, settings.GROQ_MODEL)
 
@@ -819,6 +821,7 @@ async def run_multi_agent_endpoint(
             "anthropic": settings.ANTHROPIC_MODEL,
             "openai": settings.OPENAI_MODEL,
             "groq": settings.GROQ_MODEL,
+            "waymore": settings.WAYMORE_MODEL,
         }
         model = model_defaults.get(provider_name, settings.GROQ_MODEL)
 

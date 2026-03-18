@@ -488,6 +488,7 @@ stateDiagram-v2
 | **Groq** | llama-3.1-8b-instant | Fast, cost-effective |
 | **OpenAI** | gpt-4o | High accuracy |
 | **Anthropic** | Claude Sonnet | Complex reasoning |
+| **Waymore AI** | Waymore-A1-Instruct-1011 | Custom enterprise model |
 
 ---
 
@@ -680,6 +681,17 @@ This project has comprehensive documentation organized as follows:
 
 ### 📁 unused-backup/ Folder (Git Ignored)
 Contains archived test files and temporary files that are no longer actively used.
+
+---
+
+## Recent Updates
+
+### New Model: Waymore AI
+Added **Waymore AI** (`Waymore-A1-Instruct-1011`) as a selectable LLM provider alongside Groq, OpenAI, and Anthropic.
+
+### Edit & Confirm Buttons (GenerateTestCase)
+- **Edit** (pencil icon) — click on any recorded step to edit the instruction and rerun it from that point forward.
+- **Confirm** (checkmark icon) — approve individual steps for export; toggle on/off per step before generating the final test case.
 
 ---
 

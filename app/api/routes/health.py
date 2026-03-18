@@ -54,6 +54,13 @@ async def get_llm_providers():
                 "model": settings.ANTHROPIC_MODEL,
                 "api_key_configured": bool(settings.ANTHROPIC_API_KEY and settings.ANTHROPIC_API_KEY != "your_anthropic_api_key_here"),
                 "is_default": settings.DEFAULT_LLM_PROVIDER == "anthropic"
+            },
+            {
+                "id": "waymore",
+                "display_name": "Waymore AI",
+                "model": settings.WAYMORE_MODEL,
+                "api_key_configured": bool(settings.WAYMORE_API_KEY and settings.WAYMORE_API_KEY != "your_waymore_api_key_here"),
+                "is_default": settings.DEFAULT_LLM_PROVIDER == "waymore"
             }
         ],
         "default_provider": settings.DEFAULT_LLM_PROVIDER
@@ -167,6 +174,36 @@ async def validate_ai_providers():
         results["anthropic"] = {
             "available": False,
             "model": settings.ANTHROPIC_MODEL,
+            "error": "API key not configured"
+        }
+
+    # Test Waymore
+    if settings.WAYMORE_API_KEY and settings.WAYMORE_API_KEY != "your_waymore_api_key_here":
+        start = time.time()
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=settings.WAYMORE_API_KEY, base_url=settings.WAYMORE_BASE_URL, timeout=5.0)
+            response = client.chat.completions.create(
+                model=settings.WAYMORE_MODEL,
+                messages=[{"role": "user", "content": "test"}],
+                max_tokens=1
+            )
+            latency = (time.time() - start) * 1000
+            results["waymore"] = {
+                "available": True,
+                "model": settings.WAYMORE_MODEL,
+                "latency_ms": round(latency, 2)
+            }
+        except Exception as e:
+            results["waymore"] = {
+                "available": False,
+                "model": settings.WAYMORE_MODEL,
+                "error": str(e)
+            }
+    else:
+        results["waymore"] = {
+            "available": False,
+            "model": settings.WAYMORE_MODEL,
             "error": "API key not configured"
         }
 

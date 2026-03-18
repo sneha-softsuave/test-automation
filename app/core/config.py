@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-4-5-20250929"
 
+    # Waymore Configuration
+    WAYMORE_API_KEY: str = ""
+    WAYMORE_MODEL: str = "Waymore-A1-Instruct-1011"
+    WAYMORE_BASE_URL: str = "https://chat.waymore.ai/api"
+
     # Default LLM provider used if none specified (groq is cost-effective and fast)
     DEFAULT_LLM_PROVIDER: str = "groq"
 

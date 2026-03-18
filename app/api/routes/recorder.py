@@ -64,12 +64,20 @@ class ExportRequest(BaseModel):
     base_url: Optional[str] = None
 
 
+class RerunRequest(BaseModel):
+    session_id: str
+    command: str
+    start_url: Optional[str] = None   # navigate here first if URL differs
+    truncate_to_step: int = 0          # keep first N in-progress steps, discard rest
+    llm_provider: Optional[str] = None
+
+
 # ─────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────
 
 def _validate_provider(provider_name: str) -> str:
-    valid = ["anthropic", "openai", "groq"]
+    valid = ["anthropic", "openai", "groq", "waymore"]
     p = provider_name.lower()
     if p not in valid:
         raise HTTPException(status_code=400, detail=f"Invalid provider: {provider_name}. Choose from {valid}")
@@ -81,9 +89,10 @@ def _validate_api_key(provider: str) -> None:
         "anthropic": settings.ANTHROPIC_API_KEY,
         "openai": settings.OPENAI_API_KEY,
         "groq": settings.GROQ_API_KEY,
+        "waymore": settings.WAYMORE_API_KEY,
     }
     key = key_map.get(provider, "")
-    placeholder_vals = {"your_anthropic_api_key_here", "your_openai_api_key_here", "your_groq_api_key_here", ""}
+    placeholder_vals = {"your_anthropic_api_key_here", "your_openai_api_key_here", "your_groq_api_key_here", "your_waymore_api_key_here", ""}
     if not key or key in placeholder_vals:
         raise HTTPException(status_code=500, detail=f"{provider.upper()}_API_KEY not configured in .env")
 
@@ -465,6 +474,243 @@ In 1-2 sentences, explain what went wrong and what the user should change in the
 
     # Strip the screenshot data from the step records before returning
     # (screenshot is available via SSE and in final screenshot_b64 field)
+    clean_steps = [
+        {k: v for k, v in s.items() if k not in ("screenshot_b64", "current_url")}
+        for s in executed_steps
+    ]
+
+    return {
+        "success": True,
+        "steps": clean_steps,
+        "screenshot_b64": screenshot_b64,
+        "current_url": current_url,
+        "step_number": len(session.steps),
+        "error": executed_steps[-1].get("error") if executed_steps else None,
+    }
+
+
+@router.post("/recorder/rerun")
+async def recorder_rerun(
+    request: RerunRequest,
+    llm_provider: Optional[str] = Query(default=None),
+):
+    """
+    Edit an already-executed instruction and re-run it from the same starting URL.
+    Steps: truncate session to `truncate_to_step`, optionally navigate to `start_url`
+    if the browser is on a different page, then execute the new command.
+    """
+    session = recorder_session_manager.get_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session '{request.session_id}' not found. Call /recorder/start first.")
+
+    provider_name = request.llm_provider or llm_provider or settings.DEFAULT_LLM_PROVIDER
+    provider_name = _validate_provider(provider_name)
+    _validate_api_key(provider_name)
+
+    logger.info(
+        f"[recorder/rerun] session={request.session_id} "
+        f"truncate_to={request.truncate_to_step} "
+        f"start_url={request.start_url!r} "
+        f"command={request.command!r}"
+    )
+
+    from app.agents.recorder_agent import RecorderAgent
+    from app.agents.base_agent import LLMProvider as AgentLLMProvider
+
+    loop = asyncio.get_event_loop()
+
+    def _broadcast_now(image_b64: str, current_url: str, step_number: int) -> None:
+        asyncio.run_coroutine_threadsafe(
+            _broadcast_screenshot(request.session_id, image_b64, current_url, step_number),
+            loop,
+        )
+
+    def _ask_llm_about_errors(agent, action: dict, errors: list, current_url: str) -> str:
+        try:
+            errors_text = "\n".join(f"  - {e}" for e in errors)
+            prompt = f"""A test recorder executed this action:
+Action: {action.get('action_type')} | Element: {action.get('element_name') or action.get('selector')} | Value: {action.get('value')}
+Instruction: {action.get('instruction')}
+Page: {current_url}
+
+Inline validation errors found on page after the action:
+{errors_text}
+
+In 1-2 sentences, explain what went wrong and what the user should change in their next command to fix it. Be specific."""
+            return agent.call_llm(prompt).strip()
+        except Exception:
+            return f"Validation error: {'; '.join(errors)}"
+
+    def _execute():
+        # ── Step 0: Truncate steps and navigate to start_url if needed ──
+        session.truncate_steps(request.truncate_to_step)
+
+        current_url = session.run_in_pw_thread(lambda: session.page.url)
+        if request.start_url and request.start_url != current_url:
+            logger.info(f"[recorder/rerun] Navigating from {current_url!r} → {request.start_url!r}")
+            def _navigate():
+                page = session.page
+                target = request.start_url
+                page.goto(target, wait_until="load", timeout=30_000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15_000)
+                except Exception:
+                    pass
+                # Detect auth-redirect: if we landed on a different path the app
+                # redirected an authenticated user (e.g. /login → /dashboard).
+                # Clear cookies + storage and retry so the target page actually loads.
+                from urllib.parse import urlparse as _up_r
+                landed = page.url
+                _req_path = (_up_r(target).path or "/").rstrip("/") or "/"
+                _act_path = (_up_r(landed).path or "/").rstrip("/") or "/"
+                if _req_path != _act_path and _up_r(target).netloc == _up_r(landed).netloc:
+                    logger.info(
+                        f"[recorder/rerun] Auth-redirect detected ({_req_path!r} → {_act_path!r}); "
+                        "clearing auth state and retrying"
+                    )
+                    page.context.clear_cookies()
+                    page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e) {} }")
+                    page.goto(target, wait_until="load", timeout=30_000)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=15_000)
+                    except Exception:
+                        pass
+                    logger.info(f"[recorder/rerun] After auth-clear, landed on: {page.url!r}")
+            session.run_in_pw_thread(_navigate)
+
+        agent = RecorderAgent(provider=AgentLLMProvider(provider_name))
+
+        context_summary = session.get_context_summary()
+        actions = session.run_in_pw_thread(
+            lambda: agent.parse_multi_step_command(request.command, session.page, context_summary)
+        )
+        logger.info(f"[recorder/rerun] parsed {len(actions)} atomic action(s)")
+
+        executed_steps = []
+        last_screenshot_b64 = session.take_screenshot_b64()
+        last_url = session.run_in_pw_thread(lambda: session.page.url)
+
+        for action in actions:
+            error_msg = None
+            url_before = last_url
+            pre_action_screenshot = last_screenshot_b64
+
+            def _run_action(a=action, ss=pre_action_screenshot):
+                agent.execute_action(a, session.page, screenshot_b64=ss)
+
+            action_start = datetime.utcnow()
+            try:
+                session.run_in_pw_thread(_run_action)
+            except Exception as e:
+                logger.warning(f"Action execution error: {e}")
+                error_msg = str(e)
+            execution_time_ms = int((datetime.utcnow() - action_start).total_seconds() * 1000)
+
+            def _pause_and_capture(pre_url=url_before, has_error=bool(error_msg)):
+                import base64 as _b64
+                if not has_error:
+                    session.page.wait_for_timeout(1000)
+                    url_now = session.page.url
+                    if url_now != pre_url:
+                        session.page.wait_for_timeout(1000)
+                data = session.page.screenshot(full_page=False)
+                return _b64.b64encode(data).decode("utf-8"), session.page.url
+
+            last_screenshot_b64, last_url = session.run_in_pw_thread(_pause_and_capture)
+
+            validation_errors = []
+            ai_suggestion = None
+            if not error_msg:
+                validation_errors = session.run_in_pw_thread(
+                    lambda: agent._scan_page_errors(session.page)
+                )
+                if validation_errors:
+                    ai_suggestion = _ask_llm_about_errors(agent, action, validation_errors, last_url)
+
+            step = {
+                "action_type": action.get("action_type", ""),
+                "selector": action.get("selector", ""),
+                "value": action.get("value", ""),
+                "instruction": action.get("instruction", request.command),
+                "playwright_method": action.get("playwright_method", ""),
+                "element_name": action.get("element_name"),
+                "element_type": action.get("element_type"),
+                "test_data": action.get("test_data"),
+                "assertions": action.get("assertions"),
+                "command": request.command,
+                "executed_at": action_start.isoformat(),
+                "execution_time_ms": execution_time_ms,
+                "error": error_msg,
+                "validation_errors": validation_errors,
+                "ai_suggestion": ai_suggestion,
+            }
+            session.add_step(step)
+            step_number = len(session.steps)
+            executed_steps.append({
+                **step,
+                "screenshot_b64": last_screenshot_b64,
+                "current_url": last_url,
+                "step_number": step_number,
+            })
+
+            _broadcast_now(last_screenshot_b64, last_url, step_number)
+            asyncio.run_coroutine_threadsafe(
+                sse_manager.broadcast(request.session_id, {
+                    "type": "recorder_step",
+                    "step": {k: v for k, v in {**step, "step_number": step_number}.items()
+                             if k != "screenshot_b64"},
+                    "current_url": last_url,
+                }),
+                loop,
+            )
+
+            # URL-change detection: auto-insert verify_url step
+            if last_url != url_before and not error_msg:
+                logger.info(f"[recorder/rerun] Navigation: {url_before} → {last_url}")
+                nav_screenshot_b64 = session.take_screenshot_b64()
+                nav_step = {
+                    "action_type": "verify_url",
+                    "selector": "",
+                    "value": last_url,
+                    "instruction": f"Verify the page navigated to {last_url}",
+                    "playwright_method": "expect(page).to_have_url",
+                    "element_name": None,
+                    "element_type": None,
+                    "test_data": {"url": last_url},
+                    "assertions": [{"type": "url", "expected_value": last_url,
+                                    "playwright_assertion": f"expect(page).to_have_url('{last_url}')"}],
+                    "command": request.command,
+                    "executed_at": datetime.utcnow().isoformat(),
+                    "execution_time_ms": 0,
+                    "error": None,
+                }
+                session.add_step(nav_step)
+                nav_step_number = len(session.steps)
+                executed_steps.append({
+                    **nav_step,
+                    "screenshot_b64": nav_screenshot_b64,
+                    "current_url": last_url,
+                    "step_number": nav_step_number,
+                })
+                _broadcast_now(nav_screenshot_b64, last_url, nav_step_number)
+                asyncio.run_coroutine_threadsafe(
+                    sse_manager.broadcast(request.session_id, {
+                        "type": "recorder_step",
+                        "step": {**nav_step, "step_number": nav_step_number},
+                        "current_url": last_url,
+                    }),
+                    loop,
+                )
+                last_screenshot_b64 = nav_screenshot_b64
+
+        return executed_steps, last_screenshot_b64, last_url
+
+    try:
+        executed_steps, screenshot_b64, current_url = await _run_in_plain_thread(_execute)
+    except Exception as e:
+        logger.error(f"[recorder/rerun] Failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Rerun failed: {str(e)}")
+
     clean_steps = [
         {k: v for k, v in s.items() if k not in ("screenshot_b64", "current_url")}
         for s in executed_steps

@@ -5,7 +5,7 @@ import {
   Play, FileSpreadsheet, AlertCircle, Check,
   Eye, EyeOff, RotateCcw, Video, MonitorPlay, Monitor,
   Circle, CheckCircle2, XCircle, Loader2, Camera, X, Send,
-  Zap, Save, FileJson
+  Zap, Save, FileJson, Pencil, Copy
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { SaveToProjectModal } from './SaveToProjectModal';
@@ -71,6 +71,7 @@ interface RecorderMessage {
   paragraph: string;
   steps: RecordedStep[];
   status: 'executing' | 'done' | 'error';
+  startUrl?: string; // browser URL before this message was executed
 }
 
 type Mode = 'generate' | 'record';
@@ -150,9 +151,14 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const [recMessages, setRecMessages] = useState<RecorderMessage[]>([]);
   const [recScreenshot, setRecScreenshot] = useState<string | null>(null);
   const [recCurrentUrl, setRecCurrentUrl] = useState('');
+  const recCurrentUrlRef = useRef('');
   const [recResult, setRecResult] = useState<{ test_suite: GeneratedSuite; step_count: number; export_json?: object } | null>(null);
   const [recInstruction, setRecInstruction] = useState('');
   const [collapsedMessages, setCollapsedMessages] = useState<Set<string>>(new Set());
+  const [confirmedMessages, setConfirmedMessages] = useState<Set<string>>(new Set());
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState('');
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [recPanelView, setRecPanelView] = useState<'browser' | 'excel'>('browser');
   // Finalized cases from "Start new case" — each entry holds steps for one row (for Excel)
   const [finalizedCases, setFinalizedCases] = useState<Array<{ name: string; steps: RecordedStep[] }>>([]);
@@ -175,7 +181,9 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
   // Steps in the current in-progress case only (messages after the last case boundary)
   const currentCaseStartMsgIdx = caseBoundaries.length > 0 ? caseBoundaries[caseBoundaries.length - 1] : 0;
-  const allRecSteps = recMessages.slice(currentCaseStartMsgIdx).flatMap(m => m.steps);
+  const allRecSteps = recMessages.slice(currentCaseStartMsgIdx).flatMap(m =>
+    confirmedMessages.has(m.id) ? m.steps : []
+  );
   // Total steps across all finalized cases + current case
   const totalRecSteps = finalizedCases.reduce((sum, c) => sum + c.steps.length, 0) + allRecSteps.length;
   const currentCaseNumber = finalizedCases.length + 1;
@@ -212,10 +220,16 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
   const recExcelStatus: 'running' | 'passed' | 'failed' =
     recStatus === 'done'
-      ? (allRecSteps.some(s => s.error) ? 'failed' : 'passed')
+      ? (allRecSteps.some(s => s.error || s.validation_errors?.length) ? 'failed' : 'passed')
       : 'running';
 
-  const recExcelError = allRecSteps.find(s => s.error)?.error ?? null;
+  const recExcelError = (() => {
+    for (const s of allRecSteps) {
+      if (s.error) return s.error;
+      if (s.validation_errors?.length) return s.validation_errors[0];
+    }
+    return null;
+  })();
 
   // Auto-scroll messages
   useEffect(() => {
@@ -242,6 +256,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         const data = JSON.parse(evt.data);
         if (data.type === 'recorder_screenshot') {
           setRecScreenshot(data.image_b64);
+          recCurrentUrlRef.current = data.current_url || '';
           setRecCurrentUrl(data.current_url || '');
         } else if (data.type === 'recorder_step' && activeMsgIdRef.current) {
           const s = data.step;
@@ -388,15 +403,127 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   // Record mode handlers
   // ==========================================================================
 
+  const handleToggleConfirm = (msgId: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // prevent collapsing the card
+    setConfirmedMessages(prev => {
+      const next = new Set(prev);
+      if (next.has(msgId)) next.delete(msgId);
+      else next.add(msgId);
+      return next;
+    });
+  };
+
+  const handleStartEdit = (msg: RecorderMessage) => {
+    setEditingMessageId(msg.id);
+    setEditingText(msg.paragraph);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingMessageId(null);
+    setEditingText('');
+  };
+
+  const handleCopyMessage = (msgId: string, text: string) => {
+    navigator.clipboard.writeText(text).catch(() => {});
+    setCopiedMessageId(msgId);
+    setTimeout(() => setCopiedMessageId(null), 2000);
+  };
+
+  const handleRerun = async (msg: RecorderMessage) => {
+    const paragraph = editingText.trim();
+    if (!paragraph || recStatus !== 'active') return;
+
+    // Find this message's index within the current case messages
+    const currentCaseMsgs = recMessages.slice(currentCaseStartMsgIdx);
+    const msgIdx = currentCaseMsgs.findIndex(m => m.id === msg.id);
+    if (msgIdx === -1) return;
+
+    // Steps to preserve = sum of steps from messages BEFORE this one in the current case
+    const stepsToKeep = currentCaseMsgs.slice(0, msgIdx).reduce((sum, m) => sum + m.steps.length, 0);
+
+    // Close edit mode
+    setEditingMessageId(null);
+    setEditingText('');
+
+    // Discard this message and all after it; clean up their confirm/collapse state
+    const discardedIds = recMessages.slice(currentCaseStartMsgIdx + msgIdx).map(m => m.id);
+    setConfirmedMessages(prev => { const n = new Set(prev); discardedIds.forEach(id => n.delete(id)); return n; });
+    setCollapsedMessages(prev => { const n = new Set(prev); discardedIds.forEach(id => n.delete(id)); return n; });
+
+    // Build new executing message
+    const newMsgId = `msg_${Date.now()}`;
+    activeMsgIdRef.current = newMsgId;
+    const newMsg: RecorderMessage = {
+      id: newMsgId, paragraph, steps: [], status: 'executing',
+      startUrl: msg.startUrl,
+    };
+    setRecMessages([...recMessages.slice(0, currentCaseStartMsgIdx + msgIdx), newMsg]);
+    setRecStatus('executing');
+
+    try {
+      const params = new URLSearchParams({ llm_provider: recProvider });
+      const res = await fetch(`${API_BASE}/api/v1/recorder/rerun?${params}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionIdRef.current,
+          command: paragraph,
+          start_url: msg.startUrl || undefined,
+          truncate_to_step: stepsToKeep,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || 'Rerun failed');
+      }
+      const data = await res.json();
+      if (data.current_url) { recCurrentUrlRef.current = data.current_url; setRecCurrentUrl(data.current_url); }
+
+      activeMsgIdRef.current = null;
+      setRecMessages(prev =>
+        prev.map(m => {
+          if (m.id !== newMsgId) return m;
+          const sseSteps = m.steps;
+          if (sseSteps.length > 0) return { ...m, status: data.error ? 'error' : 'done' };
+          const returnedSteps: RecordedStep[] = (data.steps || []).map((s: RecordedStep, i: number) => ({
+            step_number: i + 1,
+            instruction: s.instruction || '',
+            action_type: s.action_type || '',
+            selector_hints: { element_name: (s as any).element_name, element_type: (s as any).element_type, suggested_selectors: (s as any).selector ? [(s as any).selector] : [] },
+            test_data: s.test_data,
+            assertions: s.assertions,
+            error: s.error,
+            validation_errors: s.validation_errors,
+            ai_suggestion: s.ai_suggestion,
+          }));
+          const hasError = returnedSteps.some(s => s.error);
+          return { ...m, steps: returnedSteps, status: hasError ? 'error' : 'done' };
+        })
+      );
+      setRecStatus('active');
+      setTimeout(() => instructionRef.current?.focus(), 50);
+    } catch (e: unknown) {
+      activeMsgIdRef.current = null;
+      const errMsg = e instanceof Error ? e.message : String(e);
+      setRecMessages(prev => prev.map(m => m.id === newMsgId ? { ...m, status: 'error' } : m));
+      setRecError(errMsg);
+      setRecStatus('active');
+      addNotification('error', `Rerun failed: ${errMsg}`);
+    }
+  };
+
   const handleStartRecording = async () => {
     setRecError(null);
     setRecMessages([]);
     setFinalizedCases([]);
     setCaseBoundaries([]);
     setRecScreenshot(null);
+    recCurrentUrlRef.current = '';
     setRecCurrentUrl('');
     setRecResult(null);
     setCollapsedMessages(new Set());
+    setConfirmedMessages(new Set());
     setRecStatus('starting');
     const firstInstruction = recInstruction.trim();
 
@@ -420,7 +547,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       }
       const data = await res.json();
       if (data.screenshot_b64) setRecScreenshot(data.screenshot_b64);
-      if (data.current_url) setRecCurrentUrl(data.current_url);
+      if (data.current_url) { recCurrentUrlRef.current = data.current_url; setRecCurrentUrl(data.current_url); }
       setRecStatus('active');
 
       if (firstInstruction) {
@@ -446,7 +573,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
     const msgId = `msg_${Date.now()}`;
     activeMsgIdRef.current = msgId; // SSE handler will append steps to this message
-    const newMsg: RecorderMessage = { id: msgId, paragraph, steps: [], status: 'executing' };
+    const newMsg: RecorderMessage = { id: msgId, paragraph, steps: [], status: 'executing', startUrl: recCurrentUrlRef.current };
     setRecMessages(prev => [...prev, newMsg]);
 
     try {
@@ -466,7 +593,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       }
       const data = await res.json();
       if (data.screenshot_b64) setRecScreenshot(data.screenshot_b64);
-      if (data.current_url) setRecCurrentUrl(data.current_url);
+      if (data.current_url) { recCurrentUrlRef.current = data.current_url; setRecCurrentUrl(data.current_url); }
 
       // Steps were already streamed in via SSE (recorder_step events).
       // Use the HTTP response only to catch any steps that may have arrived
@@ -535,9 +662,29 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         throw new Error(err.detail || 'Failed to complete recording');
       }
       const data = await res.json();
-      setRecResult({ test_suite: data.test_suite, step_count: data.step_count, export_json: data.export_json });
+
+      // Filter the test suite to only include steps from user-confirmed messages.
+      // Build a set of instructions from all confirmed messages' steps.
+      const confirmedInstructions = new Set<string>(
+        recMessages
+          .filter(m => confirmedMessages.has(m.id))
+          .flatMap(m => m.steps.map(s => s.instruction))
+      );
+      const testSuite = confirmedInstructions.size > 0
+        ? {
+            ...data.test_suite,
+            test_cases: (data.test_suite.test_cases as GeneratedSuite['test_cases'])
+              .map(tc => ({ ...tc, steps: tc.steps.filter(s => confirmedInstructions.has(s.instruction)) }))
+              .filter(tc => tc.steps.length > 0),
+          }
+        : data.test_suite;
+      const filteredStepCount = confirmedInstructions.size > 0
+        ? testSuite.test_cases.reduce((sum: number, tc: GeneratedSuite['test_cases'][0]) => sum + tc.steps.length, 0)
+        : data.step_count;
+
+      setRecResult({ test_suite: testSuite, step_count: filteredStepCount, export_json: data.export_json });
       setRecStatus('done');
-      addNotification('success', `Recorded test suite saved: ${data.step_count} step(s)`);
+      addNotification('success', `Recorded test suite saved: ${filteredStepCount} step(s)`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setRecError(msg);
@@ -583,10 +730,12 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     setFinalizedCases([]);
     setCaseBoundaries([]);
     setRecScreenshot(null);
+    recCurrentUrlRef.current = '';
     setRecCurrentUrl('');
     setRecError(null);
     setRecResult(null);
     setCollapsedMessages(new Set());
+    setConfirmedMessages(new Set());
   };
 
   const handleUseRecordedInAgent = () => {
@@ -663,6 +812,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             <option value="groq">Groq (Llama 3.1)</option>
             <option value="openai">OpenAI (GPT-4o)</option>
             <option value="anthropic">Anthropic (Claude)</option>
+            <option value="waymore">Waymore AI</option>
           </select>
         </div>
         <p className={styles.subtitle}>
@@ -1157,9 +1307,53 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                           animate={{ opacity: 1, y: 0 }}
                         >
                           {/* User bubble */}
-                          <div className={styles.chatUserMessage}>
-                            <div className={styles.chatUserBubble}>{msg.paragraph}</div>
-                          </div>
+                          {editingMessageId === msg.id ? (
+                            <div className={styles.chatEditBox}>
+                              <textarea
+                                className={styles.chatEditTextarea}
+                                value={editingText}
+                                onChange={e => setEditingText(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Escape') handleCancelEdit(); }}
+                                autoFocus
+                                rows={3}
+                              />
+                              <div className={styles.chatEditActions}>
+                                <button className={styles.chatEditCancel} onClick={handleCancelEdit}>Cancel</button>
+                                <button
+                                  className={styles.chatEditRerun}
+                                  disabled={editingText.trim() === msg.paragraph.trim() || editingText.trim() === '' || recStatus !== 'active'}
+                                  onClick={() => handleRerun(msg)}
+                                >Rerun</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className={styles.chatUserMessage}>
+                              <div className={styles.chatUserBubbleWrap}>
+                                <div className={styles.chatUserActions}>
+                                  <button
+                                    className={`${styles.chatUserActionBtn} ${copiedMessageId === msg.id ? styles.chatUserActionBtnCopied : ''}`}
+                                    onClick={() => handleCopyMessage(msg.id, msg.paragraph)}
+                                    title={copiedMessageId === msg.id ? 'Copied!' : 'Copy'}
+                                  >
+                                    {copiedMessageId === msg.id
+                                      ? <Check size={13} />
+                                      : <Copy size={13} />
+                                    }
+                                  </button>
+                                  {msgIdx >= currentCaseStartMsgIdx && (
+                                    <button
+                                      className={styles.chatUserActionBtn}
+                                      onClick={() => handleStartEdit(msg)}
+                                      title="Edit"
+                                    >
+                                      <Pencil size={13} />
+                                    </button>
+                                  )}
+                                </div>
+                                <div className={styles.chatUserBubble}>{msg.paragraph}</div>
+                              </div>
+                            </div>
+                          )}
 
                           {/* Bot response */}
                           <div className={styles.chatBotMessage}>
@@ -1172,12 +1366,12 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                                   className={styles.chatStepHeader}
                                   onClick={() => toggleMessageCollapse(msg.id)}
                                 >
-                                  <span className={styles.chatStepParagraph}>
-                                    {msg.status === 'executing' ? 'Parsing and executing steps…'
-                                      : msg.status === 'done' ? `Completed ${msg.steps.length} step${msg.steps.length !== 1 ? 's' : ''}`
-                                      : `Error — ${msg.steps.length} step${msg.steps.length !== 1 ? 's' : ''} attempted`}
-                                  </span>
-                                  <div className={styles.chatStepHeaderRight}>
+                                  <div className={styles.chatStepLabelGroup}>
+                                    <span className={styles.chatStepParagraph}>
+                                      {msg.status === 'executing' ? 'Parsing and executing steps…'
+                                        : msg.status === 'done' ? `Completed ${msg.steps.length} step${msg.steps.length !== 1 ? 's' : ''}`
+                                        : `Error — ${msg.steps.length} step${msg.steps.length !== 1 ? 's' : ''} attempted`}
+                                    </span>
                                     {msg.status === 'executing' && (
                                       <Loader2 size={14} className={styles.spin} style={{ color: '#6366f1' }} />
                                     )}
@@ -1186,6 +1380,17 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                                     )}
                                     {msg.status === 'error' && (
                                       <XCircle size={14} style={{ color: '#ef4444' }} />
+                                    )}
+                                  </div>
+                                  <div className={styles.chatStepHeaderRight}>
+                                    {msg.status === 'done' && msg.steps.length > 0 && (
+                                      <button
+                                        className={`${styles.confirmBtn} ${confirmedMessages.has(msg.id) ? styles.confirmBtnActive : styles.confirmBtnInactive}`}
+                                        onClick={(e) => handleToggleConfirm(msg.id, e)}
+                                        title={confirmedMessages.has(msg.id) ? 'Remove from export' : 'Approve steps for export'}
+                                      >
+                                        <Check size={10} />
+                                      </button>
                                     )}
                                     {msg.steps.length > 0 && (
                                       <span className={styles.chatStepCount}>{msg.steps.length}</span>
@@ -1439,7 +1644,14 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                               <div className={`${styles.recExcelCell} ${styles.recExcelStatusCell} ${styles.recExcelRowPassed}`}>
                                 <span className={styles.recExcelBadgePassed}>✓ DONE</span>
                               </div>
-                              <div className={`${styles.recExcelCell} ${styles.recExcelErrorCell} ${styles.recExcelRowPassed}`}></div>
+                              <div className={`${styles.recExcelCell} ${styles.recExcelErrorCell} ${styles.recExcelRowPassed}`}>
+                                {fc.steps.reduce<string | null>((acc, s) => {
+                                  if (acc) return acc;
+                                  if (s.error) return s.error;
+                                  if (s.validation_errors?.length) return s.validation_errors[0];
+                                  return null;
+                                }, null) || ''}
+                              </div>
                             </React.Fragment>
                           ))}
 

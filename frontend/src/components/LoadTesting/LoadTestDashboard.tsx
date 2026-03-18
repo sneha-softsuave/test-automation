@@ -899,6 +899,7 @@ export const LoadTestDashboard: React.FC = () => {
               <option value="groq">Groq (Fast)</option>
               <option value="openai">OpenAI</option>
               <option value="anthropic">Anthropic</option>
+              <option value="waymore">Waymore AI</option>
             </select>
           </div>
           <button

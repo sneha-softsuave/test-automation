@@ -60,7 +60,7 @@ interface AIAnalysis {
 
 interface AISuggestionsPanelProps {
   testId: string;
-  llmProvider: 'groq' | 'openai' | 'anthropic';
+  llmProvider: 'groq' | 'openai' | 'anthropic' | 'waymore';
   onRetestWithSuggestion: (config: SuggestionMetrics) => void;
 }
 
