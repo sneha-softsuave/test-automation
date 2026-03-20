@@ -7,16 +7,32 @@ import json
 from playwright.sync_api import sync_playwright
 
 
-def extract_selectors(url: str, headless: bool = True, timeout: int = 30000) -> dict:
-    """Extract all selectors from a given URL."""
+def extract_selectors(url: str, headless: bool = True, timeout: int = 30000, storage_state_file: str = None) -> dict:
+    """Extract all selectors from a given URL.
+
+    storage_state_file: optional path to a JSON file containing Playwright
+    storage state (cookies + localStorage) so authenticated pages can be
+    scraped without re-logging in.
+    """
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
-        context = browser.new_context()
+        ctx_kwargs = {}
+        if storage_state_file:
+            try:
+                ctx_kwargs["storage_state"] = storage_state_file
+            except Exception:
+                pass
+        context = browser.new_context(**ctx_kwargs)
         page = context.new_page()
 
         try:
             page.goto(url, timeout=timeout, wait_until="networkidle")
+            # Give SPA frameworks extra time to render dynamic content
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
 
             # JavaScript to extract all elements with their selectors
             extraction_script = """
@@ -28,6 +44,53 @@ def extract_selectors(url: str, headless: bool = True, timeout: int = 30000) -> 
                     if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE' || el.tagName === 'NOSCRIPT') {
                         return;
                     }
+
+                    const ARIA_INTERACTIVE_ROLES = new Set([
+                        'button','checkbox','radio','switch','combobox','listbox',
+                        'option','menuitem','menuitemcheckbox','menuitemradio',
+                        'tab','treeitem','slider','spinbutton','textbox',
+                        'searchbox','link','gridcell','columnheader','rowheader'
+                    ]);
+                    const elRole = el.getAttribute('role') || '';
+
+                    // Resolve the best available label for this element
+                    function resolveLabel(elem) {
+                        // 1. aria-label attribute
+                        const direct = elem.getAttribute('aria-label');
+                        if (direct && direct.trim()) return direct.trim();
+
+                        // 2. aria-labelledby — resolve referenced element(s) text
+                        const labelledBy = elem.getAttribute('aria-labelledby');
+                        if (labelledBy) {
+                            const labelText = labelledBy.split(/\s+/)
+                                .map(id => { const ref = document.getElementById(id); return ref ? ref.innerText.trim() : ''; })
+                                .filter(Boolean).join(' ');
+                            if (labelText) return labelText;
+                        }
+
+                        // 3. innerText of the element itself (non-empty)
+                        const ownText = elem.innerText ? elem.innerText.trim() : '';
+                        if (ownText) return ownText.substring(0, 80);
+
+                        // 4. For ARIA widgets — look at closest sibling or parent label text
+                        const parent = elem.parentElement;
+                        if (parent) {
+                            // Try sibling text nodes / spans next to the widget
+                            for (const sibling of parent.childNodes) {
+                                if (sibling === elem) continue;
+                                const sibText = sibling.innerText ? sibling.innerText.trim()
+                                              : (sibling.textContent ? sibling.textContent.trim() : '');
+                                if (sibText && sibText.length <= 80) return sibText;
+                            }
+                            // Try parent's own direct text (label wrapping pattern)
+                            const parentLabel = parent.getAttribute('aria-label') || '';
+                            if (parentLabel.trim()) return parentLabel.trim();
+                        }
+
+                        return null;
+                    }
+
+                    const resolvedLabel = resolveLabel(el);
 
                     const element = {
                         index: index,
@@ -41,12 +104,16 @@ def extract_selectors(url: str, headless: bool = True, timeout: int = 30000) -> 
                         value: el.value || null,
                         href: el.getAttribute('href') || null,
                         src: el.getAttribute('src') || null,
-                        role: el.getAttribute('role') || null,
-                        ariaLabel: el.getAttribute('aria-label') || null,
+                        role: elRole || null,
+                        ariaLabel: resolvedLabel,
+                        ariaChecked: el.getAttribute('aria-checked'),
+                        ariaExpanded: el.getAttribute('aria-expanded'),
+                        ariaSelected: el.getAttribute('aria-selected'),
                         dataTestId: el.getAttribute('data-testid') || el.getAttribute('data-test-id') || null,
                         dataId: el.getAttribute('data-id') || null,
                         isVisible: el.offsetParent !== null,
-                        isInteractive: ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName),
+                        isInteractive: ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)
+                                        || ARIA_INTERACTIVE_ROLES.has(elRole),
                         rect: el.getBoundingClientRect ? {
                             x: Math.round(el.getBoundingClientRect().x),
                             y: Math.round(el.getBoundingClientRect().y),
@@ -112,6 +179,18 @@ def extract_selectors(url: str, headless: bool = True, timeout: int = 30000) -> 
             browser.close()
 
 
+ARIA_WIDGET_ROLES = {
+    'switch', 'checkbox', 'radio', 'combobox', 'listbox', 'slider',
+    'spinbutton', 'textbox', 'searchbox', 'menuitem', 'menuitemcheckbox',
+    'menuitemradio', 'tab', 'treeitem', 'option', 'gridcell',
+    'columnheader', 'rowheader',
+}
+
+# Tags that are already captured in their own dedicated lists —
+# only add to aria_widgets when the tag is NOT one of these
+NATIVE_INTERACTIVE_TAGS = {'input', 'button', 'a', 'select', 'textarea', 'form'}
+
+
 def categorize_elements(elements: list) -> dict:
     """Categorize extracted elements."""
     inputs = []
@@ -121,6 +200,7 @@ def categorize_elements(elements: list) -> dict:
     images = []
     headings = []
     interactive = []
+    aria_widgets = []
     all_with_id = []
     all_with_testid = []
 
@@ -129,6 +209,7 @@ def categorize_elements(elements: list) -> dict:
             continue
 
         tag = el.get("tag", "")
+        role = el.get("role") or ""
         simplified = simplify_element(el)
 
         if tag == "input":
@@ -143,6 +224,10 @@ def categorize_elements(elements: list) -> dict:
             images.append(simplified)
         elif tag in ["h1", "h2", "h3", "h4", "h5", "h6"]:
             headings.append(simplified)
+
+        # ARIA widget: non-native tag with an interactive ARIA role
+        if role in ARIA_WIDGET_ROLES and tag not in NATIVE_INTERACTIVE_TAGS:
+            aria_widgets.append(simplified)
 
         if el.get("isInteractive"):
             interactive.append(simplified)
@@ -161,6 +246,7 @@ def categorize_elements(elements: list) -> dict:
             "images": len(images),
             "headings": len(headings),
             "interactive": len(interactive),
+            "aria_widgets": len(aria_widgets),
             "with_id": len(all_with_id),
             "with_testid": len(all_with_testid)
         },
@@ -170,6 +256,7 @@ def categorize_elements(elements: list) -> dict:
         "forms": forms,
         "headings": headings,
         "interactive": interactive,
+        "aria_widgets": aria_widgets,
         "elements_with_id": all_with_id,
         "elements_with_testid": all_with_testid
     }
@@ -187,6 +274,9 @@ def simplify_element(el: dict) -> dict:
         "text": el.get("text"),
         "role": el.get("role"),
         "ariaLabel": el.get("ariaLabel"),
+        "ariaChecked": el.get("ariaChecked"),
+        "ariaExpanded": el.get("ariaExpanded"),
+        "ariaSelected": el.get("ariaSelected"),
         "dataTestId": el.get("dataTestId"),
         "href": el.get("href"),
         "selectors": el.get("selectors"),
@@ -203,9 +293,10 @@ if __name__ == "__main__":
     url = sys.argv[1]
     headless = sys.argv[2].lower() == "true" if len(sys.argv) > 2 else True
     timeout = int(sys.argv[3]) if len(sys.argv) > 3 else 30000
+    storage_state_file = sys.argv[4] if len(sys.argv) > 4 else None
 
     try:
-        result = extract_selectors(url, headless, timeout)
+        result = extract_selectors(url, headless, timeout, storage_state_file)
         print(json.dumps(result))
     except Exception as e:
         print(json.dumps({"error": str(e)}))

@@ -46,6 +46,67 @@ interface ApiResult {
   test_suite: GeneratedSuite;
 }
 
+// ── Chatbot generate types ────────────────────────────────────────────────────
+
+type ChatPhase = 'url_input' | 'analyzing' | 'chatting' | 'generating' | 'executing' | 'done';
+type ChatIntent = 'execute' | 'edit' | 'informational' | 'generate';
+
+interface ExecStepMsg {
+  test_id: string;
+  test_name: string;
+  step_number: number;
+  instruction: string;
+  status: 'running' | 'passed' | 'failed' | 'pending';
+  duration_ms?: number;
+  error?: string;
+}
+
+interface ExecSummary {
+  total: number;
+  passed: number;
+  failed: number;
+}
+
+interface ExecTestResult {
+  id: string;
+  name: string;
+  status: 'passed' | 'failed';
+  steps: GeneratedSuite['test_cases'][0]['steps'];
+  expected_results: string[];
+  test_data: Record<string, unknown>;
+  error?: string;
+}
+
+interface ChatMsg {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  testSuite?: GeneratedSuite;
+  execSummary?: ExecSummary;
+  execTestCases?: ExecTestResult[];
+}
+
+// ── Intent detection ──────────────────────────────────────────────────────────
+
+const _EXECUTE_RE = /\b(execute|run)\s+\d+|\b(execute|run|play|start)\b.*(all|test|tests|them|it)\b|\b(execute|run)\s+test\s*\d+|\bexecute all\b|\brun all\b/i;
+const _EDIT_RE = /\b(edit|change|update|modify|replace|remove|delete)\b.*(step|test case|expected|selector|instruction)|\bstep\s+\d+\b|\btest\s+case\s+\d+\b/i;
+const _INFO_RE = /^(what|which|how|why|where|when|is|are|does|do|can|could|should|would|tell me|show me|list|explain)\b/i;
+
+function detectIntent(msg: string): ChatIntent {
+  if (_EXECUTE_RE.test(msg)) return 'execute';
+  if (_EDIT_RE.test(msg)) return 'edit';
+  if (_INFO_RE.test(msg.trim())) return 'informational';
+  return 'generate';
+}
+
+function upsertExecStep(prev: ExecStepMsg[], incoming: ExecStepMsg): ExecStepMsg[] {
+  const idx = prev.findIndex(s => s.test_id === incoming.test_id && s.step_number === incoming.step_number);
+  if (idx === -1) return [...prev, incoming];
+  const next = [...prev];
+  next[idx] = incoming;
+  return next;
+}
+
 // ── Recorder types ────────────────────────────────────────────────────────────
 
 type RecordingStatus = 'idle' | 'starting' | 'active' | 'executing' | 'completing' | 'done' | 'error';
@@ -141,6 +202,30 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ApiResult | null>(null);
   const [expandedTc, setExpandedTc] = useState<string | null>(null);
+
+  // ── Chatbot generate mode state ──────────────────────────────────────────
+  const [chatPhase, setChatPhase] = useState<ChatPhase>('url_input');
+  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+  const [chatUrlInput, setChatUrlInput] = useState('');
+  const [chatTextInput, setChatTextInput] = useState('');
+  const [chatExpandedTc, setChatExpandedTc] = useState<string | null>(null);
+  const chatMessagesEndRef = useRef<HTMLDivElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
+
+  // ── Execution state (chatbot execute mode) ────────────────────────────────
+  const [execSessionId, setExecSessionId] = useState<string | null>(null);
+  const execSseRef = useRef<EventSource | null>(null);
+  const [execSteps, setExecSteps] = useState<ExecStepMsg[]>([]);
+  const [execSummary, setExecSummary] = useState<ExecSummary | null>(null);
+  const execStepsEndRef = useRef<HTMLDivElement>(null);
+  const [execScreenshot, setExecScreenshot] = useState<string | null>(null);
+  const [execCurrentUrl, setExecCurrentUrl] = useState('');
+  const [execPanelView, setExecPanelView] = useState<'browser' | 'excel'>('browser');
+  const [confirmedExecResults, setConfirmedExecResults] = useState<ExecTestResult[]>([]);
+  const [confirmedTcIds, setConfirmedTcIds] = useState<Set<string>>(new Set());
+  // Last generated test suite (for suggestion buttons)
+  const [lastTestSuite, setLastTestSuite] = useState<GeneratedSuite | null>(null);
 
   // ── Record mode state ────────────────────────────────────────────────────
   const [recUrl, setRecUrl] = useState('');
@@ -398,6 +483,416 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     setResult(null);
     setError(null);
   };
+
+  // ==========================================================================
+  // Chatbot generate mode handlers
+  // ==========================================================================
+
+  // Auto-scroll chat to bottom
+  useEffect(() => {
+    chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages, chatPhase]);
+
+  const appendChatMsg = (msg: ChatMsg) =>
+    setChatMessages(prev => [...prev, msg]);
+
+  const _URL_PATTERN = /^(https?:\/\/|www\.)\S+/i;
+  const looksLikeUrl = (text: string) => _URL_PATTERN.test(text.trim());
+
+
+  const handleAnalyzeUrl = async (urlOverride?: string) => {
+    const trimmedUrl = (urlOverride ?? chatUrlInput).trim();
+    if (!trimmedUrl) return;
+
+    setChatUrlInput(trimmedUrl);
+    // Append user bubble with the URL
+    appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: trimmedUrl });
+    setChatPhase('analyzing');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/analyze-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: trimmedUrl, llm_provider: selectedProvider }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || 'Server error');
+      }
+      const data = await res.json();
+      setChatSessionId(data.session_id);
+      appendChatMsg({ id: `ca_${Date.now()}`, role: 'assistant', content: data.message });
+      setChatPhase('chatting');
+      setTimeout(() => chatInputRef.current?.focus(), 50);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      appendChatMsg({ id: `ce_${Date.now()}`, role: 'assistant', content: `Error: ${msg}` });
+      setChatPhase('url_input');
+      addNotification('error', `Analyse failed: ${msg}`);
+    }
+  };
+
+  // ── Execution SSE connection ───────────────────────────────────────────────
+  // Always-current ref so the SSE onmessage handler never uses a stale closure
+  const handleExecSseEventRef = useRef<(data: Record<string, unknown>) => void>(() => {});
+
+  const connectExecutionSSE = (sid: string) => {
+    if (execSseRef.current) {
+      execSseRef.current.close();
+      execSseRef.current = null;
+    }
+    setExecSteps([]);
+    setExecSummary(null);
+
+    const es = new EventSource(`${API_BASE}/api/v1/sse/${sid}`);
+    execSseRef.current = es;
+
+    es.onmessage = (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        handleExecSseEventRef.current(data);
+      } catch { /* ignore */ }
+    };
+
+    es.onerror = () => {
+      // Connection dropped — unblock the UI so user isn't stuck forever
+      if (execSseRef.current) {
+        execSseRef.current.close();
+        execSseRef.current = null;
+      }
+      setChatPhase(prev => prev === 'executing' ? 'chatting' : prev);
+    };
+
+    // Safety net: force-close after 15 minutes in case backend never sends exec_session_complete
+    setTimeout(() => {
+      if (execSseRef.current === es) {
+        es.close();
+        execSseRef.current = null;
+        setChatPhase(prev => prev === 'executing' ? 'chatting' : prev);
+      }
+    }, 15 * 60 * 1000);
+  };
+
+  // Keep the ref pointing at the latest version of the handler
+  useEffect(() => { handleExecSseEventRef.current = handleExecSseEvent; });
+
+  const handleExecSseEvent = (data: Record<string, unknown>) => {
+    switch (data.type) {
+      case 'step_update': {
+        const step: ExecStepMsg = {
+          test_id: String(data.test_id ?? ''),
+          test_name: String(data.test_name ?? ''),
+          step_number: Number(data.step_number ?? 0),
+          instruction: String(data.instruction ?? ''),
+          status: (data.status as ExecStepMsg['status']) ?? 'running',
+          duration_ms: data.duration_ms as number | undefined,
+          error: data.error as string | undefined,
+        };
+        setExecSteps(prev => upsertExecStep(prev, step));
+        execStepsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        break;
+      }
+      case 'test_update': {
+        // Mark all steps of this test as passed/failed
+        setExecSteps(prev => prev.map(s =>
+          s.test_id === data.test_id
+            ? { ...s, status: (data.status as ExecStepMsg['status']) ?? s.status }
+            : s
+        ));
+        break;
+      }
+      case 'chat_execution_done': {
+        // Show results and unblock input — keep SSE open for page_analysis_done that may follow
+        const summary = data.summary as ExecSummary;
+        setExecSummary(summary);
+        setChatPhase('chatting');
+        const tcResults = (data.tc_results as ExecTestResult[] | undefined) ?? [];
+        appendChatMsg({
+          id: `ca_${Date.now()}`,
+          role: 'assistant',
+          content: String(data.message ?? 'Execution complete.'),
+          execSummary: summary,
+          execTestCases: tcResults,
+        });
+        break;
+      }
+      case 'exec_session_complete': {
+        // All backend post-processing done — safe to close SSE now
+        if (execSseRef.current) { execSseRef.current.close(); execSseRef.current = null; }
+        break;
+      }
+      case 'page_analysis_start': {
+        // Backend is scraping the navigated page — show a transient status in chat
+        appendChatMsg({
+          id: `nav_start_${Date.now()}`,
+          role: 'assistant',
+          content: String(data.message ?? 'Analyzing the new page…'),
+        });
+        if (data.url) setExecCurrentUrl(String(data.url));
+        break;
+      }
+      case 'page_analysis_done': {
+        // Replace the "analyzing…" message with the full page intro
+        const navMsg = String(data.message ?? '');
+        if (navMsg) {
+          appendChatMsg({ id: `nav_done_${Date.now()}`, role: 'assistant', content: navMsg });
+        }
+        if (data.url) { setExecCurrentUrl(String(data.url)); setChatUrlInput(String(data.url)); }
+        break;
+      }
+      case 'exec_screenshot': {
+        if (data.image_b64) setExecScreenshot(String(data.image_b64));
+        if (data.url) setExecCurrentUrl(String(data.url));
+        break;
+      }
+      case 'page_navigated': {
+        const navUrl = String(data.url ?? '');
+        const elemSummary = String(data.elements_summary ?? `Browser navigated to: ${navUrl}`);
+        if (navUrl) setExecCurrentUrl(navUrl);
+        if (data.image_b64) setExecScreenshot(String(data.image_b64));
+        appendChatMsg({
+          id: `nav_${Date.now()}`,
+          role: 'assistant',
+          content: elemSummary,
+        });
+        break;
+      }
+      case 'agent_phase':
+        // Phase update — add a brief status step
+        if (data.message) {
+          setExecSteps(prev => [...prev, {
+            test_id: 'system',
+            test_name: 'System',
+            step_number: Date.now(),
+            instruction: String(data.message),
+            status: 'running',
+          }]);
+        }
+        break;
+      case 'error':
+        if (execSseRef.current) { execSseRef.current.close(); execSseRef.current = null; }
+        appendChatMsg({ id: `ce_${Date.now()}`, role: 'assistant', content: `Execution error: ${data.message}` });
+        setChatPhase('chatting');
+        break;
+    }
+  };
+
+  // ── Chat execute handler ──────────────────────────────────────────────────
+  const handleChatExecute = async (userMessage: string) => {
+    if (!chatSessionId) return;
+    setChatPhase('executing');
+    setExecSteps([]);
+    setExecSummary(null);
+    setExecScreenshot(null);
+    setExecCurrentUrl('');
+    setExecPanelView('browser');
+
+    appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: userMessage });
+
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/chat-execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: chatSessionId,
+          user_message: userMessage,
+          llm_provider: selectedProvider,
+          headless: true,
+          timeout: 30000,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || 'Server error');
+      }
+      const data = await res.json();
+      setExecSessionId(data.exec_session_id);
+      appendChatMsg({ id: `ca_${Date.now()}`, role: 'assistant', content: data.message });
+      connectExecutionSSE(data.exec_session_id);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      appendChatMsg({ id: `ce_${Date.now()}`, role: 'assistant', content: `Error: ${msg}` });
+      setChatPhase('chatting');
+      addNotification('error', `Execute failed: ${msg}`);
+    }
+  };
+
+  // ── Chat edit handler ─────────────────────────────────────────────────────
+  const handleChatEdit = async (userMessage: string) => {
+    if (!chatSessionId) return;
+    setChatPhase('generating');
+
+    appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: userMessage });
+
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/chat-edit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: chatSessionId,
+          user_message: userMessage,
+          llm_provider: selectedProvider,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || 'Server error');
+      }
+      const data = await res.json();
+      if (data.test_suite) {
+        setLastTestSuite(data.test_suite);
+        const firstTcId = data.test_suite.test_cases?.[0]?.id ?? null;
+        if (firstTcId) setChatExpandedTc(firstTcId);
+      }
+      appendChatMsg({
+        id: `ca_${Date.now()}`,
+        role: 'assistant',
+        content: data.message,
+        testSuite: data.test_suite,
+      });
+      setChatPhase('chatting');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      appendChatMsg({ id: `ce_${Date.now()}`, role: 'assistant', content: `Error: ${msg}` });
+      setChatPhase('chatting');
+      addNotification('error', `Edit failed: ${msg}`);
+    }
+  };
+
+  // ── Chat informational handler ────────────────────────────────────────────
+  const handleChatInformational = async (userMessage: string) => {
+    if (!chatSessionId) return;
+    setChatPhase('generating');
+
+    appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: userMessage });
+
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/chat-informational`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: chatSessionId,
+          user_message: userMessage,
+          llm_provider: selectedProvider,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || 'Server error');
+      }
+      const data = await res.json();
+      appendChatMsg({ id: `ca_${Date.now()}`, role: 'assistant', content: data.message });
+      setChatPhase('chatting');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      appendChatMsg({ id: `ce_${Date.now()}`, role: 'assistant', content: `Error: ${msg}` });
+      setChatPhase('chatting');
+    }
+  };
+
+  const handleChatSend = async () => {
+    const text = chatTextInput.trim();
+    if (!text) return;
+    setChatTextInput('');
+
+    // In URL input phase, treat input as URL
+    if (chatPhase === 'url_input') {
+      if (looksLikeUrl(text)) {
+        const url = text.startsWith('http') ? text : `https://${text}`;
+        await handleAnalyzeUrl(url);
+      } else {
+        appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: text });
+        appendChatMsg({ id: `ca_${Date.now()}`, role: 'assistant', content: 'Please share a URL (starting with https://) so I can analyze the page.' });
+      }
+      return;
+    }
+
+    if (!chatSessionId) return;
+    if (chatPhase === 'generating' || chatPhase === 'executing') return;
+
+    if (chatInputRef.current) chatInputRef.current.style.height = 'auto';
+
+    const intent = detectIntent(text);
+
+    if (intent === 'execute') {
+      await handleChatExecute(text);
+    } else if (intent === 'edit') {
+      await handleChatEdit(text);
+    } else if (intent === 'informational') {
+      await handleChatInformational(text);
+    } else {
+      // generate
+      appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: text });
+      setChatPhase('generating');
+
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/chat-generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: chatSessionId,
+            user_message: text,
+            llm_provider: selectedProvider,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          throw new Error(err.detail || 'Server error');
+        }
+        const data = await res.json();
+        const firstTcId = data.test_suite?.test_cases?.[0]?.id ?? null;
+        if (firstTcId) setChatExpandedTc(firstTcId);
+        if (data.test_suite) setLastTestSuite(data.test_suite);
+        appendChatMsg({
+          id: `ca_${Date.now()}`,
+          role: 'assistant',
+          content: data.message,
+          testSuite: data.test_suite,
+        });
+        setChatPhase('chatting');
+        addNotification('success', `Generated ${data.test_suite?.test_cases?.length ?? 0} test case(s)`);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        appendChatMsg({ id: `ce_${Date.now()}`, role: 'assistant', content: `Error: ${msg}` });
+        setChatPhase('chatting');
+        addNotification('error', `Generation failed: ${msg}`);
+      }
+    }
+  };
+
+  const handleChatUseInAgent = (suite: GeneratedSuite) => {
+    setTestSuite(suite as any);
+    addNotification('success', 'Test suite loaded — switch to Agent or Execute to run tests');
+    setCurrentView('suite');
+  };
+
+  const handleChatReset = () => {
+    if (execSseRef.current) { execSseRef.current.close(); execSseRef.current = null; }
+    setChatPhase('url_input');
+    setChatSessionId(null);
+    setChatMessages([]);
+    setChatUrlInput('');
+    setChatTextInput('');
+    setChatExpandedTc(null);
+    setExecSteps([]);
+    setExecSummary(null);
+    setExecSessionId(null);
+    setLastTestSuite(null);
+    setExecScreenshot(null);
+    setExecCurrentUrl('');
+    setConfirmedExecResults([]);
+    setConfirmedTcIds(new Set());
+  };
+
+  const handleConfirmResult = (tc: ExecTestResult) => {
+    if (confirmedTcIds.has(tc.id)) return;
+    setConfirmedExecResults(prev => [...prev, tc]);
+    setConfirmedTcIds(prev => new Set([...prev, tc.id]));
+    setExecPanelView('excel');
+  };
+
+  // Cleanup SSE on unmount
+  useEffect(() => () => { execSseRef.current?.close(); }, []);
 
   // ==========================================================================
   // Record mode handlers
@@ -839,309 +1334,442 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       </div>
 
       {/* ══════════════════════════════════════════════════════════════════ */}
-      {/* GENERATE MODE                                                      */}
+      {/* GENERATE MODE — Chatbot UI                                         */}
       {/* ══════════════════════════════════════════════════════════════════ */}
       {mode === 'generate' && (
-        <div className={styles.chatLayout}>
-          {/* Scrollable content area */}
-          <div className={styles.chatMessages}>
-            {/* Input form — only when no result */}
-            {!result && !loading && (
-              <motion.div
-                className={styles.card}
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-              >
-                <h2 className={styles.cardTitle}>
-                  <Globe size={16} className={styles.cardTitleIcon} />
-                  App Details
-                </h2>
+        <div className={`${styles.chatLayout} ${styles.genExecutionLayout}`}>
 
-                <div className={styles.field}>
-                  <label className={`${styles.label} ${styles.labelRequired}`}>Application URL</label>
-                  <span className={styles.hint}>The page you want to generate tests for</span>
-                  <input
-                    className={styles.input}
-                    type="url"
-                    placeholder="https://myapp.com/login"
-                    value={url}
-                    onChange={e => setUrl(e.target.value)}
-                    disabled={loading}
-                  />
-                </div>
+          {/* ── RIGHT PANEL: browser + excel view (always visible) ── */}
+          {(
+            <div className={styles.genExecPanel}>
 
-                <div className={styles.field}>
-                  <label className={`${styles.label} ${styles.labelRequired}`}>What do you want to test?</label>
-                  <span className={styles.hint}>Describe the scenarios in plain English</span>
-                  <textarea
-                    className={`${styles.input} ${styles.textarea}`}
-                    placeholder={`Examples:\n• Test the login page with valid and invalid credentials\n• Test the signup flow including email validation\n• Test the product search and add-to-cart flow`}
-                    value={intent}
-                    onChange={e => setIntent(e.target.value)}
-                    disabled={loading}
-                  />
-                </div>
+              {/* Status bar */}
+              <div className={styles.genExecStatusBar}>
+                <span className={`${styles.recStatusDot} ${chatPhase === 'executing' ? styles.recStatusExecuting : styles.recStatusActive}`} />
+                <span className={styles.genExecStatusText}>
+                  {chatPhase === 'executing'
+                    ? (execSteps.filter(s => s.test_id !== 'system' && s.status === 'running').length > 0
+                        ? `Running: ${execSteps.find(s => s.test_id !== 'system' && s.status === 'running')?.test_name ?? '…'}`
+                        : 'Preparing execution…')
+                    : chatPhase === 'analyzing'
+                    ? 'Analyzing page…'
+                    : confirmedExecResults.length > 0
+                    ? `${confirmedExecResults.length} result${confirmedExecResults.length !== 1 ? 's' : ''} confirmed`
+                    : 'Ready — run test cases to see live browser'}
+                </span>
+                {chatPhase === 'executing' && (
+                  <span className={styles.genExecPanelBadge}>
+                    {execSteps.filter(s => s.step_number === 0 && (s.status === 'passed' || s.status === 'failed')).length}
+                    /{execSteps.filter(s => s.step_number === 0).length} done
+                  </span>
+                )}
+              </div>
 
+              {/* View toggle */}
+              <div className={styles.genExecViewToggle}>
                 <button
-                  className={styles.optionalToggle}
-                  onClick={() => setShowOptional(v => !v)}
-                  type="button"
+                  className={`${styles.genExecViewToggleBtn} ${execPanelView === 'browser' ? styles.genExecViewToggleActive : ''}`}
+                  onClick={() => setExecPanelView('browser')}
                 >
-                  {showOptional ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  {showOptional ? 'Hide' : 'Show'} optional settings (credentials, app name)
+                  <Monitor size={13} />
+                  Browser View
                 </button>
+                <button
+                  className={`${styles.genExecViewToggleBtn} ${execPanelView === 'excel' ? styles.genExecViewToggleActive : ''}`}
+                  onClick={() => setExecPanelView('excel')}
+                >
+                  <FileSpreadsheet size={13} />
+                  Excel View
+                  {confirmedExecResults.length > 0 && (
+                    <span className={styles.recExcelBadge}>{confirmedExecResults.length}</span>
+                  )}
+                </button>
+              </div>
 
-                <AnimatePresence>
-                  {showOptional && (
-                    <motion.div
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      exit={{ opacity: 0, height: 0 }}
-                      transition={{ duration: 0.2 }}
-                    >
-                      <div className={styles.field}>
-                        <label className={styles.label}>App Name</label>
-                        <input
-                          className={styles.input}
-                          type="text"
-                          placeholder="MyApp"
-                          value={appName}
-                          onChange={e => setAppName(e.target.value)}
-                          disabled={loading}
-                        />
+              {/* Browser screenshot view */}
+              {execPanelView === 'browser' && (
+                <>
+                  <div className={styles.browserPanelHeader}>
+                    <Camera size={13} />
+                    <span>Live Browser View</span>
+                    {execCurrentUrl && (
+                      <span className={styles.screenshotCurrentUrl} title={execCurrentUrl}>
+                        {execCurrentUrl}
+                      </span>
+                    )}
+                  </div>
+                  <div className={styles.browserPanelBody}>
+                    {execScreenshot ? (
+                      <img
+                        src={`data:image/png;base64,${execScreenshot}`}
+                        alt="Browser screenshot"
+                        className={styles.screenshotImg}
+                        style={{ width: '100%', height: '100%', objectFit: 'contain', objectPosition: 'top', display: 'block' }}
+                      />
+                    ) : (
+                      <div className={styles.screenshotPlaceholder}>
+                        <MonitorPlay size={48} style={{ color: '#cbd5e1' }} />
+                        <span>
+                          {chatPhase === 'analyzing'
+                            ? 'Analysing page…'
+                            : 'Execute a test case to see live browser'}
+                        </span>
                       </div>
-                      <div className={styles.grid2}>
-                        <div className={styles.field}>
-                          <label className={styles.label}>Test Email</label>
-                          <input
-                            className={styles.input}
-                            type="email"
-                            placeholder="test@example.com"
-                            value={testEmail}
-                            onChange={e => setTestEmail(e.target.value)}
-                            disabled={loading}
-                          />
+                    )}
+                    {chatPhase === 'executing' && (
+                      <div className={styles.screenshotExecutingOverlay}>
+                        <Loader2 size={28} className={styles.spin} style={{ color: '#6366f1' }} />
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {/* Excel view — confirmed execution results */}
+              {execPanelView === 'excel' && (
+                <div className={styles.genExcelView}>
+                  {confirmedExecResults.length === 0 ? (
+                    <div className={styles.genExcelEmpty}>
+                      <FileSpreadsheet size={36} style={{ color: '#cbd5e1' }} />
+                      <span>Run and confirm test cases to see results here</span>
+                    </div>
+                  ) : (
+                    <div className={styles.genExcelTable}>
+                      <div className={styles.recExcelCorner} />
+                      {['A','B','C','D','E','F','G'].map(l => (
+                        <div key={l} className={styles.recExcelLetterCell}>{l}</div>
+                      ))}
+                      <div className={`${styles.recExcelCell} ${styles.recExcelRowNumHeader}`}>Row</div>
+                      {['T.C.No','Test Case','Steps','Expected Result','Input Data','Status','Error'].map(h => (
+                        <div key={h} className={`${styles.recExcelCell} ${styles.recExcelHeaderCell}`}>{h}</div>
+                      ))}
+                      {confirmedExecResults.map((r, idx) => {
+                        const rowCls = r.status === 'passed' ? styles.recExcelRowPassed : styles.recExcelRowFailed;
+                        return (
+                          <React.Fragment key={r.id}>
+                            <div className={`${styles.recExcelCell} ${styles.recExcelRowNumCell} ${rowCls}`}>{idx + 1}</div>
+                            <div className={`${styles.recExcelCell} ${rowCls}`}>{idx + 1}</div>
+                            <div className={`${styles.recExcelCell} ${rowCls}`}>{r.name}</div>
+                            <div className={`${styles.recExcelCell} ${styles.recExcelStepsCell} ${rowCls}`}>
+                              {r.steps.map((s, i) => (
+                                <span key={s.step_number}>{s.step_number}. {s.instruction}{i < r.steps.length - 1 ? '\n' : ''}</span>
+                              ))}
+                            </div>
+                            <div className={`${styles.recExcelCell} ${rowCls}`}>{r.expected_results?.join('; ') || 'N/A'}</div>
+                            <div className={`${styles.recExcelCell} ${rowCls}`}>
+                              {Object.entries(r.test_data || {}).map(([k, v]) => `${k}: ${v}`).join(' | ')}
+                            </div>
+                            <div className={`${styles.recExcelCell} ${styles.recExcelStatusCell} ${rowCls}`}>
+                              {r.status === 'passed'
+                                ? <span className={styles.recExcelBadgePassed}>✓ PASSED</span>
+                                : <span className={styles.recExcelBadgeFailed}>✗ FAILED</span>}
+                            </div>
+                            <div className={`${styles.recExcelCell} ${styles.recExcelErrorCell} ${rowCls}`}>{r.error || ''}</div>
+                          </React.Fragment>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── LEFT / MAIN PANEL: chat ── */}
+          <div className={styles.genChatPanel}>
+          {/* Scrollable messages area */}
+          <div className={styles.chatMessages}>
+
+            {/* Static greeting bubble */}
+            <motion.div
+              className={styles.chatBotMessage}
+              style={{ marginBottom: 16 }}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <div className={styles.chatBotAvatar}><Sparkles size={14} /></div>
+              <div className={styles.chatBotContent}>
+                <div className={styles.genAssistantBubble}>
+                  Hi! I'm your AI test assistant. Share the URL of the page you'd like me to analyze, and I'll generate test cases based on the real elements found on that page.
+                </div>
+              </div>
+            </motion.div>
+
+            {/* Rendered conversation messages */}
+            {chatMessages.map(msg => (
+              <motion.div key={msg.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+                {msg.role === 'user' ? (
+                  <div className={styles.chatUserMessage} style={{ marginBottom: 16 }}>
+                    <div className={styles.chatUserBubble}>{msg.content}</div>
+                  </div>
+                ) : (
+                  <div className={styles.chatBotMessage} style={{ marginBottom: 16 }}>
+                    <div className={styles.chatBotAvatar}><Sparkles size={14} /></div>
+                    <div className={styles.chatBotContent}>
+                      {msg.content.startsWith('Error:') ? (
+                        <div className={styles.genErrorBubble}>
+                          <AlertCircle size={14} style={{ flexShrink: 0 }} />
+                          <span>{msg.content}</span>
                         </div>
-                        <div className={styles.field}>
-                          <label className={styles.label}>Test Password</label>
-                          <div style={{ position: 'relative' }}>
-                            <input
-                              className={styles.input}
-                              type={showPassword ? 'text' : 'password'}
-                              placeholder="password123"
-                              value={testPassword}
-                              onChange={e => setTestPassword(e.target.value)}
-                              disabled={loading}
-                              style={{ paddingRight: '40px' }}
-                            />
+                      ) : (
+                        <div className={styles.genAssistantBubble}>{msg.content}</div>
+                      )}
+                      {/* Execution result card with per-TC confirm buttons */}
+                      {msg.execSummary && (
+                        <div className={styles.genExecResultCard}>
+                          <div className={styles.genExecSummary}>
+                            <div className={`${styles.genExecStat} ${styles.genExecStatTotal}`}>
+                              <div className={styles.genExecStatValue}>{msg.execSummary.total}</div>
+                              <div className={styles.genExecStatLabel}>Total</div>
+                            </div>
+                            <div className={`${styles.genExecStat} ${styles.genExecStatPassed}`}>
+                              <div className={styles.genExecStatValue}>{msg.execSummary.passed}</div>
+                              <div className={styles.genExecStatLabel}>Passed</div>
+                            </div>
+                            <div className={`${styles.genExecStat} ${styles.genExecStatFailed}`}>
+                              <div className={styles.genExecStatValue}>{msg.execSummary.failed}</div>
+                              <div className={styles.genExecStatLabel}>Failed</div>
+                            </div>
+                          </div>
+                          {msg.execTestCases && msg.execTestCases.length > 0 && (
+                            <div className={styles.genExecTcList}>
+                              {msg.execTestCases.map(tc => (
+                                <div key={tc.id} className={`${styles.genExecTcRow} ${tc.status === 'passed' ? styles.genExecTcPassed : styles.genExecTcFailed}`}>
+                                  {tc.status === 'passed'
+                                    ? <CheckCircle2 size={13} style={{ color: '#16a34a', flexShrink: 0 }} />
+                                    : <XCircle size={13} style={{ color: '#dc2626', flexShrink: 0 }} />}
+                                  <span className={styles.genExecTcName}>{tc.name}</span>
+                                  {confirmedTcIds.has(tc.id)
+                                    ? <span className={styles.genExecTcConfirmed}><Check size={11} /> Confirmed</span>
+                                    : <button className={styles.genExecTcConfirmBtn} onClick={() => handleConfirmResult(tc)}>
+                                        <Check size={11} /> Confirm
+                                      </button>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Inline test suite preview */}
+                      {msg.testSuite && (
+                        <div style={{ maxWidth: '88%' }}>
+                          <div className={styles.genTestSuiteInChat}>
+                            {msg.testSuite.test_cases?.map(tc => (
+                              <div key={tc.id} className={styles.tcCard} style={{ borderRadius: 0, border: 'none', borderBottom: '1px solid #e2e8f0' }}>
+                                <div
+                                  className={styles.tcHeader}
+                                  onClick={() => setChatExpandedTc(chatExpandedTc === tc.id ? null : tc.id)}
+                                >
+                                  <span className={styles.tcBadge}>{tc.id}</span>
+                                  <span className={styles.tcName}>{tc.name}</span>
+                                  <span className={styles.tcMeta}>{tc.steps.length} steps</span>
+                                  <ChevronDown
+                                    size={14}
+                                    className={`${styles.tcChevron} ${chatExpandedTc === tc.id ? styles.open : ''}`}
+                                  />
+                                </div>
+                                <AnimatePresence>
+                                  {chatExpandedTc === tc.id && (
+                                    <motion.div
+                                      className={styles.tcSteps}
+                                      initial={{ opacity: 0, height: 0 }}
+                                      animate={{ opacity: 1, height: 'auto' }}
+                                      exit={{ opacity: 0, height: 0 }}
+                                      transition={{ duration: 0.2 }}
+                                    >
+                                      {tc.steps.map(step => (
+                                        <div key={step.step_number} className={styles.step}>
+                                          <div className={styles.stepNum}>{step.step_number}</div>
+                                          <div className={styles.stepContent}>
+                                            <p className={styles.stepInstruction}>{step.instruction}</p>
+                                            <div className={styles.stepMeta}>
+                                              <span className={styles.stepAction}>{step.action.type}</span>
+                                              {step.selector_hints?.suggested_selectors?.[0] && (
+                                                <span className={styles.stepSelector} title={step.selector_hints.suggested_selectors[0]}>
+                                                  {step.selector_hints.suggested_selectors[0]}
+                                                </span>
+                                              )}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </motion.div>
+                                  )}
+                                </AnimatePresence>
+                              </div>
+                            ))}
+                          </div>
+                          {/* Action buttons */}
+                          <div className={styles.genTestSuiteActions}>
+                            <button className={styles.btnSecondary} onClick={handleChatReset}>
+                              <RotateCcw size={14} /> New URL
+                            </button>
+                            <button className={styles.btnSecondary} onClick={() => handleExportExcel(msg.testSuite!)}>
+                              <FileSpreadsheet size={14} /> Export Excel
+                            </button>
+                            {projectName ? (
+                              <button className={styles.btnSecondary} onClick={async () => {
+                                try {
+                                  await saveTestToProject(projectName, msg.testSuite!);
+                                  setProjectActiveSuite(projectName, msg.testSuite! as unknown as TestSuite);
+                                  addNotification('success', `Saved to ${projectName}`);
+                                } catch (e) {
+                                  addNotification('error', e instanceof Error ? e.message : 'Save failed');
+                                }
+                              }}>
+                                <Save size={14} /> Save to History
+                              </button>
+                            ) : (
+                              <button className={styles.btnSecondary} onClick={() => { setSuiteToSave(msg.testSuite!); setShowSaveModal(true); }}>
+                                <Save size={14} /> Save to Project
+                              </button>
+                            )}
+                            <button className={styles.btnPrimary} onClick={() => handleChatUseInAgent(msg.testSuite!)}>
+                              <Play size={14} /> Use in Agent
+                            </button>
+                          </div>
+                          {/* Suggestion chips — populate text input on click */}
+                          <div className={styles.genSuggestionChips}>
+                            {msg.testSuite.test_cases?.map((tc, idx) => (
+                              <button
+                                key={tc.id}
+                                className={styles.genSuggestionChip}
+                                onClick={() => {
+                                  setChatTextInput(`Execute ${idx + 1}`);
+                                  setTimeout(() => chatInputRef.current?.focus(), 50);
+                                }}
+                              >
+                                <Play size={11} /> Execute {idx + 1}
+                              </button>
+                            ))}
                             <button
-                              type="button"
-                              onClick={() => setShowPassword(v => !v)}
-                              style={{
-                                position: 'absolute', right: 10, top: '50%',
-                                transform: 'translateY(-50%)', background: 'none',
-                                border: 'none', cursor: 'pointer', color: '#94a3b8', padding: 0,
+                              className={styles.genSuggestionChip}
+                              onClick={() => {
+                                setChatTextInput('Execute all');
+                                setTimeout(() => chatInputRef.current?.focus(), 50);
                               }}
                             >
-                              {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                              <Play size={11} /> Execute All
+                            </button>
+                            <button
+                              className={`${styles.genSuggestionChip} ${styles.genSuggestionChipExcel}`}
+                              onClick={() => handleExportExcel(msg.testSuite!)}
+                            >
+                              <FileSpreadsheet size={11} /> Export Excel
                             </button>
                           </div>
                         </div>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </motion.div>
+            ))}
 
-                <div className={styles.actions}>
-                  <button
-                    className={styles.btnPrimary}
-                    onClick={handleGenerate}
-                    disabled={!canGenerate}
-                  >
-                    <Sparkles size={16} />
-                    Generate Test Cases
-                  </button>
+            {/* Typing indicator while analyzing or generating */}
+            {(chatPhase === 'analyzing' || chatPhase === 'generating') && (
+              <motion.div
+                className={styles.chatBotMessage}
+                style={{ marginBottom: 16 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
+                <div className={styles.chatBotAvatar}><Sparkles size={14} /></div>
+                <div className={styles.chatBotContent}>
+                  <div className={styles.genTypingIndicator}>
+                    <div className={styles.genTypingDot} />
+                    <div className={styles.genTypingDot} />
+                    <div className={styles.genTypingDot} />
+                  </div>
                 </div>
               </motion.div>
             )}
 
-            {/* Loading */}
-            <AnimatePresence>
-              {loading && (
-                <motion.div
-                  className={styles.loadingCard}
-                  initial={{ opacity: 0, y: 12 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                >
-                  <div className={styles.spinner} />
-                  <p className={styles.loadingTitle}>AI is generating your test cases…</p>
-                  <p className={styles.loadingStep}>This takes about 15–30 seconds</p>
-                  <div className={styles.loadingSteps}>
-                    <div className={styles.loadingStepItem}>
-                      <div className={`${styles.loadingStepDot} ${loadingStep >= 1 ? (loadingStep > 1 ? styles.done : styles.active) : ''}`} />
-                      <span>Crawling page with Playwright to extract real selectors</span>
-                    </div>
-                    <div className={styles.loadingStepItem}>
-                      <div className={`${styles.loadingStepDot} ${loadingStep >= 2 ? styles.active : ''}`} />
-                      <span>AI generating test cases from page structure + your intent</span>
-                    </div>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Error */}
-            <AnimatePresence>
-              {error && !loading && (
-                <motion.div
-                  className={styles.errorCard}
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                >
-                  <AlertCircle size={18} className={styles.errorIcon} />
-                  <div>
-                    <p className={styles.errorTitle}>Generation Failed</p>
-                    <p className={styles.errorMessage}>{error}</p>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Results */}
-            <AnimatePresence>
-              {result && !loading && (
-                <motion.div
-                  initial={{ opacity: 0, y: 16 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                >
-                  {result.page_summary && (
-                    <div className={styles.pageSummary}>
-                      {Object.entries(result.page_summary)
-                        .filter(([k]) => !k.startsWith('total') && !k.startsWith('with'))
-                        .map(([k, v]) => (
-                          <div key={k} className={styles.summaryItem}>
-                            <span className={styles.summaryValue}>{v}</span>
-                            <span className={styles.summaryLabel}>{k}</span>
-                          </div>
-                        ))}
-                      <div className={styles.summaryItem}>
-                        <span className={styles.summaryValue}>{result.test_suite?.test_cases?.length ?? 0}</span>
-                        <span className={styles.summaryLabel}>test cases</span>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className={styles.resultsHeader}>
-                    <h2 className={styles.resultsTitle}>
-                      <Check size={18} style={{ color: '#22c55e' }} />
-                      Generated Test Suite
-                      <span className={`${styles.badge} ${styles.badgePurple}`}>
-                        {result.llm_provider} / {result.model}
-                      </span>
-                    </h2>
-                    <div className={styles.resultsActions}>
-                      <button className={styles.btnSecondary} onClick={handleReset}>
-                        <RotateCcw size={14} />
-                        Regenerate
-                      </button>
-                      <button className={styles.btnSecondary} onClick={() => handleExportExcel(result.test_suite)}>
-                        <FileSpreadsheet size={14} />
-                        Export Excel
-                      </button>
-                      {projectName ? (
-                        <button className={styles.btnSecondary} onClick={async () => {
-                          try {
-                            await saveTestToProject(projectName, result.test_suite);
-                            setProjectActiveSuite(projectName, result.test_suite as unknown as TestSuite);
-                            addNotification('success', `Saved to ${projectName}`);
-                          } catch (e) {
-                            addNotification('error', e instanceof Error ? e.message : 'Save failed');
-                          }
-                        }}>
-                          <Save size={14} />
-                          Save to History
-                        </button>
-                      ) : (
-                        <button className={styles.btnSecondary} onClick={() => { setSuiteToSave(result.test_suite); setShowSaveModal(true); }}>
-                          <Save size={14} />
-                          Save to Project
-                        </button>
-                      )}
-                      <button className={styles.btnPrimary} onClick={handleUseInAgent}>
-                        <Play size={14} />
-                        Use in Agent
-                      </button>
-                    </div>
-                  </div>
-
-                  {result.test_suite?.test_cases?.map(tc => (
-                    <div key={tc.id} className={styles.tcCard}>
-                      <div
-                        className={styles.tcHeader}
-                        onClick={() => setExpandedTc(expandedTc === tc.id ? null : tc.id)}
-                      >
-                        <span className={styles.tcBadge}>{tc.id}</span>
-                        <span className={styles.tcName}>{tc.name}</span>
-                        <span className={styles.tcMeta}>{tc.steps.length} steps</span>
-                        <ChevronDown
-                          size={16}
-                          className={`${styles.tcChevron} ${expandedTc === tc.id ? styles.open : ''}`}
-                        />
-                      </div>
-                      <AnimatePresence>
-                        {expandedTc === tc.id && (
-                          <motion.div
-                            className={styles.tcSteps}
-                            initial={{ opacity: 0, height: 0 }}
-                            animate={{ opacity: 1, height: 'auto' }}
-                            exit={{ opacity: 0, height: 0 }}
-                            transition={{ duration: 0.2 }}
-                          >
-                            {tc.steps.map(step => (
-                              <div key={step.step_number} className={styles.step}>
-                                <div className={styles.stepNum}>{step.step_number}</div>
-                                <div className={styles.stepContent}>
-                                  <p className={styles.stepInstruction}>{step.instruction}</p>
-                                  <div className={styles.stepMeta}>
-                                    <span className={styles.stepAction}>{step.action.type}</span>
-                                    {step.selector_hints?.suggested_selectors?.[0] && (
-                                      <span className={styles.stepSelector} title={step.selector_hints.suggested_selectors[0]}>
-                                        {step.selector_hints.suggested_selectors[0]}
-                                      </span>
-                                    )}
-                                    {step.assertions?.[0] && (
-                                      <span style={{ color: '#16a34a', fontSize: '0.6875rem' }}>
-                                        ✓ assert {step.assertions[0].type}: {step.assertions[0].expected_value}
-                                      </span>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            ))}
-                            {tc.expected_results?.length > 0 && (
-                              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #e2e8f0' }}>
-                                <p style={{ fontSize: '0.75rem', color: '#64748b', margin: '0 0 4px', fontWeight: 600 }}>
-                                  Expected Result
-                                </p>
-                                {tc.expected_results.map((r, i) => (
-                                  <p key={i} style={{ fontSize: '0.8125rem', color: '#475569', margin: 0 }}>{r}</p>
-                                ))}
-                              </div>
-                            )}
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  ))}
-                </motion.div>
-              )}
-            </AnimatePresence>
+            <div ref={chatMessagesEndRef} />
           </div>
+
+          {/* ── Unified bottom input bar — all phases ── */}
+          <div className={styles.chatInputBar}>
+            <div className={styles.chatInputInner}>
+              {/* Action buttons row (New Chat + Save to Project) */}
+              {chatSessionId && (
+                <div className={styles.chatInputActions}>
+                  <button
+                    className={styles.chatActionBtn}
+                    onClick={handleChatReset}
+                    title="New Chat"
+                  >
+                    <RotateCcw size={14} />
+                    <span>New Chat</span>
+                  </button>
+                  {lastTestSuite && (
+                    <button
+                      className={styles.chatActionBtn}
+                      onClick={() => { setSuiteToSave(lastTestSuite); setShowSaveModal(true); }}
+                      title="Save to Project"
+                    >
+                      <Save size={14} />
+                      <span>Save to Project</span>
+                    </button>
+                  )}
+                </div>
+              )}
+              <div className={styles.chatInputBox}>
+                <textarea
+                  ref={chatInputRef}
+                  className={styles.chatTextarea}
+                  rows={1}
+                  placeholder={
+                    chatPhase === 'url_input'
+                      ? 'Enter a URL to analyze (e.g. https://myapp.com/login)…'
+                      : chatPhase === 'analyzing'
+                      ? 'Analyzing page…'
+                      : chatPhase === 'executing'
+                      ? 'Waiting for execution to finish…'
+                      : 'Ask a question, share credentials, or type "Execute all"…'
+                  }
+                  value={chatTextInput}
+                  onChange={e => {
+                    setChatTextInput(e.target.value);
+                    autoResizeTextarea(e.target);
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      const isDisabled = chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing';
+                      if (chatTextInput.trim() && !isDisabled) handleChatSend();
+                    }
+                  }}
+                  disabled={chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing'}
+                  autoFocus={chatPhase === 'url_input'}
+                />
+                <button
+                  className={styles.chatSendBtn}
+                  onClick={handleChatSend}
+                  disabled={chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing' || !chatTextInput.trim()}
+                  title="Send (Enter)"
+                >
+                  {(chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing')
+                    ? <Loader2 size={16} className={styles.spin} />
+                    : <Send size={16} />
+                  }
+                </button>
+              </div>
+              <div className={styles.chatInputHint}>
+                {chatPhase === 'url_input' && <span>Paste a URL and press Enter to analyze</span>}
+                {chatPhase === 'analyzing' && <span style={{ color: '#6366f1' }}>Scraping page elements…</span>}
+                {chatPhase === 'executing' && <span style={{ color: '#f59e0b', fontWeight: 600 }}>Executing tests…</span>}
+                {(chatPhase === 'chatting' || chatPhase === 'generating' || chatPhase === 'done') && (
+                  <span>Enter to send · Shift+Enter for newline · share credentials to use in tests</span>
+                )}
+              </div>
+            </div>
+          </div>
+          </div>{/* end genChatPanel */}
         </div>
       )}
+
 
       {/* ══════════════════════════════════════════════════════════════════ */}
       {/* RECORD MODE — ChatGPT style                                        */}
@@ -1938,18 +2566,17 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                         handleStartRecording();
                       }
                     }}
-                    disabled={recStatus === 'starting'}
+                    disabled={recStatus === 'error'}
                   />
                   <button
                     className={styles.chatSendBtn}
                     onClick={handleStartRecording}
-                    disabled={recStatus === 'starting' || !canStartRecording}
+                    disabled={!canStartRecording}
                     title="Open browser & start recording"
                   >
-                    {recStatus === 'starting'
-                      ? <Loader2 size={16} className={styles.spin} />
-                      : <MonitorPlay size={16} />
-                    }
+                    <MonitorPlay size={16} />
+
+                    
                   </button>
                 </div>
                 <div className={styles.chatInputHint}>

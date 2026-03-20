@@ -18,6 +18,292 @@ logger = logging.getLogger(__name__)
 # Prompt
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Compact page summary (token-friendly, used for LLM intro/confirm context)
+# ---------------------------------------------------------------------------
+
+def compact_page_elements(page_structure: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Reduce full DOM extraction to a comprehensive but token-friendly dict.
+
+    Captures all element types present on any kind of website:
+    - Inputs (text, email, password, search, checkbox, radio, date, file, number, tel, textarea, select)
+    - Buttons (native + role=button/menuitem/tab custom components)
+    - Headings (h1-h6 with tag level)
+    - Links (navigation + action links, deduplicated)
+    - Forms (structure context)
+    - Elements with data-testid (high-value for reliable selectors)
+
+    Strips raw selector variants (byId, byClass, xpath, etc.) to stay token-friendly.
+    """
+    def _clean(val: Any) -> Optional[str]:
+        if not val:
+            return None
+        s = str(val).strip()
+        return s or None
+
+    def _pick_input(el: Dict) -> Dict:
+        d: Dict[str, Any] = {}
+        t = _clean(el.get("type"))
+        if t and t != "hidden":
+            d["type"] = t
+        for field, key in [("placeholder", "placeholder"), ("name", "name"),
+                            ("label", "ariaLabel"), ("id", "id"), ("testId", "dataTestId"),
+                            ("role", "role")]:
+            v = _clean(el.get(key))
+            if v:
+                d[field] = v[:80]
+        return d
+
+    def _pick_button(el: Dict) -> Dict:
+        d: Dict[str, Any] = {}
+        text = _clean(el.get("text"))
+        if text and len(text) <= 80:
+            d["text"] = text
+        for field, key in [("label", "ariaLabel"), ("id", "id"),
+                            ("testId", "dataTestId"), ("type", "type"), ("role", "role")]:
+            v = _clean(el.get(key))
+            if v:
+                d[field] = v[:80]
+        return d
+
+    raw_inputs       = page_structure.get("inputs", [])
+    raw_buttons      = page_structure.get("buttons", [])
+    raw_headings     = page_structure.get("headings", [])
+    raw_links        = page_structure.get("links", [])
+    raw_forms        = page_structure.get("forms", [])
+    raw_interactive  = page_structure.get("interactive", [])
+    raw_aria_widgets = page_structure.get("aria_widgets", [])
+    raw_testid       = page_structure.get("elements_with_testid", [])
+
+    # ── Inputs: all types, no hidden, deduplicated ────────────────────────
+    inputs: List[Dict] = []
+    seen_inputs: set = set()
+    for el in raw_inputs:
+        if el.get("type") == "hidden":
+            continue
+        d = _pick_input(el)
+        if not d:
+            continue
+        key = (el.get("type"), el.get("placeholder"), el.get("name"), el.get("ariaLabel"))
+        if key in seen_inputs:
+            continue
+        seen_inputs.add(key)
+        inputs.append(d)
+        if len(inputs) >= 30:
+            break
+
+    # Also capture <select> and <textarea> from interactive (they're not in raw_inputs)
+    for el in raw_interactive:
+        tag = el.get("tag", "")
+        if tag in ("select", "textarea"):
+            if el.get("type") == "hidden":
+                continue
+            d = _pick_input(el)
+            if d:
+                d["tag"] = tag
+                inputs.append(d)
+
+    # ── Buttons: native + role-based custom components ────────────────────
+    buttons: List[Dict] = []
+    seen_buttons: set = set()
+
+    for el in raw_buttons:
+        d = _pick_button(el)
+        label = d.get("text") or d.get("label")
+        if not label:
+            continue
+        if label in seen_buttons:
+            continue
+        seen_buttons.add(label)
+        buttons.append(d)
+        if len(buttons) >= 25:
+            break
+
+    # Capture divs/spans acting as buttons (role=button/menuitem/tab/option)
+    for el in raw_interactive:
+        if el.get("role") in ("button", "menuitem", "tab", "option", "link") \
+                and el.get("tag") not in ("button", "input", "a"):
+            d = _pick_button(el)
+            label = d.get("text") or d.get("label")
+            if label and label not in seen_buttons:
+                seen_buttons.add(label)
+                buttons.append(d)
+                if len(buttons) >= 25:
+                    break
+
+    # ── Headings: include tag level (h1 vs h2 vs h3) ─────────────────────
+    headings: List[Dict] = []
+    for el in raw_headings:
+        text = _clean(el.get("text"))
+        if text and len(text) > 1:
+            entry: Dict[str, Any] = {"tag": el.get("tag", "h?"), "text": text[:120]}
+            if el.get("id"):
+                entry["id"] = el["id"]
+            headings.append(entry)
+        if len(headings) >= 12:
+            break
+
+    # ── Links: navigation + actions, deduplicated, skip javascript: ───────
+    links: List[Dict] = []
+    seen_links: set = set()
+    for el in raw_links:
+        text = _clean(el.get("text"))
+        href = _clean(el.get("href"))
+        if not text or len(text) < 2:
+            continue
+        if text in seen_links:
+            continue
+        seen_links.add(text)
+        entry = {"text": text[:80]}
+        if href and not href.startswith("javascript:"):
+            entry["href"] = href[:120]
+        if el.get("ariaLabel"):
+            entry["label"] = el["ariaLabel"][:60]
+        links.append(entry)
+        if len(links) >= 25:
+            break
+
+    # ── Forms: structure context (id/name useful for multi-form pages) ────
+    forms: List[Dict] = []
+    for el in raw_forms:
+        entry = {}
+        for f in ("id", "name", "role"):
+            v = _clean(el.get(f))
+            if v:
+                entry[f] = v
+        if entry:
+            forms.append(entry)
+        if len(forms) >= 6:
+            break
+
+    # ── data-testid elements: high-value anchors for reliable selectors ───
+    testid_elements: List[Dict] = []
+    seen_testids: set = set()
+    for el in raw_testid:
+        tid = _clean(el.get("dataTestId"))
+        if not tid or tid in seen_testids:
+            continue
+        seen_testids.add(tid)
+        entry = {"testId": tid, "tag": el.get("tag", "")}
+        text = _clean(el.get("text"))
+        if text and len(text) <= 80:
+            entry["text"] = text
+        if el.get("role"):
+            entry["role"] = el["role"]
+        testid_elements.append(entry)
+        if len(testid_elements) >= 20:
+            break
+
+    # ── ARIA widgets: switch, checkbox, combobox, tab, slider, etc. ──────
+    # These are custom interactive elements (divs/spans) with ARIA roles.
+    # They are never captured in inputs/buttons and are easily missed.
+    aria_widgets: List[Dict] = []
+    seen_widgets: set = set()
+    for el in raw_aria_widgets:
+        role = _clean(el.get("role"))
+        if not role:
+            continue
+        entry: Dict[str, Any] = {"role": role}
+        text = _clean(el.get("text"))
+        if text and len(text) <= 80:
+            entry["text"] = text
+        for field, key in [("label", "ariaLabel"), ("id", "id"), ("testId", "dataTestId")]:
+            v = _clean(el.get(key))
+            if v:
+                entry[field] = v[:80]
+        # Preserve ARIA state (e.g. aria-checked="false" for a switch)
+        for state_key in ("ariaChecked", "ariaExpanded", "ariaSelected"):
+            val = el.get(state_key)
+            if val is not None:
+                entry[state_key] = val
+        dedup_key = (role, entry.get("text"), entry.get("label"), entry.get("id"))
+        if dedup_key in seen_widgets:
+            continue
+        seen_widgets.add(dedup_key)
+        aria_widgets.append(entry)
+        if len(aria_widgets) >= 20:
+            break
+
+    # ── Assemble result ───────────────────────────────────────────────────
+    result: Dict[str, Any] = {
+        "title":   page_structure.get("title", ""),
+        "url":     page_structure.get("url", ""),
+        "inputs":  inputs,
+        "buttons": buttons,
+        "headings": headings,
+        "links":   links,
+    }
+    if forms:
+        result["forms"] = forms
+    if aria_widgets:
+        result["aria_widgets"] = aria_widgets
+    if testid_elements:
+        result["testid_elements"] = testid_elements
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Intro / confirm prompts
+# ---------------------------------------------------------------------------
+
+INFORMATIONAL_PROMPT = """You are an AI test assistant embedded in a test case generation tool.
+
+The user has asked an INFORMATIONAL question about the web page or testing — they are NOT asking you to generate test cases.
+
+PAGE SUMMARY (JSON):
+{compact_json}
+
+USER QUESTION:
+{question}
+
+Answer the question directly and helpfully in 2-4 sentences. If relevant, reference specific elements visible on the page.
+Do NOT generate test cases. Do NOT output JSON.
+Return ONLY the plain text answer."""
+
+
+EDIT_PROMPT = """You are an AI test assistant. The user wants to make a specific edit to an existing test suite.
+
+CURRENT TEST SUITE (JSON):
+{suite_json}
+
+USER EDIT INSTRUCTION:
+{instruction}
+
+Rules:
+- Apply ONLY the change requested. Do not add, remove, or regenerate test cases unless explicitly asked.
+- Return the COMPLETE updated test suite as valid JSON in the exact same schema.
+- If the instruction is ambiguous, make the most reasonable interpretation.
+- Do NOT include any explanation text outside the JSON.
+
+Return ONLY the updated JSON starting with {{ and ending with }}."""
+
+
+PAGE_INTRO_PROMPT = """You are an AI test assistant. A web page has been scraped and its key elements are summarised below.
+
+PAGE SUMMARY (JSON):
+{compact_json}
+
+Write 2-3 sentences in plain, friendly English:
+1. Describe what this page is and what the user can do on it.
+2. Mention ALL key interactive elements you found: inputs, buttons, links, and any ARIA widgets such as toggles (role=switch), checkboxes, tabs, dropdowns (role=combobox), or sliders — include their labels if available (e.g. "Remember me toggle", "Dark mode switch").
+3. End by asking the user what they would like to test.
+
+Tone: concise, conversational, helpful.
+Return ONLY the message text. No JSON. No markdown headings. No preamble."""
+
+PAGE_CONFIRM_PROMPT = """You are an AI test assistant. You just generated the following test suite.
+
+TEST SUITE SUMMARY:
+- Total test cases: {tc_count}
+- Test case names: {tc_names}
+
+Write 1 short sentence (max 20 words) confirming what you created.
+Example: "I've created 3 test cases covering valid login, invalid credentials, and forgot password."
+Return ONLY the sentence. No JSON. No extra text."""
+
+
 GENERATOR_PROMPT = """You are an expert Playwright test case generator.
 
 You will receive:
@@ -276,6 +562,69 @@ class TestCaseGeneratorAgent(BaseAgent):
     def execute(self, *args, **kwargs) -> Any:
         """Required by BaseAgent ABC — delegates to generate()."""
         return self.generate(*args, **kwargs)
+
+    def generate_intro(self, compact: Dict[str, Any]) -> str:
+        """
+        Call LLM with the compact page summary and return a greeting message
+        that describes the page and asks the user what to test.
+        """
+        import json as _json
+        prompt = PAGE_INTRO_PROMPT.format(compact_json=_json.dumps(compact, indent=2))
+        try:
+            return self.call_llm(prompt).strip()
+        except Exception as e:
+            logger.warning(f"[generate_intro] LLM call failed: {e}")
+            title = compact.get("title") or compact.get("url") or "this page"
+            return (
+                f"I've analysed {title}. "
+                f"What would you like to test?"
+            )
+
+    def answer_question(self, compact: Dict[str, Any], question: str) -> str:
+        """
+        Answer an informational question about the page without generating test cases.
+        """
+        import json as _json
+        prompt = INFORMATIONAL_PROMPT.format(
+            compact_json=_json.dumps(compact, indent=2),
+            question=question,
+        )
+        try:
+            return self.call_llm(prompt).strip()
+        except Exception as e:
+            logger.warning(f"[answer_question] LLM call failed: {e}")
+            return "I can see the page has been analysed. Could you clarify what you'd like to know?"
+
+    def generate_edit(self, test_suite: Dict[str, Any], instruction: str) -> Dict[str, Any]:
+        """
+        Apply a surgical edit to an existing test suite based on user instruction.
+        Returns the updated test suite dict.
+        """
+        import json as _json
+        prompt = EDIT_PROMPT.format(
+            suite_json=_json.dumps(test_suite, indent=2),
+            instruction=instruction,
+        )
+        try:
+            raw = self.call_llm(prompt)
+            return self._parse_json_response(raw)
+        except Exception as e:
+            logger.error(f"[generate_edit] Failed: {e}")
+            raise
+
+    def generate_confirm(self, test_suite: Dict[str, Any], compact: Dict[str, Any]) -> str:
+        """
+        Call LLM to produce a short confirmation message after test cases are generated.
+        """
+        test_cases = test_suite.get("test_cases", [])
+        tc_count = len(test_cases)
+        tc_names = ", ".join(tc.get("name", tc.get("id", "")) for tc in test_cases[:5])
+        prompt = PAGE_CONFIRM_PROMPT.format(tc_count=tc_count, tc_names=tc_names)
+        try:
+            return self.call_llm(prompt).strip()
+        except Exception as e:
+            logger.warning(f"[generate_confirm] LLM call failed: {e}")
+            return f"I've created {tc_count} test case(s) for you."
 
     def generate(
         self,

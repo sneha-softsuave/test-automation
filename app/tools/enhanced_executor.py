@@ -264,6 +264,7 @@ def _run_in_process(test_suite: Dict, headless: bool, timeout: int, result_queue
             "results": results,
             "executed_at": datetime.now().isoformat(),
             "final_storage_state": shared_storage_state,
+            "final_url": results[-1].get("final_url", test_suite.get("base_url", "")) if results else test_suite.get("base_url", ""),
         }
 
         # Send execution completed update
@@ -428,6 +429,8 @@ def _execute_single_test_sync(
         # Used to pass information between consecutive steps (e.g. last fill value
         # used by a subsequent assert_all_rows step).
         run_context: Dict = {}
+        # Track current URL for navigation detection
+        _current_url = [page.url]
         for step in steps:
             step_num = step.get("step_number", 0)
             instruction = step.get("instruction", "")
@@ -730,6 +733,39 @@ def _execute_single_test_sync(
                 # This is the key change - we don't break anymore
 
             result["steps"].append(step_result)
+
+            # Detect page navigation after each step
+            try:
+                new_url = page.url
+                if new_url and new_url != _current_url[0] and not new_url.startswith("about:"):
+                    _current_url[0] = new_url
+                    import base64 as _b64
+                    try:
+                        btns = page.locator("button:visible").count()
+                        inp = page.locator("input:visible, textarea:visible, select:visible").count()
+                        links = page.locator("a:visible").count()
+                        title = ""
+                        try:
+                            title = page.title()
+                        except Exception:
+                            pass
+                        elements_summary = (
+                            f"Browser navigated to: {new_url}\n\n"
+                            f"Page title: {title or 'N/A'}\n"
+                            f"Available elements: {btns} button(s), {inp} form field(s), {links} link(s)."
+                        )
+                        nav_screenshot = page.screenshot(type="png")
+                        nav_screenshot_b64 = _b64.b64encode(nav_screenshot).decode("utf-8")
+                    except Exception:
+                        elements_summary = f"Browser navigated to: {new_url}"
+                        nav_screenshot_b64 = ""
+                    step_update("page_navigated", {
+                        "url": new_url,
+                        "elements_summary": elements_summary,
+                        "image": nav_screenshot_b64,
+                    })
+            except Exception:
+                pass  # Never block execution for navigation detection
             # Loop continues to next step naturally
 
     except Exception as e:
@@ -737,6 +773,10 @@ def _execute_single_test_sync(
         result["error"] = str(e) if str(e) else "Unknown test error"
 
     finally:
+        try:
+            result["final_url"] = page.url
+        except Exception:
+            pass
         try:
             result["final_storage_state"] = context.storage_state()
         except Exception:
@@ -1234,6 +1274,27 @@ def _find_selector_dynamically_sync(page, selector_hints: Dict, test_data: Dict 
                             return f'locator::#{link["id"]}'
                         return f'get_by_role::link::{link_text.title()}'
 
+            # Last resort for login/submit-style actions: try type=submit button
+            _login_keywords = {"login", "signin", "submit", "log in", "sign in"}
+            _is_login_action = (
+                (element_name and element_name.lower().replace(" ", "") in {k.replace(" ", "") for k in _login_keywords})
+                or (instruction and any(kw in instruction.lower() for kw in _login_keywords))
+            )
+            if _is_login_action:
+                try:
+                    submit_btn = page.locator('button[type="submit"]')
+                    if submit_btn.count() > 0 and submit_btn.first.is_visible():
+                        print(f"        Fell back to button[type='submit'] for login/submit action")
+                        return 'locator::button[type="submit"]'
+                except Exception:
+                    pass
+                try:
+                    submit_inp = page.locator('input[type="submit"]')
+                    if submit_inp.count() > 0 and submit_inp.first.is_visible():
+                        return 'locator::input[type="submit"]'
+                except Exception:
+                    pass
+
         # For heading assertions
         if element_type == "heading":
             if element_name:
@@ -1324,13 +1385,49 @@ def _infer_selectors_from_test_data(test_data: Dict) -> List[str]:
 
 
 def _convert_selector_to_python(selector: str) -> Optional[str]:
-    """Convert Playwright JS selector syntax to Python-compatible format."""
+    """Convert Playwright JS/Python selector syntax to our internal format.
+
+    Handles both JS camelCase (getByRole) and Python snake_case (get_by_role)
+    API styles that LLMs may generate.
+    """
     if not selector:
         return None
 
+    # Already in our internal format — return as-is
     if "::" in selector and any(selector.startswith(p) for p in ["get_by_", "locator::"]):
         return selector
 
+    # ── Python snake_case API calls (page.get_by_role / page.get_by_label …) ─
+    # get_by_role('button', name='Login') or get_by_role('button', name='Login', exact=False)
+    if "get_by_role(" in selector:
+        m = re.search(r"get_by_role\(\s*['\"](\w+)['\"](?:\s*,\s*name\s*=\s*['\"]([^'\"]+)['\"])?\s*(?:,\s*[^)]+)?\s*\)", selector)
+        if m:
+            role = m.group(1)
+            name = m.group(2)
+            return f'get_by_role::{role}::{name}' if name else f'get_by_role::{role}'
+
+    # get_by_label('Email') or page.get_by_label("Email")
+    if "get_by_label(" in selector:
+        m = re.search(r"get_by_label\(\s*'([^']+)'\s*\)", selector) or \
+            re.search(r'get_by_label\(\s*"([^"]+)"\s*\)', selector)
+        if m:
+            return f'get_by_label::{m.group(1)}'
+
+    # get_by_placeholder('Enter email') or page.get_by_placeholder("Enter email")
+    if "get_by_placeholder(" in selector:
+        m = re.search(r"get_by_placeholder\(\s*'([^']+)'\s*\)", selector) or \
+            re.search(r'get_by_placeholder\(\s*"([^"]+)"\s*\)', selector)
+        if m:
+            return f'get_by_placeholder::{m.group(1)}'
+
+    # get_by_text('Login') or page.get_by_text("Login")
+    if "get_by_text(" in selector:
+        m = re.search(r"get_by_text\(\s*'([^']+)'\s*\)", selector) or \
+            re.search(r'get_by_text\(\s*"([^"]+)"\s*\)', selector)
+        if m:
+            return f'get_by_text::{m.group(1)}'
+
+    # ── JS camelCase API calls (getByRole / getByLabel …) ────────────────────
     if "getByLabel" in selector:
         match = re.search(r"getByLabel\(['\"]([^'\"]+)['\"]\)", selector)
         if match:
@@ -1354,11 +1451,19 @@ def _convert_selector_to_python(selector: str) -> Optional[str]:
         if match:
             return f'get_by_text::{match.group(1)}'
 
-    if "page.locator" in selector:
-        match = re.search(r"page\.locator\(['\"]([^'\"]+)['\"]\)", selector)
-        if match:
-            return f'locator::{match.group(1)}'
+    # ── page.locator('css') — use separate single/double quote passes so that
+    # attribute selectors like button[type="submit"] are parsed correctly.
+    # The old [^'\"]+ approach stopped at the first inner quote character.
+    if "locator(" in selector:
+        # Single-quoted argument: page.locator('button[type="submit"]')
+        m = re.search(r"\.locator\(\s*'([^']*)'\s*\)", selector)
+        if not m:
+            # Double-quoted argument: page.locator("button[type='submit']")
+            m = re.search(r'\.locator\(\s*"([^"]*)"\s*\)', selector)
+        if m:
+            return f'locator::{m.group(1)}'
 
+    # ── Raw CSS / XPath shortcuts ─────────────────────────────────────────────
     if selector.startswith("#") or selector.startswith(".") or selector.startswith("[") or selector.startswith("//"):
         return f'locator::{selector}'
 
@@ -1440,11 +1545,24 @@ def _generate_fallback_selectors(element_name: str, element_type: str) -> List[s
             'locator::textarea',
         ])
     elif element_type == "button":
+        # Common text variants for this button name
+        name_title = element_name.title()
+        name_upper = element_name.upper()
         selectors.extend([
             f'get_by_role::button::{element_name}',
+            f'get_by_role::button::{name_title}',
             f'get_by_text::{element_name}',
             f'locator::button:has-text("{element_name}")',
         ])
+        # For login/submit-style buttons also try type=submit
+        _login_kw = {"login", "log in", "signin", "sign in", "submit", "continue", "next", "proceed"}
+        if name_lower in _login_kw or any(kw in name_lower for kw in _login_kw):
+            selectors.extend([
+                'locator::button[type="submit"]',
+                'locator::input[type="submit"]',
+                f'locator::button:has-text("{name_title}")',
+                f'locator::button:has-text("{name_upper}")',
+            ])
     elif element_type == "heading":
         selectors.extend([
             f'get_by_role::heading::{element_name}',
@@ -2324,6 +2442,24 @@ def _execute_action_sync(
 
     elif action_type == "click":
         selector = _get_best_selector_sync(page, selector_hints, step_test_data, action_type="click", instruction=instruction)
+
+        # Fast-path for login/submit buttons: if selector still not found, try
+        # button[type="submit"] before running through all text-variation fallbacks.
+        if not selector:
+            _el_name_lc = (selector_hints.get("element_name") or "").lower().replace(" ", "")
+            _instr_lc = (instruction or "").lower()
+            _is_submit = _el_name_lc in {"login", "signin", "submit", "logon"} or \
+                         any(kw in _instr_lc for kw in ("log in", "login", "sign in", "submit", "click login", "click submit"))
+            if _is_submit:
+                for _submit_sel in ('button[type="submit"]', 'input[type="submit"]'):
+                    try:
+                        _sub_loc = page.locator(_submit_sel)
+                        if _sub_loc.count() > 0 and _sub_loc.first.is_visible():
+                            selector = f'locator::{_submit_sel}'
+                            print(f"    [submit-fast-path] Found via {_submit_sel}")
+                            break
+                    except Exception:
+                        pass
 
         # If no selector found and hints are empty, try to extract from instruction
         if not selector and not selector_hints.get("element_name"):
@@ -4270,18 +4406,21 @@ async def execute_enhanced(test_suite: Dict, headless: bool = False, timeout: in
     max_wait = total_steps * 60 + 300
     print(f"Process timeout: {max_wait} seconds for {total_steps} steps")
 
-    # Poll every second so we can react to stop_event immediately
+    # Poll every second using asyncio.sleep so the event loop stays free to
+    # forward screenshots from update_queue while the subprocess is running.
     elapsed = 0
     poll_interval = 1  # seconds
     stopped_by_user = False
-    while process.is_alive() and elapsed < max_wait:
+    while elapsed < max_wait:
+        if not process.is_alive():
+            break
         if stop_event and stop_event.is_set():
             print(f"[execute_enhanced] Stop event received — terminating Playwright process")
             process.terminate()
-            process.join(timeout=5)
+            await asyncio.to_thread(process.join, 5)
             stopped_by_user = True
             break
-        process.join(timeout=poll_interval)
+        await asyncio.sleep(poll_interval)   # yields to event loop — screenshots can flow
         elapsed += poll_interval
 
     if stopped_by_user:
@@ -4298,7 +4437,7 @@ async def execute_enhanced(test_suite: Dict, headless: bool = False, timeout: in
 
     if process.is_alive():
         process.terminate()
-        process.join()
+        await asyncio.to_thread(process.join)
         return {
             "project": test_suite.get("project", "Unknown"),
             "base_url": test_suite.get("base_url", ""),
