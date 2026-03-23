@@ -624,6 +624,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       case 'exec_session_complete': {
         // All backend post-processing done — safe to close SSE now
         if (execSseRef.current) { execSseRef.current.close(); execSseRef.current = null; }
+        // Safety net: if chat_execution_done was missed (e.g. oversized payload), unblock UI here
+        setChatPhase(prev => prev === 'executing' ? 'chatting' : prev);
         break;
       }
       case 'page_analysis_start': {
@@ -643,6 +645,9 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           appendChatMsg({ id: `nav_done_${Date.now()}`, role: 'assistant', content: navMsg });
         }
         if (data.url) { setExecCurrentUrl(String(data.url)); setChatUrlInput(String(data.url)); }
+        // New page is ready — unblock the chat input so user can interact immediately
+        // even if the background test execution hasn't fully completed yet
+        setChatPhase(prev => prev === 'executing' ? 'chatting' : prev);
         break;
       }
       case 'exec_screenshot': {
@@ -691,6 +696,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     setExecScreenshot(null);
     setExecCurrentUrl('');
     setExecPanelView('browser');
+    setConfirmedExecResults([]);
+    setConfirmedTcIds(new Set());
 
     if (!inputData) {
       // Only append user message on first call (not when re-calling after needs_input)
@@ -1490,7 +1497,11 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                             </div>
                             <div className={`${styles.recExcelCell} ${rowCls}`}>{r.expected_results?.join('; ') || 'N/A'}</div>
                             <div className={`${styles.recExcelCell} ${rowCls}`}>
-                              {Object.entries(r.test_data || {}).map(([k, v]) => `${k}: ${v}`).join(' | ')}
+                              {Object.entries(r.test_data || {}).flatMap(([k, v]) =>
+                                v && typeof v === 'object'
+                                  ? Object.entries(v as Record<string, unknown>).map(([ik, iv]) => `${ik}: ${iv}`)
+                                  : [`${k}: ${v}`]
+                              ).join(' | ')}
                             </div>
                             <div className={`${styles.recExcelCell} ${styles.recExcelStatusCell} ${rowCls}`}>
                               {r.status === 'passed'

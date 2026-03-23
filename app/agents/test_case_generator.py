@@ -682,9 +682,23 @@ class TestCaseGeneratorAgent(BaseAgent):
         url = page_structure.get("url", base_url or "")
         title = page_structure.get("title", "Unknown Page")
         inputs = page_structure.get("inputs", [])
-        buttons = page_structure.get("buttons", [])
         headings = page_structure.get("headings", [])
         links = page_structure.get("links", [])
+
+        # Supplement native <button> elements with custom interactive components
+        # (e.g. <div role="button">, <span role="menuitem">) that only appear in
+        # the "interactive" list, not in "buttons". Without this, the LLM never
+        # sees them and hallucinates multi-step flows (e.g. open menu → click logout).
+        buttons = list(page_structure.get("buttons", []))
+        _seen_btn_labels = {(el.get("text") or el.get("ariaLabel") or "").strip().lower()
+                            for el in buttons}
+        for el in page_structure.get("interactive", []):
+            if el.get("role") in ("button", "menuitem", "tab", "option", "link") \
+                    and el.get("tag") not in ("button", "input", "a"):
+                label = (el.get("text") or el.get("ariaLabel") or "").strip()
+                if label and label.lower() not in _seen_btn_labels:
+                    _seen_btn_labels.add(label.lower())
+                    buttons.append(el)
 
         if not base_url:
             parsed = urlparse(url)

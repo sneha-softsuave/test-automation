@@ -27,8 +27,13 @@ def extract_selectors(url: str, headless: bool = True, timeout: int = 30000, sto
         page = context.new_page()
 
         try:
-            page.goto(url, timeout=timeout, wait_until="networkidle")
-            # Give SPA frameworks extra time to render dynamic content
+            # Use "load" instead of "networkidle" — networkidle times out on pages
+            # with continuous polling, websockets, or long-lived analytics requests.
+            # "load" fires once the DOM and all subresources are ready, which is
+            # sufficient for element extraction.
+            page.goto(url, timeout=timeout, wait_until="load")
+            # Best-effort: wait for network to settle so dynamic content renders.
+            # Capped at 5 s and silently ignored — never blocks extraction.
             try:
                 page.wait_for_load_state("networkidle", timeout=5000)
             except Exception:

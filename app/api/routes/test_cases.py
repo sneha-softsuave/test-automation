@@ -1509,7 +1509,7 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
     """
     from app.core.chat_sessions import (
         get_session, append_message, get_last_test_suite,
-        set_execution_session, set_execution_result,
+        set_execution_session, set_execution_result, get_execution_result,
     )
     from app.core.sse_manager import sse_manager
 
@@ -1561,14 +1561,18 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
         validation = validate_test_suite_data(partial_suite, session_creds)
         if not validation["valid"]:
             fields_text = "\n".join(
-                f"  • **{f['field_name']}** (step {f['step_number']}): {f['instruction']}"
+                f"- **{f['field_name']}** *(step {f['step_number']})*"
+                for f in validation["missing_fields"]
+            )
+            example_text = "  ".join(
+                f"{f['field_name'].lower()}: your_{f['field_name'].lower()}"
                 for f in validation["missing_fields"]
             )
             needs_msg = (
-                "I need some information before I can run these tests.\n\n"
-                "The following fields require values:\n"
+                "Before I run these tests, I need the following values:\n\n"
                 f"{fields_text}\n\n"
-                "Please reply with the values (e.g. *email: user@example.com  password: mypass*)."
+                f"Reply with the values, for example:\n"
+                f"> {example_text}"
             )
             append_message(request.session_id, "assistant", needs_msg)
             return {
@@ -1584,6 +1588,82 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
         import multiprocessing as _mp
         import asyncio as _asyncio
         from app.tools.enhanced_executor import execute_enhanced
+        from urllib.parse import urlparse as _urlparse
+
+        _base_url = partial_suite.get("base_url", "")
+
+        def _meaningful_navigation(url_a: str, url_b: str) -> bool:
+            """True when the URLs differ in host or path (ignores query/fragment)."""
+            try:
+                a, b = _urlparse(url_a), _urlparse(url_b)
+                return a.netloc != b.netloc or a.path.rstrip("/") != b.path.rstrip("/")
+            except Exception:
+                return url_a != url_b
+
+        # The first URL the browser visits is the test's setup navigation (e.g. /login).
+        # We must never re-scrape it — only scrape pages the test navigates TO afterwards.
+        # Using a dict so the nested _forward_updates closure can mutate it.
+        _nav_state: dict = {"initial_path": None}
+
+        def _nav_path(url: str) -> str:
+            """Normalised netloc+path for same-page detection (ignores query/fragment)."""
+            try:
+                p = _urlparse(url)
+                return (p.netloc + p.path).rstrip("/")
+            except Exception:
+                return url
+
+        # Track URLs already being/been scraped so we never double-scrape
+        _scraped_nav_urls: set = set()
+        # Holds the most recent concurrent re-scrape task so finally can await it
+        _scrape_tasks: list = []
+
+        async def _do_page_scrape(nav_url: str, storage_state):
+            """Re-scrape a navigated page and push the AI summary to the chatbot."""
+            try:
+                from app.tools.selector_extractor import SelectorExtractor as _SE
+                from app.agents.test_case_generator import (
+                    TestCaseGeneratorAgent as _TGA,
+                    compact_page_elements as _cpe,
+                )
+                from app.agents.base_agent import LLMProvider as _LP
+                from app.core.chat_sessions import get_session as _gs, append_message as _am
+
+                await sse_manager.broadcast(exec_session_id, {
+                    "type": "page_analysis_start",
+                    "url": nav_url,
+                    "message": "Browser navigated to a new page — analyzing it for you…",
+                })
+                extractor = _SE(headless=True)
+                new_page_structure = await extractor.extract_selectors(nav_url, storage_state=storage_state)
+                new_compact = _cpe(new_page_structure)
+
+                _session = _gs(chat_session_id)
+                if _session:
+                    _session["page_structure"] = new_page_structure
+                    _session["compact"] = new_compact
+                    _session["last_test_suite"] = None
+
+                _provider = _LP(provider_name)
+                _agent = _TGA(provider=_provider)
+                nav_intro = await _asyncio.to_thread(_agent.generate_intro, new_compact)
+                nav_msg = (
+                    "The browser navigated to a new page after execution. "
+                    f"Here's what I found:\n\n{nav_intro}"
+                )
+                _am(chat_session_id, "assistant", nav_msg)
+                await sse_manager.broadcast(exec_session_id, {
+                    "type": "page_analysis_done",
+                    "url": nav_url,
+                    "message": nav_msg,
+                })
+                print(f"[chat-execute] Re-analysis complete for {nav_url}")
+            except Exception as _nav_err:
+                print(f"[chat-execute] Re-analysis failed for {nav_url}: {_nav_err}")
+
+        # Carry browser cookies forward from the previous execution so session stays alive
+        _prev_result = get_execution_result(chat_session_id) or {}
+        _initial_storage_state = _prev_result.get("final_storage_state")
 
         # Queue for live screenshot/navigation/step events from the Playwright subprocess
         update_queue = _mp.Queue()
@@ -1602,12 +1682,31 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                             "url": msg.get("url", ""),
                         })
                     elif msg_type == "page_navigated":
+                        nav_url = msg.get("url", "")
                         await sse_manager.broadcast(exec_session_id, {
                             "type": "page_navigated",
-                            "url": msg.get("url", ""),
+                            "url": nav_url,
                             "elements_summary": msg.get("elements_summary", ""),
                             "image_b64": msg.get("image", ""),
                         })
+                        # Re-scrape only on genuine post-login navigation.
+                        # The first page_navigated is always the test's initial page
+                        # load (e.g. navigating to /login as step 1). Track that URL
+                        # and skip it — only subsequent navigations to DIFFERENT pages
+                        # (e.g. /dashboard after login) trigger the re-scrape.
+                        nav_ss = msg.get("storage_state")
+                        if nav_url and nav_ss and _meaningful_navigation(nav_url, _base_url):
+                            cur_path = _nav_path(nav_url)
+                            if _nav_state["initial_path"] is None:
+                                # First navigation — this is the test setup page, skip
+                                _nav_state["initial_path"] = cur_path
+                            elif (cur_path != _nav_state["initial_path"]
+                                    and nav_url not in _scraped_nav_urls):
+                                # Navigated to a genuinely new page — re-scrape it
+                                _scraped_nav_urls.add(nav_url)
+                                _scrape_tasks.append(
+                                    _asyncio.create_task(_do_page_scrape(nav_url, nav_ss))
+                                )
                     elif msg_type == "test_started":
                         await sse_manager.broadcast(exec_session_id, {
                             "type": "step_update",
@@ -1642,6 +1741,7 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                 headless=request.headless,
                 timeout=request.timeout,
                 update_queue=update_queue,
+                initial_storage_state=_initial_storage_state,
             )
 
             all_results = full_result.get("results", [])
@@ -1658,7 +1758,6 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                 "chat_session_id": chat_session_id,
                 "message": summary_msg,
                 "summary": {"total": count, "passed": total_passed, "failed": total_failed},
-                "results": full_result,
                 "final_url": full_result.get("final_url", ""),
                 "tc_results": [
                     {
@@ -1674,65 +1773,25 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                 ],
             })
 
-            # ── Auto-scrape navigated page ────────────────────────────────────
-            # If the browser navigated to a different page during execution,
-            # re-scrape it and update the session so subsequent chat-generate
-            # calls produce tests for the NEW page, not the original one.
+            # ── Post-execution fallback re-scrape ─────────────────────────────
+            # The concurrent scrape in _forward_updates handles the common case.
+            # This fallback runs only when the final_url was NOT scraped during
+            # execution (e.g. the nav happened after the last step, in cleanup).
             final_url = full_result.get("final_url", "")
-            base_url = partial_suite.get("base_url", "")
             if (
                 final_url
-                and final_url != base_url
+                and total_passed > 0
+                and _meaningful_navigation(final_url, _base_url)
                 and not final_url.startswith("about:")
+                and final_url not in _scraped_nav_urls
                 and exec_session_id not in _rescrape_done
             ):
                 _rescrape_done.add(exec_session_id)
-                try:
-                    from app.tools.selector_extractor import SelectorExtractor as _SE
-                    from app.agents.test_case_generator import (
-                        TestCaseGeneratorAgent as _TGA,
-                        compact_page_elements as _cpe,
-                    )
-                    from app.agents.base_agent import LLMProvider as _LP
-                    from app.core.chat_sessions import get_session as _gs, append_message as _am
-
-                    print(f"[chat-execute] Browser navigated → re-scraping {final_url} (with auth cookies)")
-                    await sse_manager.broadcast(exec_session_id, {
-                        "type": "page_analysis_start",
-                        "url": final_url,
-                        "message": f"Browser navigated to a new page — analyzing it for you…",
-                    })
-
-                    # Pass the execution's cookies so protected pages are scraped correctly
-                    auth_state = full_result.get("final_storage_state")
-                    extractor = _SE(headless=True)
-                    new_page_structure = await extractor.extract_selectors(final_url, storage_state=auth_state)
-                    new_compact = _cpe(new_page_structure)
-
-                    # Update session so future /chat-generate uses the new page
-                    _session = _gs(chat_session_id)
-                    if _session:
-                        _session["page_structure"] = new_page_structure
-                        _session["compact"] = new_compact
-                        _session["last_test_suite"] = None  # reset so user generates fresh
-
-                    _provider = _LP(provider_name)
-                    _agent = _TGA(provider=_provider)
-                    nav_intro = _agent.generate_intro(new_compact)
-                    nav_msg = (
-                        f"The browser navigated to a new page after execution. "
-                        f"Here's what I found:\n\n{nav_intro}"
-                    )
-                    _am(chat_session_id, "assistant", nav_msg)
-
-                    await sse_manager.broadcast(exec_session_id, {
-                        "type": "page_analysis_done",
-                        "url": final_url,
-                        "message": nav_msg,
-                    })
-                    print(f"[chat-execute] Navigation re-analysis complete for {final_url}")
-                except Exception as _nav_err:
-                    print(f"[chat-execute] Navigation re-analysis failed: {_nav_err}")
+                _scraped_nav_urls.add(final_url)
+                auth_state = full_result.get("final_storage_state")
+                print(f"[chat-execute] Post-execution fallback re-scrape → {final_url}")
+                t = _asyncio.create_task(_do_page_scrape(final_url, auth_state))
+                _scrape_tasks.append(t)
 
         except Exception as e:
             import traceback
@@ -1743,10 +1802,17 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
             })
         finally:
             _fwd_state["running"] = False
-            await _asyncio.sleep(0.3)  # drain remaining events
+            await _asyncio.sleep(0.3)  # drain remaining queue events
             fwd_task.cancel()
+            # Wait for any concurrent re-scrape tasks so the summary reaches the
+            # frontend before exec_session_complete closes the SSE connection.
+            for _t in _scrape_tasks:
+                if not _t.done():
+                    try:
+                        await _asyncio.wait_for(_t, timeout=120.0)
+                    except Exception:
+                        pass
             _rescrape_done.discard(exec_session_id)
-            # Tell the frontend it can safely close the SSE connection
             await sse_manager.broadcast(exec_session_id, {"type": "exec_session_complete"})
 
     background_tasks.add_task(_run_and_notify)

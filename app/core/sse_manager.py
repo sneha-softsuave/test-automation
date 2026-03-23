@@ -12,15 +12,21 @@ class SSEManager:
 
     def __init__(self):
         self.queues: Dict[str, List[asyncio.Queue]] = {}
+        # Events broadcast before the SSE connection is open are buffered here
+        # and replayed the instant create_queue() is called — guarantees zero event loss.
+        self._pending: Dict[str, List[dict]] = {}
 
     def create_queue(self, session_id: str) -> asyncio.Queue:
-        """Create a new queue for a session."""
-        queue = asyncio.Queue()
+        """Create a new queue for a session and replay any buffered events."""
+        q: asyncio.Queue = asyncio.Queue()
         if session_id not in self.queues:
             self.queues[session_id] = []
-        self.queues[session_id].append(queue)
+        self.queues[session_id].append(q)
+        # Drain the pre-connection buffer into the fresh queue
+        for msg in self._pending.pop(session_id, []):
+            q.put_nowait(msg)
         print(f"SSE: Created queue for session {session_id}")
-        return queue
+        return q
 
     def remove_queue(self, session_id: str, queue: asyncio.Queue):
         """Remove a queue from a session."""
@@ -29,11 +35,19 @@ class SSEManager:
                 self.queues[session_id].remove(queue)
             if not self.queues[session_id]:
                 del self.queues[session_id]
+        # Also discard any pending buffer for this session
+        self._pending.pop(session_id, None)
         print(f"SSE: Removed queue for session {session_id}")
 
     async def broadcast(self, session_id: str, message: dict):
-        """Broadcast a message to all queues in a session."""
+        """Broadcast a message to all queues in a session.
+
+        If the SSE connection is not yet open, the message is buffered and
+        will be replayed automatically when create_queue() is called.
+        """
         if session_id not in self.queues:
+            # SSE not connected yet — buffer so it isn't lost
+            self._pending.setdefault(session_id, []).append(message)
             return
 
         for queue in self.queues[session_id]:

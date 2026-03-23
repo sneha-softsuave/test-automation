@@ -760,10 +760,15 @@ def _execute_single_test_sync(
                     except Exception:
                         elements_summary = f"Browser navigated to: {new_url}"
                         nav_screenshot_b64 = ""
+                    try:
+                        _nav_ss = page.context.storage_state()
+                    except Exception:
+                        _nav_ss = None
                     step_update("page_navigated", {
                         "url": new_url,
                         "elements_summary": elements_summary,
                         "image": nav_screenshot_b64,
+                        "storage_state": _nav_ss,
                     })
             except Exception:
                 pass  # Never block execution for navigation detection
@@ -2306,9 +2311,12 @@ def _execute_action_sync(
         actual_url = page.url
         print(f"    Landed on: {actual_url}")
 
-        # Detect auth-redirect: if the server sent us to a DIFFERENT path than
-        # requested (e.g. already-logged-in user hitting /login → /dashboard),
-        # clear cookies + storage and retry so subsequent fill steps work.
+        # Detect auth-redirect: only clear cookies when navigating TO an auth page
+        # (login/signin) and being redirected away — meaning the user is already
+        # logged in and we need a clean state to test the login flow.
+        # Do NOT clear cookies for non-auth redirects (e.g. /dashboard → /dashboard?params
+        # or / → /dashboard) — those are normal app redirects for authenticated users,
+        # and clearing cookies would log them out and cause /no-access errors.
         try:
             from urllib.parse import urlparse as _up_goto
             _req = _up_goto(url)
@@ -2316,8 +2324,10 @@ def _execute_action_sync(
             _same_host = _req.netloc == _act.netloc
             _req_path = _req.path.rstrip("/") or "/"
             _act_path = _act.path.rstrip("/") or "/"
-            if _same_host and _req_path != _act_path:
-                print(f"    [goto] Redirected {_req_path!r} → {_act_path!r}; clearing auth state and retrying")
+            _AUTH_KEYWORDS = {"login", "signin", "sign-in", "auth", "logout", "register", "signup"}
+            _req_is_auth = any(seg in _AUTH_KEYWORDS for seg in _req_path.lower().split("/") if seg)
+            if _same_host and _req_path != _act_path and _req_is_auth:
+                print(f"    [goto] Auth-page redirect {_req_path!r} → {_act_path!r}; clearing auth state and retrying")
                 page.context.clear_cookies()
                 page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e) {} }")
                 page.goto(url, wait_until="load", timeout=timeout)
@@ -2353,7 +2363,21 @@ def _execute_action_sync(
                 value = live_value
                 print(f"    [fill] Using captured context value '{live_value}' (key='{context_key}')")
 
-        # Check common keys first (skipped if value already resolved from table)
+        # Prefer suite_test_data (user-provided session values) over step-level LLM placeholders.
+        # Fully dynamic: for every key the step expects, if the session has a real string
+        # value for that key, use it — works for any field (email, phone, employee_id, etc.)
+        if not value:
+            _skip = {"source", "column_name"}
+            for key in step_test_data:
+                if key in _skip:
+                    continue
+                suite_val = suite_test_data.get(key)
+                if suite_val and isinstance(suite_val, str):
+                    value = suite_val
+                    print(f"    [fill] Using suite/session value for '{key}'")
+                    break
+
+        # If no suite value matched, fall back to step-level test_data
         if not value:
             for key in ["email", "password", "text", "value", "username", "input", "content", "data", "message"]:
                 if key in step_test_data:
@@ -2378,13 +2402,23 @@ def _execute_action_sync(
             if extracted_value:
                 value = extracted_value
 
-        if not value and suite_test_data.get("default_credentials"):
-            creds = suite_test_data["default_credentials"]
+        # Last resort: match element name against any key in suite_test_data (dynamic, no hardcoding)
+        if not value:
             element_name = (selector_hints.get("element_name") or "").lower()
-            if "password" in element_name:
-                value = creds.get("password", "")
-            elif "email" in element_name:
-                value = creds.get("email", "")
+            if element_name:
+                for key, val in suite_test_data.items():
+                    if isinstance(val, str) and val and key in element_name:
+                        value = val
+                        print(f"    [fill] Matched element name '{element_name}' to suite key '{key}'")
+                        break
+            # Fallback to legacy default_credentials if still nothing found
+            if not value and suite_test_data.get("default_credentials"):
+                creds = suite_test_data["default_credentials"]
+                if element_name:
+                    for key, val in creds.items():
+                        if isinstance(val, str) and val and key in element_name:
+                            value = val
+                            break
 
         # Try to get best selector
         selector = _get_best_selector_sync(page, selector_hints, step_test_data, action_type="fill", instruction=instruction, failed_selectors=failed_selectors)

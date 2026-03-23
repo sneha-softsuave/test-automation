@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 import sys
 import json
@@ -59,12 +60,14 @@ class SelectorExtractor:
         if storage_state_file:
             cmd.append(storage_state_file)
 
-        # Run Playwright in a separate subprocess
-        result = subprocess.run(
+        # Run Playwright in a separate subprocess (non-blocking)
+        _timeout = self.timeout // 1000 + 30  # Add buffer time
+        result = await asyncio.to_thread(
+            subprocess.run,
             cmd,
             capture_output=True,
             text=True,
-            timeout=self.timeout // 1000 + 30  # Add buffer time
+            timeout=_timeout,
         )
 
         # Clean up temp file
