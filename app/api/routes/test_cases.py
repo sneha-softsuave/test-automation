@@ -46,6 +46,10 @@ def _extract_credentials(text: str) -> dict:
     return creds
 
 
+# Per-exec-session idempotency guard for the post-execution re-scrape
+_rescrape_done: set = set()
+
+
 def validate_llm_provider(provider_name: str) -> str:
     """Validate and return the LLM provider name."""
     valid_providers = ["anthropic", "openai", "groq", "waymore"]
@@ -1047,7 +1051,7 @@ async def chat_generate(request: ChatGenerateRequest):
     """
     from app.agents.test_case_generator import TestCaseGeneratorAgent
     from app.agents.base_agent import LLMProvider as AgentLLMProvider
-    from app.core.chat_sessions import get_session, append_message, set_last_test_suite, get_last_test_suite
+    from app.core.chat_sessions import get_session, append_message, set_last_test_suite, get_last_test_suite, get_messages
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
     validate_api_key(provider_name)
@@ -1059,6 +1063,7 @@ async def chat_generate(request: ChatGenerateRequest):
     page_structure = session["page_structure"]
     compact = session["compact"]
 
+    history = get_messages(request.session_id)
     append_message(request.session_id, "user", request.user_message)
 
     # Extract and persist any credentials mentioned in the message
@@ -1084,6 +1089,15 @@ async def chat_generate(request: ChatGenerateRequest):
         )
     else:
         effective_intent = request.user_message
+
+    # Prepend last 3 user messages for conversational context
+    recent_user_lines = [m["content"][:300] for m in history if m["role"] == "user"][-3:]
+    if recent_user_lines:
+        effective_intent = (
+            "Recent conversation context:\n"
+            + "\n".join(f"- {l}" for l in recent_user_lines)
+            + "\n\n" + effective_intent
+        )
 
     print(f"\n[chat-generate] session={request.session_id} | provider={provider_name}")
     print(f"[chat-generate] effective_intent={effective_intent[:120]}")
@@ -1327,7 +1341,7 @@ async def chat_informational(request: ChatInfoRequest):
     """
     from app.agents.test_case_generator import TestCaseGeneratorAgent
     from app.agents.base_agent import LLMProvider as AgentLLMProvider
-    from app.core.chat_sessions import get_session, append_message
+    from app.core.chat_sessions import get_session, append_message, get_messages
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
     validate_api_key(provider_name)
@@ -1337,12 +1351,13 @@ async def chat_informational(request: ChatInfoRequest):
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
     compact = session["compact"]
+    history = get_messages(request.session_id)
     append_message(request.session_id, "user", request.user_message)
 
     try:
         provider_enum = AgentLLMProvider(provider_name)
         agent = TestCaseGeneratorAgent(provider=provider_enum)
-        answer = agent.answer_question(compact, request.user_message)
+        answer = agent.answer_question(compact, request.user_message, history=history)
         append_message(request.session_id, "assistant", answer)
 
         return {
@@ -1360,6 +1375,115 @@ async def chat_informational(request: ChatInfoRequest):
 # POST /chat-execute — execute selected test cases via deep agent + SSE
 # ---------------------------------------------------------------------------
 
+# Keys that identify non-credential fill values (LLM-generated values are fine)
+_NON_CRED_FILL_KEYS = {"text", "value", "input", "content", "data", "message", "search", "query"}
+
+# Substring patterns that identify a field as needing real user credentials
+_EMAIL_FIELD_HINTS = ("email", "e-mail", "e mail", "user name", "username", "login name")
+_PASSWORD_FIELD_HINTS = ("password", "passwd", "pass ")
+
+
+def _field_needs_credential(element_name: str, step_td: dict) -> tuple:
+    """
+    Returns (True, "email"|"password"|"username") if this fill step needs a
+    real user credential, otherwise (False, None).
+
+    Credential fields must come from the user (session credentials), NOT from
+    LLM-generated placeholder values such as test@example.com / password123.
+    """
+    name = (element_name or "").lower()
+    # Detect by step test_data key
+    if "email" in step_td:
+        return True, "email"
+    if "password" in step_td:
+        return True, "password"
+    if "username" in step_td:
+        return True, "username"
+    # Detect by element name
+    if any(h in name for h in _EMAIL_FIELD_HINTS):
+        return True, "email"
+    if any(h in name for h in _PASSWORD_FIELD_HINTS):
+        return True, "password"
+    if "username" in name:
+        return True, "username"
+    return False, None
+
+
+def validate_test_suite_data(suite: dict, credentials: dict) -> dict:
+    """
+    Scan the test suite for fill steps that require real credentials but none
+    have been provided by the user yet.
+
+    KEY RULE: For email / password / username fields the LLM always inserts
+    placeholder values (test@example.com, password123, …).  Those must NOT be
+    treated as "the user provided this" — only values present in `credentials`
+    (extracted from the user's chat messages) count as real.
+
+    Non-credential fill steps (search text, comment body, etc.) pass through
+    unconditionally — their LLM-generated test_data values are real test data.
+
+    Returns {"valid": bool, "missing_fields": [{"step_id", "step_number",
+    "field_name", "action", "instruction"}]}.
+    """
+    missing = []
+    # Deduplicate: once we know "email" is missing don't report it again from TC_002
+    already_reported: set = set()
+
+    for tc in suite.get("test_cases", []):
+        tc_id = tc.get("id", "")
+        for step in tc.get("steps", []):
+            action_type = (step.get("action") or {}).get("type", "")
+            if action_type not in ("fill", "select"):
+                continue
+
+            step_td = step.get("test_data") or {}
+
+            # Context/table-driven steps resolve their value at runtime
+            if step_td.get("source") in ("table", "context"):
+                continue
+
+            element_name = (step.get("selector_hints") or {}).get("element_name") or ""
+            is_cred, cred_key = _field_needs_credential(element_name, step_td)
+
+            if is_cred:
+                # For credential fields, only real session credentials count.
+                # Reject LLM-generated placeholders entirely.
+                if credentials.get(cred_key):
+                    continue  # user already supplied this credential → OK
+                # Also accept "username" in credentials for an email field
+                if cred_key == "email" and credentials.get("username"):
+                    continue
+                if cred_key in already_reported:
+                    continue  # already asking for this — don't duplicate
+                already_reported.add(cred_key)
+                field_label = element_name or cred_key.capitalize()
+                missing.append({
+                    "step_id": tc_id,
+                    "step_number": step.get("step_number", "?"),
+                    "field_name": field_label,
+                    "action": action_type,
+                    "instruction": step.get("instruction", ""),
+                })
+            else:
+                # Non-credential field: any non-empty string value in step_td is fine.
+                has_value = any(
+                    isinstance(step_td.get(k), str) and step_td.get(k)
+                    for k in step_td
+                    if k not in {"source", "column_name"}
+                )
+                if not has_value:
+                    field_label = element_name or f"field at step {step.get('step_number', '?')}"
+                    missing.append({
+                        "step_id": tc_id,
+                        "step_number": step.get("step_number", "?"),
+                        "field_name": field_label,
+                        "action": action_type,
+                        "instruction": step.get("instruction", ""),
+                    })
+
+    return {"valid": len(missing) == 0, "missing_fields": missing}
+
+
 class ChatExecuteRequest(PydanticBaseModel):
     session_id: str
     user_message: str
@@ -1367,6 +1491,7 @@ class ChatExecuteRequest(PydanticBaseModel):
     headless: bool = True
     timeout: int = 30000
     max_retries: int = 1
+    input_data: Optional[dict] = None  # user-supplied values after a needs_input prompt
 
 
 class ChatExecuteResponse(PydanticBaseModel):
@@ -1376,7 +1501,7 @@ class ChatExecuteResponse(PydanticBaseModel):
     selected_tests: List[str]
 
 
-@router.post("/chat-execute", response_model=ChatExecuteResponse)
+@router.post("/chat-execute")
 async def chat_execute(request: ChatExecuteRequest, background_tasks: BackgroundTasks):
     """
     Execute selected test cases from the chatbot session via the deep agent engine.
@@ -1418,11 +1543,40 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
     partial_suite = {**last_suite, "test_cases": selected}
 
     # Inject session credentials into test_data so executor uses them
-    from app.core.chat_sessions import get_credentials
+    from app.core.chat_sessions import get_credentials, set_credentials
     session_creds = get_credentials(request.session_id)
+
+    # If the user just provided input_data (after a needs_input prompt), persist and merge it
+    if request.input_data:
+        session_creds = {**session_creds, **request.input_data}
+        set_credentials(request.session_id, session_creds)
+
     if session_creds:
         merged_data = {**partial_suite.get("test_data", {}), **session_creds}
         partial_suite = {**partial_suite, "test_data": merged_data}
+
+    # Pre-flight check: ask user for missing test data before starting execution.
+    # Skip when input_data was already supplied (user just answered the prompt).
+    if not request.input_data:
+        validation = validate_test_suite_data(partial_suite, session_creds)
+        if not validation["valid"]:
+            fields_text = "\n".join(
+                f"  • **{f['field_name']}** (step {f['step_number']}): {f['instruction']}"
+                for f in validation["missing_fields"]
+            )
+            needs_msg = (
+                "I need some information before I can run these tests.\n\n"
+                "The following fields require values:\n"
+                f"{fields_text}\n\n"
+                "Please reply with the values (e.g. *email: user@example.com  password: mypass*)."
+            )
+            append_message(request.session_id, "assistant", needs_msg)
+            return {
+                "status": "needs_input",
+                "session_id": request.session_id,
+                "message": needs_msg,
+                "missing_fields": validation["missing_fields"],
+            }
 
     chat_session_id = request.session_id
 
@@ -1526,7 +1680,13 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
             # calls produce tests for the NEW page, not the original one.
             final_url = full_result.get("final_url", "")
             base_url = partial_suite.get("base_url", "")
-            if final_url and final_url != base_url and not final_url.startswith("about:"):
+            if (
+                final_url
+                and final_url != base_url
+                and not final_url.startswith("about:")
+                and exec_session_id not in _rescrape_done
+            ):
+                _rescrape_done.add(exec_session_id)
                 try:
                     from app.tools.selector_extractor import SelectorExtractor as _SE
                     from app.agents.test_case_generator import (
@@ -1585,6 +1745,7 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
             _fwd_state["running"] = False
             await _asyncio.sleep(0.3)  # drain remaining events
             fwd_task.cancel()
+            _rescrape_done.discard(exec_session_id)
             # Tell the frontend it can safely close the SSE connection
             await sse_manager.broadcast(exec_session_id, {"type": "exec_session_complete"})
 
@@ -1594,12 +1755,13 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
 
     print(f"[chat-execute] session={request.session_id} exec_session={exec_session_id} tests={selected_ids}")
 
-    return ChatExecuteResponse(
-        session_id=request.session_id,
-        exec_session_id=exec_session_id,
-        message=start_msg,
-        selected_tests=selected_ids,
-    )
+    return {
+        "status": "started",
+        "session_id": request.session_id,
+        "exec_session_id": exec_session_id,
+        "message": start_msg,
+        "selected_tests": selected_ids,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1621,7 +1783,7 @@ async def chat_edit(request: ChatEditRequest):
     from app.agents.test_case_generator import TestCaseGeneratorAgent
     from app.agents.base_agent import LLMProvider as AgentLLMProvider
     from app.core.chat_sessions import (
-        get_session, append_message, get_last_test_suite, set_last_test_suite,
+        get_session, append_message, get_last_test_suite, set_last_test_suite, get_messages,
     )
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
@@ -1635,12 +1797,13 @@ async def chat_edit(request: ChatEditRequest):
     if not last_suite:
         raise HTTPException(status_code=400, detail="No test cases to edit. Please generate test cases first.")
 
+    history = get_messages(request.session_id)
     append_message(request.session_id, "user", request.user_message)
 
     try:
         provider_enum = AgentLLMProvider(provider_name)
         agent = TestCaseGeneratorAgent(provider=provider_enum)
-        updated_suite = agent.generate_edit(last_suite, request.user_message)
+        updated_suite = agent.generate_edit(last_suite, request.user_message, history=history)
         set_last_test_suite(request.session_id, updated_suite)
 
         tc_count = len(updated_suite.get("test_cases", []))

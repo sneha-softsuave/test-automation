@@ -19,6 +19,7 @@ import {
   EyeOff
 } from 'lucide-react';
 import styles from './Settings.module.css';
+import { fetchTokenUsage, resetTokenUsage, type TokenUsageStats } from '../../services/api';
 
 interface AIProvider {
   id: string;
@@ -62,6 +63,11 @@ export const Settings: React.FC = () => {
   const [visionProvider, setVisionProvider] = useState<string>('groq');
   const [visionModels, setVisionModels] = useState<{ groq: string; openai: string }>({ groq: '', openai: '' });
   const [settingVisionProvider, setSettingVisionProvider] = useState(false);
+
+  // Token usage tracking
+  const [tokenStats, setTokenStats] = useState<TokenUsageStats | null>(null);
+  const [tokenLoading, setTokenLoading] = useState(false);
+  const [tokenExpanded, setTokenExpanded] = useState(false);
 
   const [aiModelsExpanded, setAiModelsExpanded] = useState(false);
   const [appSettingsExpanded, setAppSettingsExpanded] = useState(false);
@@ -123,7 +129,15 @@ export const Settings: React.FC = () => {
 
     // Poll usage count every 30 seconds so count stays fresh without refresh
     const interval = setInterval(fetchImageAnalysisStatus, 30_000);
-    return () => clearInterval(interval);
+
+    // Poll token usage every 30 seconds
+    const fetchTokenStats = () => {
+      fetchTokenUsage().then(setTokenStats).catch(() => {});
+    };
+    fetchTokenStats();
+    const tokenInterval = setInterval(fetchTokenStats, 30_000);
+
+    return () => { clearInterval(interval); clearInterval(tokenInterval); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchProviders = async () => {
@@ -258,7 +272,7 @@ export const Settings: React.FC = () => {
 
       {/* AI Models Section */}
       {!loading && (
-        <div className={styles.section}>
+        <div className={styles.section} data-section="ai">
           <div
             className={styles.sectionHeader}
             onClick={() => setAiModelsExpanded(!aiModelsExpanded)}
@@ -440,7 +454,7 @@ export const Settings: React.FC = () => {
 
       {/* Application Settings Section */}
       {!loading && (
-        <div className={styles.section}>
+        <div className={styles.section} data-section="app">
           <div
             className={styles.sectionHeader}
             onClick={() => setAppSettingsExpanded(!appSettingsExpanded)}
@@ -553,7 +567,7 @@ export const Settings: React.FC = () => {
 
       {/* Image Analysis Section */}
       {!loading && (
-        <div className={styles.section}>
+        <div className={styles.section} data-section="vision">
           <div
             className={styles.sectionHeader}
             onClick={() => setImageAnalysisExpanded(!imageAnalysisExpanded)}
@@ -771,6 +785,136 @@ export const Settings: React.FC = () => {
                   </span>
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Token Usage Section */}
+      {!loading && (
+        <div className={styles.section} data-section="token">
+          <div
+            className={styles.sectionHeader}
+            onClick={() => setTokenExpanded(!tokenExpanded)}
+          >
+            <div className={styles.sectionHeaderLeft}>
+              <div className={styles.expandIcon}>
+                {tokenExpanded ? <ChevronDown size={20} /> : <ChevronRight size={20} />}
+              </div>
+              <Activity size={20} className={styles.sectionIcon} />
+              <span className={styles.sectionTitle}>Token Usage & Cost</span>
+              {tokenStats && tokenStats.total_calls > 0 && (
+                <span style={{
+                  marginLeft: 10, padding: '2px 10px', borderRadius: 20,
+                  fontSize: '0.72rem', fontWeight: 600,
+                  background: '#dbeafe', color: '#1d4ed8',
+                }}>
+                  {tokenStats.total_calls} calls · ${tokenStats.total_cost_usd.toFixed(6)}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {tokenExpanded && (
+            <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {/* Stat chips */}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {[
+                  { label: 'Calls', value: tokenStats?.total_calls ?? 0 },
+                  { label: 'Input Tokens', value: (tokenStats?.total_input_tokens ?? 0).toLocaleString() },
+                  { label: 'Output Tokens', value: (tokenStats?.total_output_tokens ?? 0).toLocaleString() },
+                  { label: 'Cost ($)', value: `$${(tokenStats?.total_cost_usd ?? 0).toFixed(6)}` },
+                ].map(chip => (
+                  <div key={chip.label} style={{
+                    padding: '8px 14px', borderRadius: 8, background: '#f1f5f9',
+                    border: '1px solid #e2e8f0', textAlign: 'center', minWidth: 100,
+                  }}>
+                    <div style={{ fontSize: '0.7rem', color: '#6b7280', marginBottom: 2 }}>{chip.label}</div>
+                    <div style={{ fontSize: '1rem', fontWeight: 700, color: '#0f172a' }}>{chip.value}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Per-provider table */}
+              {tokenStats && Object.keys(tokenStats.by_provider).length > 0 && (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+                    <thead>
+                      <tr style={{ background: '#f8fafc' }}>
+                        {['Provider', 'Calls', 'Input', 'Output', 'Total', 'Cost'].map(h => (
+                          <th key={h} style={{ padding: '6px 10px', textAlign: 'left', borderBottom: '1px solid #e2e8f0', color: '#6b7280', fontWeight: 600 }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(tokenStats.by_provider).map(([prov, s]) => (
+                        <tr key={prov} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                          <td style={{ padding: '6px 10px', fontWeight: 600 }}>{prov}</td>
+                          <td style={{ padding: '6px 10px' }}>{s.calls}</td>
+                          <td style={{ padding: '6px 10px' }}>{s.input_tokens.toLocaleString()}</td>
+                          <td style={{ padding: '6px 10px' }}>{s.output_tokens.toLocaleString()}</td>
+                          <td style={{ padding: '6px 10px' }}>{s.total_tokens.toLocaleString()}</td>
+                          <td style={{ padding: '6px 10px' }}>${s.cost_usd.toFixed(6)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Recent calls table */}
+              {tokenStats && tokenStats.recent_calls.length > 0 && (
+                <div style={{ overflowX: 'auto' }}>
+                  <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#374151', marginBottom: 6 }}>Recent Calls</div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem' }}>
+                    <thead>
+                      <tr style={{ background: '#f8fafc' }}>
+                        {['Time', 'Agent', 'Provider', 'In', 'Out', 'Cost'].map(h => (
+                          <th key={h} style={{ padding: '5px 8px', textAlign: 'left', borderBottom: '1px solid #e2e8f0', color: '#6b7280', fontWeight: 600 }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tokenStats.recent_calls.map((r, i) => (
+                        <tr key={i} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                          <td style={{ padding: '5px 8px', color: '#6b7280' }}>{new Date(r.timestamp).toLocaleTimeString()}</td>
+                          <td style={{ padding: '5px 8px' }}>{r.agent}</td>
+                          <td style={{ padding: '5px 8px' }}>{r.provider}</td>
+                          <td style={{ padding: '5px 8px' }}>{r.input_tokens.toLocaleString()}</td>
+                          <td style={{ padding: '5px 8px' }}>{r.output_tokens.toLocaleString()}</td>
+                          <td style={{ padding: '5px 8px' }}>${r.cost_usd.toFixed(6)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Action buttons */}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  onClick={() => { setTokenLoading(true); fetchTokenUsage().then(setTokenStats).catch(() => {}).finally(() => setTokenLoading(false)); }}
+                  disabled={tokenLoading}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '6px 14px', borderRadius: 6, border: '1px solid #e2e8f0',
+                    background: '#f8fafc', cursor: tokenLoading ? 'not-allowed' : 'pointer',
+                    fontSize: '0.8rem', color: '#374151',
+                  }}
+                >
+                  <RefreshCw size={13} /> Refresh
+                </button>
+                <button
+                  onClick={() => { resetTokenUsage().then(() => fetchTokenUsage().then(setTokenStats)).catch(() => {}); }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '6px 14px', borderRadius: 6, border: '1px solid #fca5a5',
+                    background: '#fef2f2', cursor: 'pointer', fontSize: '0.8rem', color: '#dc2626',
+                  }}
+                >
+                  <X size={13} /> Reset
+                </button>
+              </div>
             </div>
           )}
         </div>

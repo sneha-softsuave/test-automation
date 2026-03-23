@@ -50,6 +50,7 @@ import type { ExecutionLog } from '../../hooks/useExecutionWebSocket';
 import { LiveExcelGrid } from '../LiveExcelGrid/LiveExcelGrid';
 import { TerminalDisplay } from '../TerminalDisplay/TerminalDisplay';
 import { AgentAtomDiagram } from '../AgentAtomDiagram/AgentAtomDiagram';
+import { ProviderSelect } from '../ProviderSelect/ProviderSelect';
 import styles from './AgentChat.module.css';
 
 // Message type alias for local use (matches AgentMessage from store but with Date timestamp)
@@ -1275,17 +1276,11 @@ export const AgentChat = () => {
         {/* LLM Provider Selector */}
         <div className={styles.llmSelector}>
           <Brain size={16} />
-          <select
+          <ProviderSelect
             value={llmProvider}
-            onChange={(e) => setLlmProvider(e.target.value as LLMProvider)}
-            className={styles.llmSelect}
+            onChange={(val) => setLlmProvider(val as LLMProvider)}
             disabled={isProcessing || isExecuting}
-          >
-            <option value="groq">Groq (Fast)</option>
-            <option value="openai">OpenAI</option>
-            <option value="anthropic">Anthropic</option>
-            <option value="waymore">Waymore AI</option>
-          </select>
+          />
         </div>
       </motion.div>
 

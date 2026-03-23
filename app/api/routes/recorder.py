@@ -330,7 +330,11 @@ In 1-2 sentences, explain what went wrong and what the user should change in the
         except Exception:
             return f"Validation error: {'; '.join(errors)}"
 
+    _cmd_tokens: dict = {"total_tokens": 0, "cost_usd": 0.0}
+
     def _execute():
+        from app.utils.logger import get_stats
+        stats_before = get_stats()
         agent = RecorderAgent(provider=AgentLLMProvider(provider_name))
 
         # ── Step 1: parse the paragraph into atomic actions (needs page context)
@@ -464,6 +468,9 @@ In 1-2 sentences, explain what went wrong and what the user should change in the
             if error_msg:
                 logger.warning(f"[recorder/command] Step {len(session.steps)} failed — continuing with next step")
 
+        stats_after = get_stats()
+        _cmd_tokens["total_tokens"] = stats_after["total_tokens"] - stats_before["total_tokens"]
+        _cmd_tokens["cost_usd"] = round(stats_after["total_cost_usd"] - stats_before["total_cost_usd"], 8)
         return executed_steps, last_screenshot_b64, last_url
 
     try:
@@ -486,6 +493,8 @@ In 1-2 sentences, explain what went wrong and what the user should change in the
         "current_url": current_url,
         "step_number": len(session.steps),
         "error": executed_steps[-1].get("error") if executed_steps else None,
+        "tokens_used": _cmd_tokens["total_tokens"],
+        "cost_usd": _cmd_tokens["cost_usd"],
     }
 
 

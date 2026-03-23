@@ -178,19 +178,56 @@ class BaseAgent(ABC):
         return response.choices[0].message.content.strip()
 
     def call_llm(self, prompt: str) -> str:
-        """Call the appropriate LLM based on provider."""
+        """Call the appropriate LLM based on provider. Signature unchanged."""
         print(f"Calling {self.provider.value} API with model: {self.model}...")
+        try:
+            from app.services.llm_wrapper import call_llm as _wrap
+            result = _wrap(
+                provider=self.provider.value, model=self.model,
+                prompt=prompt, client=self.client, max_tokens=self.max_tokens,
+                agent_name=self.__class__.__name__,
+            )
+            return result["text"]
+        except Exception:
+            # Fallback to original direct calls if wrapper fails
+            if self.provider.value == "anthropic":
+                return self._call_anthropic(prompt)
+            elif self.provider.value == "openai":
+                return self._call_openai(prompt)
+            elif self.provider.value == "groq":
+                return self._call_groq(prompt)
+            elif self.provider.value == "waymore":
+                return self._call_waymore(prompt)
+            raise
 
-        if self.provider == LLMProvider.ANTHROPIC:
-            return self._call_anthropic(prompt)
-        elif self.provider == LLMProvider.OPENAI:
-            return self._call_openai(prompt)
-        elif self.provider == LLMProvider.GROQ:
-            return self._call_groq(prompt)
-        elif self.provider == LLMProvider.WAYMORE:
-            return self._call_waymore(prompt)
-        else:
-            raise ValueError(f"Unsupported provider: {self.provider}")
+    def call_llm_chat(self, system: str, messages: list) -> str:
+        """
+        Multi-turn conversation call.
+        system  : system/context prompt (page summary, test suite, etc.)
+        messages: [{role: "user"|"assistant", content: str}, ...]
+                  The final entry should be the current user turn.
+        """
+        print(f"[call_llm_chat] {self.provider.value} | turns={len(messages)}")
+        try:
+            if self.provider == LLMProvider.ANTHROPIC:
+                response = self.client.messages.create(
+                    model=self.model, max_tokens=self.max_tokens, temperature=0,
+                    system=system, messages=messages,
+                )
+                return response.content[0].text.strip()
+            else:  # OpenAI-compatible: OpenAI, Groq, Waymore
+                full_messages = [{"role": "system", "content": system}] + messages
+                response = self.client.chat.completions.create(
+                    model=self.model, max_tokens=self.max_tokens, messages=full_messages,
+                )
+                return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"[call_llm_chat] failed ({e}), falling back to single-turn")
+            combined = f"{system}\n\n"
+            for m in messages:
+                role = "User" if m["role"] == "user" else "Assistant"
+                combined += f"{role}: {m['content']}\n\n"
+            return self.call_llm(combined.strip())
 
     @abstractmethod
     def execute(self, *args, **kwargs) -> Any:

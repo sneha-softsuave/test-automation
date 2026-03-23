@@ -88,6 +88,14 @@ def get_execution_session(session_id: str) -> Optional[str]:
     return None
 
 
+def get_messages(session_id: str, max_messages: int = 10) -> list:
+    """Return the last `max_messages` conversation turns, oldest first."""
+    session = _sessions.get(session_id)
+    if session is None:
+        return []
+    return session["messages"][-max_messages:]
+
+
 def delete_session(session_id: str) -> None:
     """Remove a session from memory."""
     _sessions.pop(session_id, None)

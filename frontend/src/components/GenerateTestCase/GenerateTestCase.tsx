@@ -11,6 +11,7 @@ import { useStore } from '../../store/useStore';
 import { SaveToProjectModal } from './SaveToProjectModal';
 import { saveTestToProject } from '../../services/api';
 import type { TestSuite } from '../../store/useStore';
+import { ProviderSelect } from '../ProviderSelect/ProviderSelect';
 import styles from './GenerateTestCase.module.css';
 
 const API_BASE = '';
@@ -48,7 +49,7 @@ interface ApiResult {
 
 // ── Chatbot generate types ────────────────────────────────────────────────────
 
-type ChatPhase = 'url_input' | 'analyzing' | 'chatting' | 'generating' | 'executing' | 'done';
+type ChatPhase = 'url_input' | 'analyzing' | 'chatting' | 'generating' | 'executing' | 'awaiting_input' | 'done';
 type ChatIntent = 'execute' | 'edit' | 'informational' | 'generate';
 
 interface ExecStepMsg {
@@ -133,6 +134,8 @@ interface RecorderMessage {
   steps: RecordedStep[];
   status: 'executing' | 'done' | 'error';
   startUrl?: string; // browser URL before this message was executed
+  tokens_used?: number;
+  cost_usd?: number;
 }
 
 type Mode = 'generate' | 'record';
@@ -226,6 +229,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const [confirmedTcIds, setConfirmedTcIds] = useState<Set<string>>(new Set());
   // Last generated test suite (for suggestion buttons)
   const [lastTestSuite, setLastTestSuite] = useState<GeneratedSuite | null>(null);
+  // Stored execute message to replay after user provides missing input data
+  const [pendingExecuteMsg, setPendingExecuteMsg] = useState<string | null>(null);
 
   // ── Record mode state ────────────────────────────────────────────────────
   const [recUrl, setRecUrl] = useState('');
@@ -678,7 +683,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   };
 
   // ── Chat execute handler ──────────────────────────────────────────────────
-  const handleChatExecute = async (userMessage: string) => {
+  const handleChatExecute = async (userMessage: string, inputData?: Record<string, string>) => {
     if (!chatSessionId) return;
     setChatPhase('executing');
     setExecSteps([]);
@@ -687,25 +692,42 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     setExecCurrentUrl('');
     setExecPanelView('browser');
 
-    appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: userMessage });
+    if (!inputData) {
+      // Only append user message on first call (not when re-calling after needs_input)
+      appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: userMessage });
+    }
 
     try {
+      const body: Record<string, unknown> = {
+        session_id: chatSessionId,
+        user_message: userMessage,
+        llm_provider: selectedProvider,
+        headless: true,
+        timeout: 30000,
+      };
+      if (inputData) body.input_data = inputData;
+
       const res = await fetch(`${API_BASE}/api/v1/chat-execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: chatSessionId,
-          user_message: userMessage,
-          llm_provider: selectedProvider,
-          headless: true,
-          timeout: 30000,
-        }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(err.detail || 'Server error');
       }
       const data = await res.json();
+
+      if (data.status === 'needs_input') {
+        // Backend needs credentials / data before it can execute
+        setPendingExecuteMsg(userMessage);
+        appendChatMsg({ id: `ca_${Date.now()}`, role: 'assistant', content: data.message });
+        setChatPhase('awaiting_input');
+        return;
+      }
+
+      // Normal start
+      setPendingExecuteMsg(null);
       setExecSessionId(data.exec_session_id);
       appendChatMsg({ id: `ca_${Date.now()}`, role: 'assistant', content: data.message });
       connectExecutionSSE(data.exec_session_id);
@@ -811,6 +833,25 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     if (chatPhase === 'generating' || chatPhase === 'executing') return;
 
     if (chatInputRef.current) chatInputRef.current.style.height = 'auto';
+
+    // User is responding to a needs_input prompt — extract values and retry execution
+    if (chatPhase === 'awaiting_input' && pendingExecuteMsg) {
+      appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: text });
+      // Parse key=value / "key: value" pairs and well-known credential patterns
+      const inputData: Record<string, string> = {};
+      const emailMatch = text.match(/\b([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b/);
+      if (emailMatch) inputData.email = emailMatch[1];
+      const pwdMatch = text.match(/(?:password|pass(?:word)?|pwd)\s*(?:is|[:=])\s*([^\s,;]+)/i);
+      if (pwdMatch) inputData.password = pwdMatch[1];
+      // Generic "key: value" pairs
+      const kvMatches = text.matchAll(/(\w+)\s*[:=]\s*([^\s,;]+)/g);
+      for (const m of kvMatches) {
+        const k = m[1].toLowerCase();
+        if (!inputData[k]) inputData[k] = m[2];
+      }
+      await handleChatExecute(pendingExecuteMsg, inputData);
+      return;
+    }
 
     const intent = detectIntent(text);
 
@@ -1101,7 +1142,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           const sseSteps = m.steps;
           if (sseSteps.length > 0) {
             const hasError = sseSteps.some(s => s.error);
-            return { ...m, status: hasError ? 'error' : 'done' };
+            return { ...m, status: hasError ? 'error' : 'done', tokens_used: data.tokens_used ?? 0, cost_usd: data.cost_usd ?? 0 };
           }
           // Fallback: use HTTP response steps (SSE may have been missed)
           const returnedSteps: RecordedStep[] = (data.steps || []).map((s: any, idx: number) => ({
@@ -1119,7 +1160,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             ai_suggestion: s.ai_suggestion ?? null,
           }));
           const hasError = returnedSteps.some(s => s.error);
-          return { ...m, steps: returnedSteps, status: hasError ? 'error' : 'done' };
+          return { ...m, steps: returnedSteps, status: hasError ? 'error' : 'done', tokens_used: data.tokens_used ?? 0, cost_usd: data.cost_usd ?? 0 };
         })
       );
       setRecStatus('active');
@@ -1293,22 +1334,14 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           </div>
           <h1 className={styles.title}>Generate Test Cases</h1>
           {/* LLM Provider — top-right corner */}
-          <select
-            className={styles.headerProviderSelect}
+          <ProviderSelect
             value={mode === 'record' ? recProvider : selectedProvider}
-            onChange={e => {
-              const val = e.target.value as typeof recProvider;
-              if (mode === 'record') setRecProvider(val);
+            onChange={val => {
+              if (mode === 'record') setRecProvider(val as typeof recProvider);
               else setSelectedProvider(val);
             }}
             disabled={loading || recStatus === 'executing' || recStatus === 'completing'}
-            title="AI Provider"
-          >
-            <option value="groq">Groq (Llama 3.1)</option>
-            <option value="openai">OpenAI (GPT-4o)</option>
-            <option value="anthropic">Anthropic (Claude)</option>
-            <option value="waymore">Waymore AI</option>
-          </select>
+          />
         </div>
         <p className={styles.subtitle}>
           Auto-generate from URL or record tests interactively in a live browser.
@@ -1322,14 +1355,14 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           onClick={() => setMode('generate')}
         >
           <Sparkles size={14} />
-          Generate from URL
+          Generate with AI
         </button>
         <button
           className={`${styles.modeTab} ${mode === 'record' ? styles.modeTabActive : ''}`}
           onClick={() => setMode('record')}
         >
           <Video size={14} />
-          Record Mode
+          Record with AI
         </button>
       </div>
 
@@ -1727,6 +1760,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                       ? 'Analyzing page…'
                       : chatPhase === 'executing'
                       ? 'Waiting for execution to finish…'
+                      : chatPhase === 'awaiting_input'
+                      ? 'e.g. email: user@example.com  password: mypassword'
                       : 'Ask a question, share credentials, or type "Execute all"…'
                   }
                   value={chatTextInput}
@@ -1760,6 +1795,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                 {chatPhase === 'url_input' && <span>Paste a URL and press Enter to analyze</span>}
                 {chatPhase === 'analyzing' && <span style={{ color: '#6366f1' }}>Scraping page elements…</span>}
                 {chatPhase === 'executing' && <span style={{ color: '#f59e0b', fontWeight: 600 }}>Executing tests…</span>}
+                {chatPhase === 'awaiting_input' && <span style={{ color: '#f59e0b', fontWeight: 600 }}>Provide the missing values above, then press Enter</span>}
                 {(chatPhase === 'chatting' || chatPhase === 'generating' || chatPhase === 'done') && (
                   <span>Enter to send · Shift+Enter for newline · share credentials to use in tests</span>
                 )}
@@ -1779,25 +1815,23 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
           {/* ── IDLE / SETUP STATE — chatbot style ── */}
           {(recStatus === 'idle' || recStatus === 'error') && !recResult && (
-            <div className={styles.chatMessages}>
+            <div className={styles.chatMessages} style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-start' }}>
               {/* Image analysis warning (shown in idle state too) */}
               {imageAnalysisEnabled && (
                 <div style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 8,
-                  padding: '8px 14px',
-                  background: '#fef9c3',
-                  border: '1px solid #fde047',
-                  borderRadius: 8,
-                  fontSize: '0.78rem',
-                  color: '#713f12',
-                  marginBottom: 12,
+                  gap: 6,
+                  padding: '5px 10px',
+                  background: 'transparent',
+                  borderLeft: '2px solid #d4a800',
+                  borderRadius: 0,
+                  fontSize: '0.73rem',
+                  color: '#92730a',
+                  marginBottom: 10,
                 }}>
-                  <Zap size={13} style={{ color: '#b45309', flexShrink: 0 }} />
-                  <span>
-                    <strong>Image analysis is ON</strong> — when a selector cannot be found, a screenshot is sent to the vision model. Be aware of token usage.
-                  </span>
+                  <Zap size={11} style={{ color: '#d4a800', flexShrink: 0 }} />
+                  <span>Vision fallback active — screenshots sent to vision model on selector failure.</span>
                 </div>
               )}
               <motion.div
@@ -1806,7 +1840,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                 transition={{ duration: 0.3 }}
               >
                 {/* Bot greeting bubble */}
-                <div className={styles.chatBotMessage} style={{ marginBottom: 24 }}>
+                <div className={styles.chatBotMessage} style={{ marginBottom: 0 }}>
                   <div className={styles.chatBotAvatar}>
                     <Sparkles size={14} />
                   </div>
@@ -1871,19 +1905,16 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                 <div style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 8,
-                  padding: '7px 14px',
-                  background: '#fef9c3',
-                  border: '1px solid #fde047',
-                  borderRadius: 6,
-                  fontSize: '0.78rem',
-                  color: '#713f12',
-                  margin: '0 0 6px',
+                  gap: 6,
+                  padding: '5px 10px',
+                  background: 'transparent',
+                  borderLeft: '2px solid #d4a800',
+                  fontSize: '0.73rem',
+                  color: '#92730a',
+                  margin: '0 0 8px',
                 }}>
-                  <Zap size={13} style={{ color: '#b45309', flexShrink: 0 }} />
-                  <span>
-                    <strong>Image analysis is ON</strong> — screenshots are sent to the vision model when a selector fails. Be aware of token usage.
-                  </span>
+                  <Zap size={11} style={{ color: '#d4a800', flexShrink: 0 }} />
+                  <span>Vision fallback active — screenshots sent to vision model on selector failure.</span>
                 </div>
               )}
 
@@ -2006,6 +2037,14 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                                     {msg.status === 'done' && (
                                       <CheckCircle2 size={14} style={{ color: '#22c55e' }} />
                                     )}
+                                    {msg.status === 'done' && msg.tokens_used != null && msg.tokens_used > 0 && (
+                                      <span style={{
+                                        fontSize: '0.68rem', color: '#94a3b8',
+                                        marginLeft: 4, whiteSpace: 'nowrap',
+                                      }}>
+                                        · {msg.tokens_used.toLocaleString()} tokens · ${(msg.cost_usd ?? 0).toFixed(5)}
+                                      </span>
+                                    )}
                                     {msg.status === 'error' && (
                                       <XCircle size={14} style={{ color: '#ef4444' }} />
                                     )}
@@ -2018,6 +2057,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                                         title={confirmedMessages.has(msg.id) ? 'Remove from export' : 'Approve steps for export'}
                                       >
                                         <Check size={10} />
+                                        {confirmedMessages.has(msg.id) ? 'Approved' : 'Approve'}
                                       </button>
                                     )}
                                     {msg.steps.length > 0 && (
@@ -2187,37 +2227,26 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                   </div>
 
                   {recPanelView === 'browser' && (
-                    <>
-                      <div className={styles.browserPanelHeader}>
-                        <Camera size={13} />
-                        <span>Live Browser View</span>
-                        {recCurrentUrl && (
-                          <span className={styles.screenshotCurrentUrl} title={recCurrentUrl}>
-                            {recCurrentUrl}
-                          </span>
-                        )}
-                      </div>
-                      <div className={styles.browserPanelBody}>
-                        {recScreenshot ? (
-                          <img
-                            src={`data:image/png;base64,${recScreenshot}`}
-                            alt="Browser screenshot"
-                            className={styles.screenshotImg}
-                            style={{ width: '100%', height: '100%', objectFit: 'contain', objectPosition: 'top', display: 'block' }}
-                          />
-                        ) : (
-                          <div className={styles.screenshotPlaceholder}>
-                            <MonitorPlay size={48} style={{ color: '#cbd5e1' }} />
-                            <span>Screenshot will appear after each action</span>
-                          </div>
-                        )}
-                        {recStatus === 'executing' && (
-                          <div className={styles.screenshotExecutingOverlay}>
-                            <Loader2 size={28} className={styles.spin} style={{ color: '#6366f1' }} />
-                          </div>
-                        )}
-                      </div>
-                    </>
+                    <div className={styles.browserPanelBody}>
+                      {recScreenshot ? (
+                        <img
+                          src={`data:image/png;base64,${recScreenshot}`}
+                          alt="Browser screenshot"
+                          className={styles.screenshotImg}
+                          style={{ width: '100%', height: '100%', objectFit: 'fill', display: 'block' }}
+                        />
+                      ) : (
+                        <div className={styles.screenshotPlaceholder}>
+                          <MonitorPlay size={48} style={{ color: '#cbd5e1' }} />
+                          <span>Screenshot will appear after each action</span>
+                        </div>
+                      )}
+                      {recStatus === 'executing' && (
+                        <div className={styles.screenshotExecutingOverlay}>
+                          <Loader2 size={28} className={styles.spin} style={{ color: '#6366f1' }} />
+                        </div>
+                      )}
+                    </div>
                   )}
 
                   {recPanelView === 'excel' && (
@@ -2529,13 +2558,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                       if (e.key === 'Enter' && canStartRecording) handleStartRecording();
                     }}
                     autoFocus
-                  />
-                  <input
-                    className={styles.idleConfigInputSm}
-                    type="text"
-                    placeholder="App name (optional)"
-                    value={recAppName}
-                    onChange={e => setRecAppName(e.target.value)}
                   />
                 </div>
                 {recError && (

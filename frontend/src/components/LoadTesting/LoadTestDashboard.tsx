@@ -5,6 +5,7 @@ import { useLoadTestSSE } from '../../hooks/useLoadTestSSE';
 import { LiveCharts } from './LiveCharts';
 import type { MetricsHistoryPoint } from './LiveCharts';
 import styles from './LoadTestDashboard.module.css';
+import { ProviderSelect } from '../ProviderSelect/ProviderSelect';
 import { Upload, Play, Square, Zap, Users, TrendingUp, Clock, AlertCircle, BarChart3, Grid3x3, Wrench, CheckCircle, Loader, ChevronDown, ChevronRight, RefreshCw, Brain, Activity, Gauge, Server, Network, FileUp, MousePointerClick, Settings, Rocket } from 'lucide-react';
 
 // Use relative URL to leverage Vite proxy
@@ -889,18 +890,11 @@ export const LoadTestDashboard: React.FC = () => {
           {/* AI Provider Selector */}
           <div className={styles.llmSelector}>
             <Brain size={16} />
-            <select
+            <ProviderSelect
               value={llmProvider}
-              onChange={(e) => setLlmProvider(e.target.value as LLMProvider)}
-              className={styles.llmSelect}
+              onChange={(val) => setLlmProvider(val as LLMProvider)}
               disabled={isLoadTesting}
-              title="Select AI Provider for Analysis"
-            >
-              <option value="groq">Groq (Fast)</option>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="waymore">Waymore AI</option>
-            </select>
+            />
           </div>
           <button
             className={styles.refreshButton}

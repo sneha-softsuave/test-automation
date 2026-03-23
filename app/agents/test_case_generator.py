@@ -14,6 +14,16 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _trim_history(history: list, max_turns: int = 8, max_chars_per_msg: int = 600) -> list:
+    """Cap history to last max_turns, truncate long messages."""
+    trimmed = history[-max_turns:]
+    return [
+        {"role": m["role"], "content": m["content"][:max_chars_per_msg]}
+        for m in trimmed
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Prompt
 # ---------------------------------------------------------------------------
@@ -580,37 +590,57 @@ class TestCaseGeneratorAgent(BaseAgent):
                 f"What would you like to test?"
             )
 
-    def answer_question(self, compact: Dict[str, Any], question: str) -> str:
+    def answer_question(self, compact: Dict[str, Any], question: str, history: list = None) -> str:
         """
         Answer an informational question about the page without generating test cases.
         """
         import json as _json
-        prompt = INFORMATIONAL_PROMPT.format(
-            compact_json=_json.dumps(compact, indent=2),
-            question=question,
+        system = (
+            "You are an expert test assistant. The following is the structure of the page "
+            "currently being analysed:\n\n"
+            + _json.dumps(compact, indent=2)
         )
+        messages = _trim_history(history or []) + [{"role": "user", "content": question}]
         try:
-            return self.call_llm(prompt).strip()
+            return self.call_llm_chat(system, messages).strip()
         except Exception as e:
             logger.warning(f"[answer_question] LLM call failed: {e}")
-            return "I can see the page has been analysed. Could you clarify what you'd like to know?"
+            try:
+                prompt = INFORMATIONAL_PROMPT.format(
+                    compact_json=_json.dumps(compact, indent=2),
+                    question=question,
+                )
+                return self.call_llm(prompt).strip()
+            except Exception:
+                return "I can see the page has been analysed. Could you clarify what you'd like to know?"
 
-    def generate_edit(self, test_suite: Dict[str, Any], instruction: str) -> Dict[str, Any]:
+    def generate_edit(self, test_suite: Dict[str, Any], instruction: str, history: list = None) -> Dict[str, Any]:
         """
         Apply a surgical edit to an existing test suite based on user instruction.
         Returns the updated test suite dict.
         """
         import json as _json
-        prompt = EDIT_PROMPT.format(
-            suite_json=_json.dumps(test_suite, indent=2),
-            instruction=instruction,
+        system = (
+            "You are a Playwright test case editor. Edit the test suite below according "
+            "to the user's instruction. Return valid JSON only.\n\n"
+            "Current test suite:\n" + _json.dumps(test_suite, indent=2)
         )
+        messages = _trim_history(history or []) + [{"role": "user", "content": instruction}]
         try:
-            raw = self.call_llm(prompt)
+            raw = self.call_llm_chat(system, messages)
             return self._parse_json_response(raw)
         except Exception as e:
-            logger.error(f"[generate_edit] Failed: {e}")
-            raise
+            logger.warning(f"[generate_edit] multi-turn failed ({e}), falling back to single-turn")
+            try:
+                prompt = EDIT_PROMPT.format(
+                    suite_json=_json.dumps(test_suite, indent=2),
+                    instruction=instruction,
+                )
+                raw = self.call_llm(prompt)
+                return self._parse_json_response(raw)
+            except Exception as e2:
+                logger.error(f"[generate_edit] Failed: {e2}")
+                raise
 
     def generate_confirm(self, test_suite: Dict[str, Any], compact: Dict[str, Any]) -> str:
         """

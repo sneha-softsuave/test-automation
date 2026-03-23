@@ -261,3 +261,17 @@ async def set_vision_provider(body: VisionProviderSet):
     _vision_provider = provider
     settings.VISION_PROVIDER = provider
     return {"vision_provider": _vision_provider}
+
+
+@router.get("/token-usage")
+async def get_token_usage():
+    """Return cumulative LLM token + cost stats."""
+    from app.utils.logger import get_stats
+    return get_stats()
+
+@router.post("/token-usage/reset")
+async def reset_token_usage():
+    """Reset all token usage records."""
+    from app.utils.logger import reset_records
+    reset_records()
+    return {"status": "reset"}

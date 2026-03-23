@@ -550,6 +550,7 @@ def _execute_single_test_sync(
                         instruction=instruction,
                         signal_file=signal_file,
                         run_context=run_context,
+                        failed_selectors=failed_selectors,
                     )
 
                     # Success!
@@ -797,13 +798,16 @@ def _execute_single_test_sync(
     return result
 
 
-def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = None, action_type: str = None, instruction: str = "") -> Optional[str]:
+def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = None, action_type: str = None, instruction: str = "", failed_selectors: List[str] = None) -> Optional[str]:
     """
     Get the best working selector from hints (sync version).
     Validates element type matches the action (fill needs input/textarea, etc.)
     Passes instruction for keyword-based icon button matching when element_name is empty.
+    Skips selectors that have already failed (failed_selectors) and skips ambiguous
+    multi-match selectors for click actions (strict-mode risk).
     """
-    suggested = selector_hints.get("suggested_selectors", [])
+    failed_selectors = failed_selectors or []
+    suggested = [s for s in selector_hints.get("suggested_selectors", []) if s not in failed_selectors]
     element_name = selector_hints.get("element_name")
     element_type = selector_hints.get("element_type", "")
 
@@ -837,21 +841,38 @@ def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = N
             py_selector = _convert_selector_to_python(selector)
             if py_selector:
                 locator = _create_locator_sync(page, py_selector)
-                if locator and locator.count() > 0:
+                if locator:
+                    count = locator.count()
+                    if count == 0:
+                        continue
+                    # Skip ambiguous multi-match selectors for click — strict mode
+                    # will throw if the locator resolves to more than one element.
+                    if count > 1 and action_type == "click":
+                        print(f"    Skipping ambiguous selector (count={count}): {py_selector}")
+                        continue
                     # Validate element is appropriate for the action
                     if _validate_element_for_action(page, locator, action_type):
                         return py_selector
         except Exception:
             continue
 
-    # NEW: Try alternative selectors (from retry logic)
-    alternative_selectors = selector_hints.get("alternative_selectors", [])
+    # NEW: Try alternative selectors (from retry logic), excluding already-failed ones
+    alternative_selectors = [
+        s for s in selector_hints.get("alternative_selectors", [])
+        if s not in failed_selectors
+    ]
     for alt_selector in alternative_selectors:
         try:
             py_selector = _convert_selector_to_python(alt_selector)
             if py_selector:
                 locator = _create_locator_sync(page, py_selector)
-                if locator and locator.count() > 0:
+                if locator:
+                    count = locator.count()
+                    if count == 0:
+                        continue
+                    if count > 1 and action_type == "click":
+                        print(f"    Skipping ambiguous alternative selector (count={count}): {py_selector}")
+                        continue
                     if _validate_element_for_action(page, locator, action_type):
                         print(f"    Alternative selector worked: {alt_selector}")
                         return py_selector
@@ -2240,8 +2261,10 @@ def _execute_action_sync(
     instruction: str = "",
     signal_file=None,
     run_context: Dict = None,
+    failed_selectors: List[str] = None,
 ) -> Optional[str]:
     """Execute a single action from enhanced format (sync version)."""
+    failed_selectors = failed_selectors or []
     selector_used = None
 
     if action_type == "goto":
@@ -2364,7 +2387,7 @@ def _execute_action_sync(
                 value = creds.get("email", "")
 
         # Try to get best selector
-        selector = _get_best_selector_sync(page, selector_hints, step_test_data, action_type="fill", instruction=instruction)
+        selector = _get_best_selector_sync(page, selector_hints, step_test_data, action_type="fill", instruction=instruction, failed_selectors=failed_selectors)
 
         # Verify the selector actually finds a visible, fillable element
         fill_success = False
@@ -2441,7 +2464,7 @@ def _execute_action_sync(
             print(f"    WARNING: Fill executed with empty value - test_data was null/empty and no value found in instruction")
 
     elif action_type == "click":
-        selector = _get_best_selector_sync(page, selector_hints, step_test_data, action_type="click", instruction=instruction)
+        selector = _get_best_selector_sync(page, selector_hints, step_test_data, action_type="click", instruction=instruction, failed_selectors=failed_selectors)
 
         # Fast-path for login/submit buttons: if selector still not found, try
         # button[type="submit"] before running through all text-variation fallbacks.

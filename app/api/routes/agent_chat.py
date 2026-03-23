@@ -51,22 +51,13 @@ class ChatLLM:
     def call_llm(self, prompt: str) -> str:
         """Call the LLM with the given prompt."""
         try:
-            if self.provider == LLMProvider.ANTHROPIC:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.content[0].text.strip()
-
-            elif self.provider in (LLMProvider.OPENAI, LLMProvider.GROQ, LLMProvider.WAYMORE):
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.choices[0].message.content.strip()
-
+            from app.services.llm_wrapper import call_llm as _wrap
+            result = _wrap(
+                provider=self.provider.value, model=self.model,
+                prompt=prompt, client=self.client, max_tokens=self.max_tokens,
+                agent_name="ChatLLM",
+            )
+            return result["text"]
         except Exception as e:
             print(f"[ChatLLM] Error calling LLM: {e}")
             raise

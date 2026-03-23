@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Bot, MessageSquare, FlaskConical, Play, FileCheck, Download, Menu, X, Zap, Wrench, ChevronDown, ChevronRight, BarChart3, Terminal, Brain, Settings, Sparkles, FolderOpen } from 'lucide-react';
+import { Bot, MessageSquare, FlaskConical, Play, FileCheck, Download, Menu, X, Zap, Wrench, ChevronDown, ChevronRight, BarChart3, Terminal, Brain, Settings, Sparkles, FolderOpen, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useStore } from '../../store/useStore';
 import { listProjects, type ProjectSummary } from '../../services/api';
@@ -30,6 +30,7 @@ const loadTestItems = [
 export const Layout = ({ children }: LayoutProps) => {
   const { currentView, setCurrentView, testSuite, executionResult, rawTestCases, selectedProjectName, setSelectedProjectName } = useStore();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [functionalTestExpanded, setFunctionalTestExpanded] = useState(false);
   const [loadTestExpanded, setLoadTestExpanded] = useState(false);
   const [projectsExpanded, setProjectsExpanded] = useState(false);
@@ -118,27 +119,36 @@ export const Layout = ({ children }: LayoutProps) => {
     <div className={styles.layout}>
       {/* Sidebar */}
       <motion.aside
-        className={`${styles.sidebar} ${mobileMenuOpen ? styles.open : ''}`}
+        className={`${styles.sidebar} ${mobileMenuOpen ? styles.open : ''} ${sidebarCollapsed ? styles.collapsed : ''}`}
         initial={{ x: -100, opacity: 0 }}
         animate={{ x: 0, opacity: 1 }}
         transition={{ duration: 0.5, ease: 'easeOut' }}
       >
-        {/* Logo */}
-        <motion.div
-          className={styles.logo}
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-        >
-          <div className={styles.logoIcon}>
-            <Bot size={28} />
-            <div className={styles.logoGlow} />
-          </div>
-          <div className={styles.logoText}>
-            <span className={styles.logoTitle}>DEEP</span>
-            <span className={styles.logoSubtitle}>AGENT</span>
-          </div>
-        </motion.div>
+        {/* Sidebar Header: Logo + Collapse Button */}
+        <div className={styles.sidebarHeader}>
+          <motion.div
+            className={styles.logo}
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2 }}
+          >
+            <div className={styles.logoIcon}>
+              <Bot size={28} />
+              <div className={styles.logoGlow} />
+            </div>
+            <div className={styles.logoText}>
+              <span className={styles.logoTitle}>DEEP</span>
+              <span className={styles.logoSubtitle}>AGENT</span>
+            </div>
+          </motion.div>
+          <button
+            className={styles.collapseButton}
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
+          </button>
+        </div>
 
         {/* Navigation */}
         <nav className={styles.nav}>
@@ -150,6 +160,7 @@ export const Layout = ({ children }: LayoutProps) => {
           >
             <button
               className={`${styles.navItem} ${styles.navParent} ${currentView === 'projects' ? styles.active : ''}`}
+              title={sidebarCollapsed ? 'Projects' : undefined}
               onClick={() => {
                 if (!projectsExpanded) setProjectsExpanded(true);
                 setCurrentView('projects');
@@ -230,6 +241,7 @@ export const Layout = ({ children }: LayoutProps) => {
           >
             <button
               className={`${styles.navItem} ${styles.navParent} ${isFunctionalTestActive ? styles.active : ''}`}
+              title={sidebarCollapsed ? 'Functional Test' : undefined}
               onClick={handleFunctionalTestClick}
             >
               <div className={styles.navItemIcon}>
@@ -308,6 +320,7 @@ export const Layout = ({ children }: LayoutProps) => {
           >
             <button
               className={`${styles.navItem} ${styles.navParent} ${isLoadTestActive ? styles.active : ''}`}
+              title={sidebarCollapsed ? 'Load Test' : undefined}
               onClick={handleLoadTestClick}
             >
               <div className={styles.navItemIcon}>
@@ -386,6 +399,7 @@ export const Layout = ({ children }: LayoutProps) => {
           >
             <button
               className={`${styles.navItem} ${currentView === 'settings' ? styles.active : ''}`}
+              title={sidebarCollapsed ? 'Settings' : undefined}
               onClick={() => {
                 setCurrentView('settings');
                 setMobileMenuOpen(false);
@@ -442,7 +456,7 @@ export const Layout = ({ children }: LayoutProps) => {
       </div>
 
       {/* Main Content */}
-      <main className={styles.main}>
+      <main className={`${styles.main} ${sidebarCollapsed ? styles.collapsed : ''}`}>
         <motion.div
           className={styles.content}
           initial={{ opacity: 0, y: 20 }}

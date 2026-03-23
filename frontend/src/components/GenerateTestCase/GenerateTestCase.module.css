@@ -10,20 +10,21 @@
   height: 100%;
   min-height: 0;
   max-width: 100%;
+  overflow: hidden;
   position: relative;
 }
 
 /* ─── Header ─────────────────────────────────────────────────── */
 .header {
   flex-shrink: 0;
-  padding: 0 0 16px 0;
+  padding: 4px 0 8px 0;
 }
 
 .headerTop {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 6px;
+  gap: 10px;
+  margin-bottom: 0;
 }
 
 /* LLM provider pill in top-right of header */
@@ -74,43 +75,41 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: #f1f5f9;
+  background: #000;
+  min-height: 0;
 }
 
 .headerIcon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 32px;
+  height: 32px;
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
-  border-radius: 10px;
+  border-radius: 8px;
   color: white;
   flex-shrink: 0;
 }
 
 .title {
-  font-size: 1.5rem;
+  font-size: 1.25rem;
   font-weight: 700;
   color: #0f172a;
   margin: 0;
 }
 
 .subtitle {
-  font-size: 0.875rem;
-  color: #64748b;
-  margin: 0;
-  padding-left: 52px;
+  display: none;
 }
 
 /* ─── Mode Tabs ───────────────────────────────────────────────── */
 .modeTabs {
   display: flex;
-  gap: 4px;
+  gap: 3px;
   margin-bottom: 0;
   background: #f1f5f9;
-  border-radius: 12px;
-  padding: 4px;
+  border-radius: 10px;
+  padding: 3px;
   flex-shrink: 0;
 }
 
@@ -119,11 +118,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 10px 16px;
+  gap: 6px;
+  padding: 7px 14px;
   border: none;
-  border-radius: 9px;
-  font-size: 0.875rem;
+  border-radius: 8px;
+  font-size: 0.8125rem;
   font-weight: 600;
   color: #64748b;
   background: transparent;
@@ -155,7 +154,7 @@
   flex: 1;
   min-height: 0;
   position: relative;
-  margin-top: 16px;
+  margin-top: 8px;
 }
 
 /* Scrollable messages / content area */
@@ -168,15 +167,14 @@
   scroll-behavior: smooth;
 }
 
-/* ─── Empty / Hero state (centered, ChatGPT style) ─────────────── */
+/* ─── Empty / Hero state (top-aligned, chat style) ─────────────── */
 .chatEmptyState {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 280px;
-  padding: 40px 20px 20px;
-  text-align: center;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 16px 20px 20px;
+  text-align: left;
 }
 
 .chatEmptyIcon {
@@ -219,10 +217,10 @@
 .chatInputBar {
   flex-shrink: 0;
   margin-top: auto;
-  padding: 16px 0 8px;
-  border-top: 2px solid #e2e8f0;
+  padding: 10px 0 6px;
+  border-top: 1px solid #e8edf3;
   background: white;
-  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 -3px 12px rgba(0, 0, 0, 0.05);
 }
 
 /* Inner wrapper — constrained width like ChatGPT */
@@ -238,11 +236,11 @@
   align-items: flex-end;
   gap: 8px;
   background: white;
-  border: 2px solid #c7d2fe;
-  border-radius: 16px;
-  padding: 12px 12px 12px 18px;
+  border: 1.5px solid #c7d2fe;
+  border-radius: 12px;
+  padding: 8px 8px 8px 14px;
   transition: border-color 0.2s, box-shadow 0.2s;
-  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.08);
+  box-shadow: 0 1px 4px rgba(99, 102, 241, 0.07);
 }
 
 .chatInputBox:focus-within {
@@ -278,9 +276,9 @@
 /* Send / Execute button inside input box */
 .chatSendBtn {
   flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   border: none;
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
   color: white;
@@ -534,13 +532,13 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
 }
 
 .chatBotAvatar {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
   display: flex;
   align-items: center;
@@ -557,10 +555,11 @@
 
 /* Step result card */
 .chatStepCard {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  border: 1px solid #e8edf3;
   border-radius: 12px;
   overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
 }
 
 .chatStepCardError {
@@ -572,7 +571,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 12px 16px;
   cursor: pointer;
   user-select: none;
   transition: background 0.15s;
@@ -619,43 +618,54 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
   border: 1.5px solid;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
-  padding: 0;
   flex-shrink: 0;
   background: transparent;
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: inherit;
+  white-space: nowrap;
 }
 
 .confirmBtnActive {
-  background: #22c55e;
-  border-color: #22c55e;
+  background: #16a34a;
+  border-color: #16a34a;
   color: #fff;
 }
 
+.confirmBtnActive:hover {
+  background: #15803d;
+  border-color: #15803d;
+}
+
 .confirmBtnInactive {
-  border-color: #cbd5e1;
-  color: #cbd5e1;
+  border-color: #d1d5db;
+  color: #6b7280;
+  background: #f9fafb;
 }
 
 .confirmBtnInactive:hover {
-  border-color: #22c55e;
-  color: #22c55e;
+  border-color: #16a34a;
+  color: #16a34a;
+  background: #f0fdf4;
 }
 
 /* Expanded sub-steps */
 .chatSubSteps {
-  border-top: 1px solid #e2e8f0;
-  padding: 10px 14px;
+  border-top: 1px solid #edf0f4;
+  padding: 6px 16px 16px;
 }
 
 .recStep {
   display: flex;
-  gap: 10px;
-  padding: 7px 0;
+  gap: 12px;
+  padding: 10px 0;
   border-bottom: 1px solid #f1f5f9;
 }
 
@@ -690,8 +700,8 @@
 .recStepInstruction {
   font-size: 0.8125rem;
   color: #334155;
-  margin: 0 0 4px;
-  line-height: 1.4;
+  margin: 0 0 6px;
+  line-height: 1.5;
 }
 
 .recStepMeta {
@@ -761,23 +771,26 @@
 /* Horizontal split: fills space between status bar and input bar */
 .recSplitLayout {
   display: flex;
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
+  min-width: 0;
   gap: 12px;
+  overflow: hidden;
 }
 
 /* Left: scrollable steps + action bar + input */
 .recLeftPanel {
-  flex: 1;
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 /* Right: large browser view */
 .recRightPanel {
-  flex: 1;
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -900,34 +913,34 @@
 .idleGreetingBubble {
   background: #f8fafc;
   border: 1px solid #e2e8f0;
-  border-radius: 0 14px 14px 14px;
-  padding: 14px 18px;
-  max-width: 520px;
+  border-radius: 0 10px 10px 10px;
+  padding: 10px 14px;
+  max-width: 480px;
 }
 
 .idleGreetingText {
-  font-size: 0.9rem;
+  font-size: 0.8125rem;
   color: #334155;
-  line-height: 1.6;
-  margin: 0 0 12px;
+  line-height: 1.55;
+  margin: 0 0 8px;
 }
 
 .idleChips {
   display: flex;
-  gap: 8px;
+  gap: 5px;
   flex-wrap: wrap;
 }
 
 .idleChip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  font-size: 0.75rem;
+  gap: 4px;
+  font-size: 0.7rem;
   font-weight: 600;
   color: #6366f1;
-  background: rgba(99, 102, 241, 0.08);
-  border: 1px solid rgba(99, 102, 241, 0.2);
-  padding: 3px 10px;
+  background: rgba(99, 102, 241, 0.07);
+  border: 1px solid rgba(99, 102, 241, 0.18);
+  padding: 2px 8px;
   border-radius: 20px;
 }
 
@@ -958,16 +971,21 @@
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
+}
+
+.idleUrlRow .idleConfigInput {
+  flex: 1;
+  width: 100%;
 }
 
 .idleConfigInput {
   flex: 2;
   min-width: 180px;
-  padding: 9px 14px;
+  padding: 7px 12px;
   border: 1.5px solid #e2e8f0;
-  border-radius: 10px;
-  font-size: 0.875rem;
+  border-radius: 8px;
+  font-size: 0.8125rem;
   color: #1e293b;
   background: #f8fafc;
   transition: border-color 0.2s, box-shadow 0.2s;
@@ -1591,16 +1609,17 @@
 
 /* ─── Record mode Excel grid ─────────────────────────────── */
 .recExcelGrid {
-  flex: 1;
+  flex: 1 1 0;
   overflow: auto;
   min-height: 0;
+  min-width: 0;
+  width: 100%;
   background: #fff;
-  display: flex;
-  flex-direction: column;
 }
 
 .recExcelEmpty {
-  flex: 1;
+  height: 100%;
+  min-height: 200px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1715,17 +1734,14 @@
 
 /* Row status colours — applied directly on each cell */
 .recExcelRowRunning {
-  border-left: 3px solid #3b82f6 !important;
   background: #eff6ff;
 }
 
 .recExcelRowPassed {
-  border-left: 3px solid #22c55e !important;
   background: #f0fdf4;
 }
 
 .recExcelRowFailed {
-  border-left: 3px solid #ef4444 !important;
   background: #fef2f2;
 }
 
@@ -1779,21 +1795,22 @@
 .validationWarning {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
-  margin-top: 6px;
-  padding: 7px 10px;
-  background: #fffbeb;
-  border: 1px solid #fcd34d;
-  border-radius: 7px;
-  color: #92400e;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: #fefdf7;
+  border: 1px solid #e5d87a;
+  border-left: 3px solid #d4a800;
+  border-radius: 8px;
+  color: #6b4f00;
   font-size: 0.75rem;
 }
 
 .valErrors {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  color: #b91c1c;
+  gap: 3px;
+  color: #9f2020;
   font-size: 0.75rem;
 }
 
@@ -1802,10 +1819,11 @@
 }
 
 .aiSuggestion {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   font-size: 0.75rem;
-  font-style: italic;
-  color: #1d4ed8;
+  font-style: normal;
+  color: #475569;
+  line-height: 1.55;
 }
 
 /* ═══════════════════════════════════════════════════════════════

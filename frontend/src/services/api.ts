@@ -541,4 +541,25 @@ export async function deleteProject(name: string): Promise<void> {
   await api.delete(`/projects/${encodeURIComponent(name)}`);
 }
 
+export interface TokenUsageStats {
+  total_calls: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  by_provider: Record<string, {
+    calls: number; input_tokens: number;
+    output_tokens: number; total_tokens: number; cost_usd: number;
+  }>;
+  recent_calls: Array<{
+    timestamp: string; agent: string; provider: string; model: string;
+    input_tokens: number; output_tokens: number; total_tokens: number; cost_usd: number;
+  }>;
+}
+export const fetchTokenUsage = async (): Promise<TokenUsageStats> =>
+  (await api.get('/token-usage')).data;
+export const resetTokenUsage = async (): Promise<void> => {
+  await api.post('/token-usage/reset');
+};
+
 export default api;

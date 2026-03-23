@@ -17,6 +17,12 @@ The server will:
 """
 import sys
 import asyncio
+import io
+
+# Fix Windows console encoding for Unicode/emoji characters
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # Fix Windows asyncio subprocess issue - must be done before any async code runs
 if sys.platform == "win32":
