@@ -290,9 +290,22 @@ INFORMATIONAL — User wants to know something or see information (no action req
   Examples: "what test cases do I have?", "show me step 3", "how many tests?"
 
 APPROVE — User wants to save/confirm execution RESULTS to the Excel report
-  Keywords: add to excel, save results, approve, confirm, export, approve test case N, yes approve
-  Examples: "add test 1 to excel", "save all results", "approve test case 1", "confirm TC2",
-            "yes approve test case 1", "approve all", "approve tc 2"
+  Keywords: add to excel, save results, approve, confirm, export, approve test step N, yes approve
+  Sub-modes (set approve_mode in metadata):
+    • "individual"   — default; approve specific step(s) or all as separate rows
+      Examples: "approve test step 1", "add TS_001 to excel", "approve all", "confirm TS_002"
+    • "group"        — combine a SINGLE RANGE of steps into ONE Excel row
+      Examples: "add test steps from 1 to 10", "group steps 3 to 7 into one row",
+                "append steps 1 to 5 as a single test case"
+      → set approve_range: {{"from": N, "to": M}}
+    • "multi_group"  — TWO OR MORE named ranges, each becoming a SEPARATE Excel row with its own summary
+      Examples: "add 1 to 5 in one row and 6 to 10 in another row",
+                "add steps 1 to 3 as one case and 4 to 7 as another",
+                "put 1-5 in row 1 and 6-10 in row 2"
+      → set approve_ranges: [{{"from": N1, "to": M1}}, {{"from": N2, "to": M2}}, ...]
+    • "list_unadded" — list every executed step not yet in Excel, then ask to confirm
+      Examples: "export to excel", "export all results", "list unadded steps",
+                "what steps haven't been added yet?", "show me what's not in excel"
   ⚠ "click approve button" = EXECUTE (browser action, not saving to Excel)
 
 GENERATE — Create NEW test cases or expand the test suite
@@ -309,7 +322,10 @@ CLARIFY — Intent is genuinely ambiguous — multiple intents equally possible
 ━━━ PRIORITY RULES (stop at first match) ━━━
 0. "execute"/"run"/"play"/"start" + (digit OR "all" OR known test name) → EXECUTE immediately
 1. Any clear execute action word + test reference or UI element → EXECUTE
-2. approve/confirm + "test case N" or "tc N" or "excel/results/export" → APPROVE
+2. approve/confirm + "test step N" or "ts N" or "excel/results/export" → APPROVE
+   "add steps N to M" or "group steps N to M" → APPROVE (mode=group)
+   "add N to M in one row AND P to Q in another" → APPROVE (mode=multi_group)
+   "export to excel" / "list unadded" → APPROVE (mode=list_unadded)
 3. Question word OR "show/list/explain" with no action → INFORMATIONAL
 4. Modify/change/fix existing steps → EDIT
 5. Clearly creating new tests (generate/create/make/write) → GENERATE
@@ -325,7 +341,9 @@ Return ONLY valid JSON, no other text:
   "metadata": {{
     "execute_targets": "all or list of test case names/numbers or null",
     "approve_targets": "all or list of numbers or names or null",
-    "approve_response": "brief confirmation message or null"
+    "approve_mode": "individual|group|multi_group|list_unadded or null",
+    "approve_range": {{"from": N, "to": M}} or null,
+    "approve_ranges": [{{"from": N1, "to": M1}}, {{"from": N2, "to": M2}}] or null
   }}
 }}"""
 

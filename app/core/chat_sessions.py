@@ -27,6 +27,7 @@ def create_session(page_structure: Dict[str, Any], compact: Dict[str, Any]) -> s
         "last_execution_result": None,
         "execution_session_id": None,
         "credentials": {},
+        "max_tc_id": 0,
     }
     return session_id
 
@@ -45,6 +46,7 @@ def create_pending_session() -> str:
         "last_execution_result": None,
         "execution_session_id": None,
         "credentials": {},
+        "max_tc_id": 0,
     }
     return session_id
 
@@ -149,6 +151,21 @@ def clear_pending_approval(session_id: str) -> None:
         session.pop("pending_approval", None)
 
 
+def add_confirmed_ids(session_id: str, ids: list) -> None:
+    """Mark TS IDs as already added to Excel (prevents re-listing them on next export)."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        session.setdefault("confirmed_ids", set()).update(ids)
+
+
+def get_confirmed_ids(session_id: str) -> set:
+    """Return the set of TS IDs already confirmed to Excel."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        return session.get("confirmed_ids", set())
+    return set()
+
+
 def set_credentials(session_id: str, creds: Dict[str, Any]) -> None:
     """Store extracted credentials in the session."""
     session = _sessions.get(session_id)
@@ -162,3 +179,40 @@ def get_credentials(session_id: str) -> Dict[str, Any]:
     if session is not None:
         return session.get("credentials", {})
     return {}
+
+
+def set_pending_row_choice(session_id: str, data: Dict[str, Any]) -> None:
+    """Store unadded results while waiting for user to choose individual vs combined row."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        session["pending_row_choice"] = data
+
+
+def get_pending_row_choice(session_id: str) -> Optional[Dict[str, Any]]:
+    """Return pending row-choice data, or None."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        return session.get("pending_row_choice")
+    return None
+
+
+def clear_pending_row_choice(session_id: str) -> None:
+    """Remove pending row-choice data."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        session.pop("pending_row_choice", None)
+
+
+def get_max_tc_id(session_id: str) -> int:
+    """Return the highest TC ID number assigned so far in this session."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        return session.get("max_tc_id", 0)
+    return 0
+
+
+def set_max_tc_id(session_id: str, value: int) -> None:
+    """Update the global TC ID counter for this session."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        session["max_tc_id"] = value

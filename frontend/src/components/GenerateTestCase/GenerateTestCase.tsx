@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Sparkles, Globe, ChevronDown, ChevronRight,
+  Sparkles, Globe, ChevronDown, ChevronRight, ChevronLeft,
   Play, FileSpreadsheet, AlertCircle, Check,
   Eye, EyeOff, RotateCcw, Video, MonitorPlay, Monitor,
   Circle, CheckCircle2, XCircle, Loader2, Camera, X, Send,
-  Zap, Save, FileJson, Pencil, Copy
+  Zap, Save, FileJson, Pencil, Copy, PanelRightOpen, Maximize2
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { SaveToProjectModal } from './SaveToProjectModal';
@@ -76,6 +76,7 @@ interface ExecTestResult {
   expected_results: string[];
   test_data: Record<string, unknown>;
   error?: string;
+  grouped_ids?: string[];  // TS IDs merged into this row when using group mode
 }
 
 interface ChatMsg {
@@ -247,6 +248,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
   // ── Browser overlay ───────────────────────────────────────────────────────
   const [showBrowserOverlay, setShowBrowserOverlay] = useState(false);
+  const [browserSplit, setBrowserSplit] = useState(false);
 
   // ── Save to Project state ─────────────────────────────────────────────────
   const [showSaveModal, setShowSaveModal] = useState(false);
@@ -434,9 +436,23 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           if (toConfirm.length > 0) {
             setConfirmedExecResults(prev => {
               const existingIds = new Set(prev.map(tc => tc.id));
-              return [...prev, ...toConfirm.filter(tc => !existingIds.has(tc.id))];
+              const existingGroupedIds = new Set(prev.flatMap(tc => tc.grouped_ids ?? []));
+              return [
+                ...prev,
+                ...toConfirm.filter(tc =>
+                  !existingIds.has(tc.id) &&
+                  !(tc.grouped_ids ?? []).some(gid => existingGroupedIds.has(gid))
+                ),
+              ];
             });
-            setConfirmedTcIds(prev => new Set([...prev, ...toConfirm.map(tc => tc.id)]));
+            setConfirmedTcIds(prev => {
+              const next = new Set(prev);
+              toConfirm.forEach(tc => {
+                next.add(tc.id);
+                (tc.grouped_ids ?? []).forEach(gid => next.add(gid));
+              });
+              return next;
+            });
             setExecPanelView('excel');
           }
 
@@ -451,7 +467,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           _resolveThinking({
             id: `ce_${Date.now()}`,
             role: 'assistant',
-            content: `Error: ${String(data.message ?? 'Unknown error')}`,
+            content: String(data.message ?? 'Something went wrong. Please try again.'),
           });
           setChatPhase('chatting');
 
@@ -579,6 +595,26 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     }
   };
 
+  const handleExportConfirmedExcel = async () => {
+    if (confirmedExecResults.length === 0) {
+      addNotification('error', 'No confirmed results to export yet');
+      return;
+    }
+    const suite: GeneratedSuite = {
+      project: lastTestSuite?.project || 'Test Results',
+      base_url: lastTestSuite?.base_url || '',
+      test_cases: confirmedExecResults.map(r => ({
+        id: r.id,
+        name: r.name,
+        steps: r.steps,
+        expected_results: r.expected_results,
+      })),
+      common_selectors: lastTestSuite?.common_selectors || {},
+      test_data: lastTestSuite?.test_data || {},
+    };
+    await handleExportExcel(suite);
+  };
+
   const handleExportRecorderJson = (suite: GeneratedSuite, exportJson?: object) => {
     try {
       const data = exportJson ?? suite;
@@ -662,7 +698,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       // chat_page_ready SSE event will call _resolveThinking + setChatPhase('chatting')
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      _resolveThinking({ id: `ce_${Date.now()}`, role: 'assistant', content: `Error: ${msg}` });
+      _resolveThinking({ id: `ce_${Date.now()}`, role: 'assistant', content: msg });
       setChatPhase('url_input');
       addNotification('error', `Analyse failed: ${msg}`);
     }
@@ -814,7 +850,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         break;
       case 'error':
         if (execSseRef.current) { execSseRef.current.close(); execSseRef.current = null; }
-        appendChatMsg({ id: `ce_${Date.now()}`, role: 'assistant', content: `Execution error: ${data.message}` });
+        appendChatMsg({ id: `ce_${Date.now()}`, role: 'assistant', content: String(data.message ?? 'Execution failed. Please try again.') });
         setChatPhase('chatting');
         break;
     }
@@ -873,7 +909,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       connectExecutionSSE(data.exec_session_id);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      appendChatMsg({ id: `ce_${Date.now()}`, role: 'assistant', content: `Error: ${msg}` });
+      appendChatMsg({ id: `ce_${Date.now()}`, role: 'assistant', content: msg });
       setChatPhase('chatting');
       addNotification('error', `Execute failed: ${msg}`);
     }
@@ -962,7 +998,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       // SSE delivers chat_test_suite / chat_response / chat_approve — already handled by connectSSE
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      _resolveThinking({ id: `ce_${Date.now()}`, role: 'assistant', content: `Error: ${msg}` });
+      _resolveThinking({ id: `ce_${Date.now()}`, role: 'assistant', content: msg });
       setChatPhase('chatting');
     }
     // ────────────────────────────────────────────────────────────────────────
@@ -1401,6 +1437,135 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     return () => window.removeEventListener('keydown', handler);
   }, [showBrowserOverlay]);
 
+  // ── Shared browser panel body (status bar + view toggle + browser/excel) ──
+  // Rendered once; used by both overlay and split panel via layoutId transition
+  const browserPanelBody = (
+    <>
+      {/* Status bar */}
+      <div className={styles.genExecStatusBar}>
+        <span className={`${styles.recStatusDot} ${chatPhase === 'executing' ? styles.recStatusExecuting : styles.recStatusActive}`} />
+        <span className={styles.genExecStatusText}>
+          {chatPhase === 'executing'
+            ? (execSteps.filter(s => s.test_id !== 'system' && s.status === 'running').length > 0
+                ? `Running: ${execSteps.find(s => s.test_id !== 'system' && s.status === 'running')?.test_name ?? '…'}`
+                : 'Preparing execution…')
+            : chatPhase === 'analyzing'
+            ? 'Analyzing page…'
+            : confirmedExecResults.length > 0
+            ? `${confirmedExecResults.length} result${confirmedExecResults.length !== 1 ? 's' : ''} confirmed`
+            : 'Ready — run test cases to see live browser'}
+        </span>
+        {chatPhase === 'executing' && (
+          <span className={styles.genExecPanelBadge}>
+            {execSteps.filter(s => s.step_number === 0 && (s.status === 'passed' || s.status === 'failed')).length}
+            /{execSteps.filter(s => s.step_number === 0).length} done
+          </span>
+        )}
+      </div>
+      {/* View toggle */}
+      <div className={styles.genExecViewToggle}>
+        <button
+          className={`${styles.genExecViewToggleBtn} ${execPanelView === 'browser' ? styles.genExecViewToggleActive : ''}`}
+          onClick={() => setExecPanelView('browser')}
+        >
+          <Monitor size={13} /> Browser View
+        </button>
+        <button
+          className={`${styles.genExecViewToggleBtn} ${execPanelView === 'excel' ? styles.genExecViewToggleActive : ''}`}
+          onClick={() => setExecPanelView('excel')}
+        >
+          <FileSpreadsheet size={13} /> Excel View
+          {confirmedExecResults.length > 0 && (
+            <span className={styles.recExcelBadge}>{confirmedExecResults.length}</span>
+          )}
+        </button>
+      </div>
+      {/* Browser view */}
+      {execPanelView === 'browser' && (
+        <>
+          <div className={styles.browserPanelHeader}>
+            <Camera size={13} />
+            <span>Live Browser View</span>
+            {execCurrentUrl && (
+              <span className={styles.screenshotCurrentUrl} title={execCurrentUrl}>{execCurrentUrl}</span>
+            )}
+          </div>
+          <div className={styles.browserPanelBody}>
+            {execScreenshot ? (
+              <img
+                src={`data:image/png;base64,${execScreenshot}`}
+                alt="Browser screenshot"
+                className={styles.screenshotImg}
+                style={{ width: '100%', height: '100%', objectFit: 'contain', objectPosition: 'top', display: 'block' }}
+              />
+            ) : (
+              <div className={styles.screenshotPlaceholder}>
+                <MonitorPlay size={48} style={{ color: '#cbd5e1' }} />
+                <span>{chatPhase === 'analyzing' ? 'Analysing page…' : 'Execute a test case to see live browser'}</span>
+              </div>
+            )}
+            {chatPhase === 'executing' && (
+              <div className={styles.screenshotExecutingOverlay}>
+                <Loader2 size={28} className={styles.spin} style={{ color: '#6366f1' }} />
+              </div>
+            )}
+          </div>
+        </>
+      )}
+      {/* Excel view */}
+      {execPanelView === 'excel' && (
+        <div className={styles.genExcelView}>
+          {confirmedExecResults.length === 0 ? (
+            <div className={styles.genExcelEmpty}>
+              <FileSpreadsheet size={36} style={{ color: '#cbd5e1' }} />
+              <span>Run and confirm test cases to see results here</span>
+            </div>
+          ) : (
+            <div className={styles.genExcelTable}>
+              <div className={styles.recExcelCorner} />
+              {['A','B','C','D','E','F','G'].map(l => (
+                <div key={l} className={styles.recExcelLetterCell}>{l}</div>
+              ))}
+              <div className={`${styles.recExcelCell} ${styles.recExcelRowNumHeader}`}>Row</div>
+              {['T.C.No','Test Case','Steps','Expected Result','Input Data','Status','Error'].map(h => (
+                <div key={h} className={`${styles.recExcelCell} ${styles.recExcelHeaderCell}`}>{h}</div>
+              ))}
+              {confirmedExecResults.map((r, idx) => {
+                const rowCls = r.status === 'passed' ? styles.recExcelRowPassed : styles.recExcelRowFailed;
+                return (
+                  <React.Fragment key={r.id}>
+                    <div className={`${styles.recExcelCell} ${styles.recExcelRowNumCell} ${rowCls}`}>{idx + 1}</div>
+                    <div className={`${styles.recExcelCell} ${rowCls}`}>{idx + 1}</div>
+                    <div className={`${styles.recExcelCell} ${rowCls}`}>{r.name.replace(/\*+/g, '').replace(/^[-\s]+/, '').trim()}</div>
+                    <div className={`${styles.recExcelCell} ${styles.recExcelStepsCell} ${rowCls}`}>
+                      {r.steps.map((s, i) => (
+                        <span key={i}>{i + 1}. {s.instruction}{i < r.steps.length - 1 ? '\n' : ''}</span>
+                      ))}
+                    </div>
+                    <div className={`${styles.recExcelCell} ${rowCls}`}>{r.expected_results?.join('; ') || 'N/A'}</div>
+                    <div className={`${styles.recExcelCell} ${rowCls}`}>
+                      {Object.entries(r.test_data || {}).flatMap(([k, v]) =>
+                        v && typeof v === 'object'
+                          ? Object.entries(v as Record<string, unknown>).map(([ik, iv]) => `${ik}: ${iv}`)
+                          : [`${k}: ${v}`]
+                      ).join(' | ')}
+                    </div>
+                    <div className={`${styles.recExcelCell} ${styles.recExcelStatusCell} ${rowCls}`}>
+                      {r.status === 'passed'
+                        ? <span className={styles.recExcelBadgePassed}>✓ PASSED</span>
+                        : <span className={styles.recExcelBadgeFailed}>✗ FAILED</span>}
+                    </div>
+                    <div className={`${styles.recExcelCell} ${styles.recExcelErrorCell} ${rowCls}`}>{r.error || ''}</div>
+                  </React.Fragment>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+
   // ==========================================================================
   // Render
   // ==========================================================================
@@ -1453,7 +1618,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       {mode === 'generate' && (
         <div className={`${styles.chatLayout} ${styles.genExecutionLayout}`}>
 
-          {/* ── FULL-WIDTH CHAT PANEL ── */}
+          {/* ── CHAT PANEL (full-width or split-left) ── */}
           <div className={styles.genChatPanel}>
           {/* Scrollable messages area */}
           <div className={styles.chatMessages}>
@@ -1501,14 +1666,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                         const displayed = (typingMsg && typingMsg.id === msg.id)
                           ? typingMsg.full.slice(0, typingMsg.shown)
                           : msg.content;
-                        if (displayed.startsWith('Error:')) {
-                          return (
-                            <div className={styles.genErrorBubble}>
-                              <AlertCircle size={14} style={{ flexShrink: 0 }} />
-                              <span>{displayed}</span>
-                            </div>
-                          );
-                        }
                         return (
                           <div className={styles.genAssistantBubble}>
                             <div className={styles.genMarkdown}>
@@ -1624,12 +1781,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                             >
                               <Play size={11} /> Execute All
                             </button>
-                            <button
-                              className={`${styles.genSuggestionChip} ${styles.genSuggestionChipExcel}`}
-                              onClick={() => handleExportExcel(msg.testSuite!)}
-                            >
-                              <FileSpreadsheet size={11} /> Export Excel
-                            </button>
                           </div>
                         </div>
                       )}
@@ -1672,6 +1823,17 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                   >
                     <Monitor size={14} />
                     View Live Browser
+                  </button>
+                  <button
+                    className={styles.viewBrowserBtn}
+                    onClick={handleExportConfirmedExcel}
+                    title={confirmedExecResults.length > 0 ? `Export ${confirmedExecResults.length} confirmed result(s) to Excel` : 'No confirmed results yet'}
+                  >
+                    <FileSpreadsheet size={14} />
+                    Export Excel
+                    {confirmedExecResults.length > 0 && (
+                      <span className={styles.recExcelBadge}>{confirmedExecResults.length}</span>
+                    )}
                   </button>
                 </div>
               )}
@@ -1730,6 +1892,44 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             </div>
           </div>
           </div>{/* end genChatPanel */}
+
+          {/* ── SPLIT BROWSER SIDE PANEL ── */}
+          <AnimatePresence>
+          {browserSplit && (
+            <motion.div
+              className={styles.genBrowserSidePanel}
+              initial={{ width: 0 }}
+              animate={{ width: '55%' }}
+              exit={{ width: 0 }}
+              transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+            >
+              {/* Header — split mode: expand + close */}
+              <div className={styles.browserOverlayHeader}>
+                <span className={styles.browserOverlayTitle}>
+                  <Monitor size={15} /> Live Browser & Test Results
+                </span>
+                <div className={styles.browserOverlayHeaderBtns}>
+                  <button
+                    className={styles.browserOverlayClose}
+                    title="Expand to full screen"
+                    onClick={() => { setBrowserSplit(false); setShowBrowserOverlay(true); }}
+                  >
+                    <Maximize2 size={15} />
+                  </button>
+                  <button
+                    className={styles.browserOverlayClose}
+                    title="Close"
+                    onClick={() => setBrowserSplit(false)}
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+              </div>
+              {browserPanelBody}
+            </motion.div>
+          )}
+          </AnimatePresence>
+
         </div>
       )}
 
@@ -2558,157 +2758,37 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           <div className={styles.browserOverlay}>
             <motion.div
               className={styles.browserOverlayPanel}
-              initial={{ y: '100%' }}
-              animate={{ y: 0 }}
-              exit={{ y: '100%' }}
-              transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
             >
-              {/* Header */}
+              {/* Left-edge divider — click to switch to split view */}
+              <div className={styles.overlayLeftDivider}>
+                <button
+                  className={styles.overlayLeftDividerBtn}
+                  title="Switch to split view"
+                  onClick={() => { setShowBrowserOverlay(false); setBrowserSplit(true); }}
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+
+              {/* Header — overlay mode: close only */}
               <div className={styles.browserOverlayHeader}>
                 <span className={styles.browserOverlayTitle}>
                   <Monitor size={15} /> Live Browser & Test Results
                 </span>
                 <button
                   className={styles.browserOverlayClose}
+                  title="Close"
                   onClick={() => setShowBrowserOverlay(false)}
                 >
                   <X size={16} />
                 </button>
               </div>
 
-              {/* Status bar */}
-              <div className={styles.genExecStatusBar}>
-                <span className={`${styles.recStatusDot} ${chatPhase === 'executing' ? styles.recStatusExecuting : styles.recStatusActive}`} />
-                <span className={styles.genExecStatusText}>
-                  {chatPhase === 'executing'
-                    ? (execSteps.filter(s => s.test_id !== 'system' && s.status === 'running').length > 0
-                        ? `Running: ${execSteps.find(s => s.test_id !== 'system' && s.status === 'running')?.test_name ?? '…'}`
-                        : 'Preparing execution…')
-                    : chatPhase === 'analyzing'
-                    ? 'Analyzing page…'
-                    : confirmedExecResults.length > 0
-                    ? `${confirmedExecResults.length} result${confirmedExecResults.length !== 1 ? 's' : ''} confirmed`
-                    : 'Ready — run test cases to see live browser'}
-                </span>
-                {chatPhase === 'executing' && (
-                  <span className={styles.genExecPanelBadge}>
-                    {execSteps.filter(s => s.step_number === 0 && (s.status === 'passed' || s.status === 'failed')).length}
-                    /{execSteps.filter(s => s.step_number === 0).length} done
-                  </span>
-                )}
-              </div>
-
-              {/* View toggle */}
-              <div className={styles.genExecViewToggle}>
-                <button
-                  className={`${styles.genExecViewToggleBtn} ${execPanelView === 'browser' ? styles.genExecViewToggleActive : ''}`}
-                  onClick={() => setExecPanelView('browser')}
-                >
-                  <Monitor size={13} />
-                  Browser View
-                </button>
-                <button
-                  className={`${styles.genExecViewToggleBtn} ${execPanelView === 'excel' ? styles.genExecViewToggleActive : ''}`}
-                  onClick={() => setExecPanelView('excel')}
-                >
-                  <FileSpreadsheet size={13} />
-                  Excel View
-                  {confirmedExecResults.length > 0 && (
-                    <span className={styles.recExcelBadge}>{confirmedExecResults.length}</span>
-                  )}
-                </button>
-              </div>
-
-              {/* Browser screenshot view */}
-              {execPanelView === 'browser' && (
-                <>
-                  <div className={styles.browserPanelHeader}>
-                    <Camera size={13} />
-                    <span>Live Browser View</span>
-                    {execCurrentUrl && (
-                      <span className={styles.screenshotCurrentUrl} title={execCurrentUrl}>
-                        {execCurrentUrl}
-                      </span>
-                    )}
-                  </div>
-                  <div className={styles.browserPanelBody}>
-                    {execScreenshot ? (
-                      <img
-                        src={`data:image/png;base64,${execScreenshot}`}
-                        alt="Browser screenshot"
-                        className={styles.screenshotImg}
-                        style={{ width: '100%', height: '100%', objectFit: 'contain', objectPosition: 'top', display: 'block' }}
-                      />
-                    ) : (
-                      <div className={styles.screenshotPlaceholder}>
-                        <MonitorPlay size={48} style={{ color: '#cbd5e1' }} />
-                        <span>
-                          {chatPhase === 'analyzing'
-                            ? 'Analysing page…'
-                            : 'Execute a test case to see live browser'}
-                        </span>
-                      </div>
-                    )}
-                    {chatPhase === 'executing' && (
-                      <div className={styles.screenshotExecutingOverlay}>
-                        <Loader2 size={28} className={styles.spin} style={{ color: '#6366f1' }} />
-                      </div>
-                    )}
-                  </div>
-                </>
-              )}
-
-              {/* Excel view — confirmed execution results */}
-              {execPanelView === 'excel' && (
-                <div className={styles.genExcelView}>
-                  {confirmedExecResults.length === 0 ? (
-                    <div className={styles.genExcelEmpty}>
-                      <FileSpreadsheet size={36} style={{ color: '#cbd5e1' }} />
-                      <span>Run and confirm test cases to see results here</span>
-                    </div>
-                  ) : (
-                    <div className={styles.genExcelTable}>
-                      <div className={styles.recExcelCorner} />
-                      {['A','B','C','D','E','F','G'].map(l => (
-                        <div key={l} className={styles.recExcelLetterCell}>{l}</div>
-                      ))}
-                      <div className={`${styles.recExcelCell} ${styles.recExcelRowNumHeader}`}>Row</div>
-                      {['T.C.No','Test Case','Steps','Expected Result','Input Data','Status','Error'].map(h => (
-                        <div key={h} className={`${styles.recExcelCell} ${styles.recExcelHeaderCell}`}>{h}</div>
-                      ))}
-                      {confirmedExecResults.map((r, idx) => {
-                        const rowCls = r.status === 'passed' ? styles.recExcelRowPassed : styles.recExcelRowFailed;
-                        return (
-                          <React.Fragment key={r.id}>
-                            <div className={`${styles.recExcelCell} ${styles.recExcelRowNumCell} ${rowCls}`}>{idx + 1}</div>
-                            <div className={`${styles.recExcelCell} ${rowCls}`}>{idx + 1}</div>
-                            <div className={`${styles.recExcelCell} ${rowCls}`}>{r.name}</div>
-                            <div className={`${styles.recExcelCell} ${styles.recExcelStepsCell} ${rowCls}`}>
-                              {r.steps.map((s, i) => (
-                                <span key={s.step_number}>{s.step_number}. {s.instruction}{i < r.steps.length - 1 ? '\n' : ''}</span>
-                              ))}
-                            </div>
-                            <div className={`${styles.recExcelCell} ${rowCls}`}>{r.expected_results?.join('; ') || 'N/A'}</div>
-                            <div className={`${styles.recExcelCell} ${rowCls}`}>
-                              {Object.entries(r.test_data || {}).flatMap(([k, v]) =>
-                                v && typeof v === 'object'
-                                  ? Object.entries(v as Record<string, unknown>).map(([ik, iv]) => `${ik}: ${iv}`)
-                                  : [`${k}: ${v}`]
-                              ).join(' | ')}
-                            </div>
-                            <div className={`${styles.recExcelCell} ${styles.recExcelStatusCell} ${rowCls}`}>
-                              {r.status === 'passed'
-                                ? <span className={styles.recExcelBadgePassed}>✓ PASSED</span>
-                                : <span className={styles.recExcelBadgeFailed}>✗ FAILED</span>}
-                            </div>
-                            <div className={`${styles.recExcelCell} ${styles.recExcelErrorCell} ${rowCls}`}>{r.error || ''}</div>
-                          </React.Fragment>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
+              {browserPanelBody}
             </motion.div>
           </div>
         )}

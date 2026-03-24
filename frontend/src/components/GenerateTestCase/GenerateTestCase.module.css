@@ -1832,21 +1832,80 @@
 
 /* ── Chatbot execution split layout ──────────────────────────── */
 
-/* Chat fills full width; browser moved to overlay */
+/* Always row so the panel width animation drives layout — no sudden flex-direction switch */
 .genExecutionLayout {
   display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-}
-
-/* Full-width chat panel */
-.genChatPanel {
-  display: flex;
-  flex-direction: column;
+  flex-direction: row;
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+/* Chat panel — always flex:1 so it shrinks smoothly as the panel grows */
+.genChatPanel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Side browser panel (split mode) — width animated by Framer Motion */
+.genBrowserSidePanel {
+  flex-shrink: 0;
+  flex-grow: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1.5px solid #e2e8f0;
+  background: #fff;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Vertical divider between chat and browser panels */
+.genSplitDivider {
+  width: 1px;
+  background: #e2e8f0;
+  flex-shrink: 0;
+  position: relative;
+  display: flex;
+  align-items: center;
+  z-index: 10;
+}
+
+/* Toggle button on the divider — vertically centered */
+.genSplitDividerBtn {
+  position: absolute;
+  left: 0;
+  transform: translateX(-50%);
+  width: 20px;
+  height: 44px;
+  background: #fff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #64748b;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+.genSplitDividerBtn:hover {
+  background: #3b82f6;
+  color: #fff;
+  border-color: #3b82f6;
+  box-shadow: 0 4px 12px rgba(59,130,246,0.3);
+}
+
+/* Header action buttons group */
+.browserOverlayHeaderBtns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 /* Right panel — live browser view (matches recRightPanel) */
@@ -1875,6 +1934,7 @@
   flex-direction: column;
   overflow: hidden;
   box-shadow: none;
+  position: relative;
 }
 
 .browserOverlayHeader {
@@ -1912,6 +1972,48 @@
 .browserOverlayClose:hover {
   background: #f1f5f9;
   color: #0f172a;
+}
+
+/* ── Left-edge split divider (shown on full overlay) ── */
+.overlayLeftDivider {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #e2e8f0;
+  display: flex;
+  align-items: center;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.overlayLeftDividerBtn {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 28px;
+  height: 52px;
+  background: #ffffff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #64748b;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  transition: background 0.2s ease, color 0.2s ease,
+              border-color 0.2s ease, box-shadow 0.2s ease;
+  pointer-events: all;
+}
+
+.overlayLeftDividerBtn:hover {
+  background: #3b82f6;
+  color: #ffffff;
+  border-color: #3b82f6;
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.35);
 }
 
 /* "View Live Browser" trigger button */
@@ -2174,9 +2276,11 @@
 
 .genExcelTable {
   display: grid;
-  grid-template-columns: 28px 28px 120px 140px 180px 120px 80px 120px;
+  grid-template-columns: 28px 28px 120px 1fr 200px 140px 90px minmax(120px, 1fr);
   font-size: 11px;
-  min-width: 840px;
+  width: 100%;
+  min-width: 700px;
+  align-content: start;
 }
 
 /* ── Execution result card in chat ───────────────────────────── */

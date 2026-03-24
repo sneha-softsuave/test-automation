@@ -1068,6 +1068,7 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
     from app.core.chat_sessions import (
         get_session, append_message, set_last_test_suite, get_last_test_suite,
         get_messages, get_credentials, set_credentials,
+        get_max_tc_id, set_max_tc_id,
     )
     from app.core.sse_manager import sse_manager
 
@@ -1144,16 +1145,12 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
                 browser_already_on_page=_browser_alive,
             )
 
-            # Re-sequence TC IDs to continue from the highest existing ID in this session
-            import re as _re
-            _prior = last_suite or {}
-            _max_num = max(
-                (int(m.group(0)) for tc in _prior.get("test_cases", [])
-                 if (m := _re.search(r'\d+', str(tc.get("id", ""))))),
-                default=0,
-            )
+            # Re-sequence TC IDs using the session-level global counter so IDs
+            # are continuous across page navigations and multiple generations.
+            _max_num = get_max_tc_id(_session_id)
             for _i, _tc in enumerate(test_suite.get("test_cases", [])):
-                _tc["id"] = f"TC_{_max_num + _i + 1:03d}"
+                _tc["id"] = f"TS_{_max_num + _i + 1:03d}"
+            set_max_tc_id(_session_id, _max_num + len(test_suite.get("test_cases", [])))
 
             confirm_msg = await _asyncio.to_thread(agent.generate_confirm, test_suite, compact)
             if _new_creds:
@@ -1370,6 +1367,7 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     from app.core.chat_sessions import (
         get_session, append_message, get_last_test_suite, set_last_test_suite,
         get_messages, get_credentials, set_credentials,
+        get_max_tc_id, set_max_tc_id,
     )
     from app.core.sse_manager import sse_manager
 
@@ -1396,9 +1394,13 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
 
     # ── Fast pre-classification — bypass LLM for unambiguous patterns ─────────
     import re as _intent_re
-    from app.core.chat_sessions import get_pending_approval as _get_pending
+    from app.core.chat_sessions import (
+        get_pending_approval as _get_pending,
+        get_pending_row_choice as _get_row_choice,
+    )
     _msg = request.user_message.strip()
     _pending_results = _get_pending(request.session_id)
+    _pending_row_choice = _get_row_choice(request.session_id)
 
     _YES_RE = _intent_re.compile(
         r'^(yes|yeah|yep|yup|sure|ok|okay|confirm|add it|go ahead|do it|proceed)\b',
@@ -1406,6 +1408,15 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     )
     _NO_RE = _intent_re.compile(
         r'^(no|nope|nah|cancel|skip|don\'t|dont|stop)\b',
+        _intent_re.IGNORECASE,
+    )
+    # Row-choice responses: "split/individual/separate" vs "combined/one row/same row"
+    _ROW_SPLIT_RE = _intent_re.compile(
+        r'\b(split|individual|separate|each|one\s+per|per\s+row)\b',
+        _intent_re.IGNORECASE,
+    )
+    _ROW_COMBINED_RE = _intent_re.compile(
+        r'\b(combined?|one\s+row|same\s+row|single\s+row|together|merge|all\s+in\s+one)\b',
         _intent_re.IGNORECASE,
     )
 
@@ -1423,12 +1434,57 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
             "reasoning": "pre-classified: cancelling pending approval",
             "metadata": {"approve_targets": "__pending_cancel__"},
         }
+    elif _pending_row_choice is not None and _ROW_SPLIT_RE.search(_msg):
+        classification = {
+            "intent": "approve",
+            "confidence": 1.0,
+            "reasoning": "pre-classified: row-choice → individual",
+            "metadata": {"approve_targets": "__row_choice_individual__"},
+        }
+    elif _pending_row_choice is not None and _ROW_COMBINED_RE.search(_msg):
+        classification = {
+            "intent": "approve",
+            "confidence": 1.0,
+            "reasoning": "pre-classified: row-choice → combined",
+            "metadata": {"approve_targets": "__row_choice_combined__"},
+        }
+    elif _pending_row_choice is not None and _NO_RE.match(_msg):
+        classification = {
+            "intent": "approve",
+            "confidence": 1.0,
+            "reasoning": "pre-classified: row-choice → cancelled",
+            "metadata": {"approve_targets": "__row_choice_cancel__"},
+        }
     else:
         _EXEC_RE = _intent_re.compile(
             r'^(execute|run|play|start|launch)\s*(?:test\s*case\s*|test\s*|tc\s*)?(\d+(?:\s*[,\s]\s*\d+)*|all)\b',
             _intent_re.IGNORECASE,
         )
         _exec_m = _EXEC_RE.match(_msg)
+
+        # Multi-range grouping: "add 1 to 5 in one row and 6 to 10 in another"
+        # Requires 2+ "X to Y" pairs and an approve-like keyword anywhere in message
+        _ANY_RANGE_RE = _intent_re.compile(r'(\d+)\s+to\s+(\d+)', _intent_re.IGNORECASE)
+        _all_ranges = _ANY_RANGE_RE.findall(_msg)
+        _has_approve_kw = bool(_intent_re.search(
+            r'\b(add|append|save|approve|export|put|place)\b', _msg, _intent_re.IGNORECASE
+        ))
+        _is_multi_range = len(_all_ranges) >= 2 and _has_approve_kw
+
+        # Single-range grouping: "add test steps from 1 to 10"
+        _RANGE_RE = _intent_re.compile(
+            r'(?:add|append|export|save|approve)\s+(?:test\s*)?steps?\s+(?:from\s+)?(\d+)\s+to\s+(\d+)',
+            _intent_re.IGNORECASE,
+        )
+        _range_m = _RANGE_RE.search(_msg)
+
+        # List unadded / export all: "export to excel", "export all", "list unadded steps"
+        _EXPORT_RE = _intent_re.compile(
+            r'\b(export\s+(?:to\s+)?excel|export\s+all|list\s+unadded\s+(?:steps?|tests?)|'
+            r'what\s+steps?\s+haven\'?t\s+been\s+added)\b',
+            _intent_re.IGNORECASE,
+        )
+
         if _exec_m:
             _raw_targets = _exec_m.group(2).strip().lower()
             _exec_targets: object = "all" if _raw_targets == "all" else [
@@ -1439,6 +1495,36 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                 "confidence": 1.0,
                 "reasoning": "pre-classified: execute keyword + test reference",
                 "metadata": {"execute_targets": _exec_targets},
+            }
+        elif _is_multi_range:
+            classification = {
+                "intent": "approve",
+                "confidence": 1.0,
+                "reasoning": "pre-classified: multi-range group pattern",
+                "metadata": {
+                    "approve_targets": None,
+                    "approve_mode": "multi_group",
+                    "approve_ranges": [{"from": int(f), "to": int(t)} for f, t in _all_ranges],
+                },
+            }
+        elif _range_m:
+            _r_from, _r_to = int(_range_m.group(1)), int(_range_m.group(2))
+            classification = {
+                "intent": "approve",
+                "confidence": 1.0,
+                "reasoning": "pre-classified: range group pattern",
+                "metadata": {
+                    "approve_targets": list(range(_r_from, _r_to + 1)),
+                    "approve_mode": "group",
+                    "approve_range": {"from": _r_from, "to": _r_to},
+                },
+            }
+        elif _EXPORT_RE.search(_msg):
+            classification = {
+                "intent": "approve",
+                "confidence": 1.0,
+                "reasoning": "pre-classified: export/list-unadded pattern",
+                "metadata": {"approve_targets": "all", "approve_mode": "list_unadded"},
             }
         else:
             # ── Classify intent via LLM (non-blocking) ───────────────────────
@@ -1459,6 +1545,24 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
 
     # ── Execute ──────────────────────────────────────────────────────────────
     if intent == "execute":
+        if not last_suite:
+            no_tc_msg = (
+                "I don't have any test cases to run yet. "
+                "Please generate test cases first — share a URL or describe what you'd like to test."
+            )
+            append_message(_session_id, "user", request.user_message)
+            append_message(_session_id, "assistant", no_tc_msg)
+
+            async def _exec_no_tc():
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": no_tc_msg,
+                    "intent": "clarify",
+                })
+
+            background_tasks.add_task(_exec_no_tc)
+            return {"session_id": _session_id, "status": "thinking", "intent": "clarify"}
+
         # Delegate to /chat-execute logic by building an equivalent request
         execute_req = ChatExecuteRequest(
             session_id=request.session_id,
@@ -1474,8 +1578,11 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
         from app.core.chat_sessions import (
             get_execution_result, get_pending_approval,
             set_pending_approval, clear_pending_approval,
+            add_confirmed_ids, get_confirmed_ids,
+            get_pending_row_choice, set_pending_row_choice, clear_pending_row_choice,
         )
         targets = metadata.get("approve_targets")
+        approve_mode = metadata.get("approve_mode", "individual")
         append_message(_session_id, "user", request.user_message)
 
         def _result_lines(results: list) -> list[str]:
@@ -1492,6 +1599,12 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
             clear_pending_approval(request.session_id)
             if confirmed:
                 success_msg = "✅ Added to Excel successfully!\n" + "\n".join(_result_lines(confirmed))
+                # Mark all TS IDs (including grouped sub-IDs) as confirmed
+                _all_confirmed_ids = []
+                for _r in confirmed:
+                    _all_confirmed_ids.append(_r.get("id", ""))
+                    _all_confirmed_ids.extend(_r.get("grouped_ids", []))
+                add_confirmed_ids(request.session_id, [i for i in _all_confirmed_ids if i])
             else:
                 success_msg = "Nothing to add — please run the tests first and then approve."
 
@@ -1521,18 +1634,238 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
             background_tasks.add_task(_do_cancel)
             return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
 
-        # ── New approval request — match results and ask for confirmation ─────
+        # ── Row-choice: user answered individual vs combined question ─────────
+        if targets in ("__row_choice_individual__", "__row_choice_combined__", "__row_choice_cancel__"):
+            _choice_data = get_pending_row_choice(request.session_id) or {}
+            clear_pending_row_choice(request.session_id)
+            _choice_matched = _choice_data.get("results", [])
+
+            if targets == "__row_choice_cancel__" or not _choice_matched:
+                _cancel_row_msg = "Okay, cancelled. Let me know when you'd like to add results to Excel."
+                append_message(_session_id, "assistant", _cancel_row_msg)
+
+                async def _row_cancel():
+                    await sse_manager.broadcast(_session_id, {
+                        "type": "chat_response",
+                        "message": _cancel_row_msg,
+                        "intent": "approve",
+                    })
+
+                background_tasks.add_task(_row_cancel)
+                return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+            if targets == "__row_choice_individual__":
+                # Add each as a separate row
+                set_pending_approval(_session_id, _choice_matched)
+                _choice_confirm = (
+                    "I'll add each as a separate row:\n"
+                    + "\n".join(_result_lines(_choice_matched))
+                    + "\n\nShall I go ahead? *(yes / no)*"
+                )
+                append_message(_session_id, "assistant", _choice_confirm)
+
+                async def _row_individual():
+                    await sse_manager.broadcast(_session_id, {
+                        "type": "chat_response",
+                        "message": _choice_confirm,
+                        "intent": "approve",
+                    })
+
+                background_tasks.add_task(_row_individual)
+                return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+            if targets == "__row_choice_combined__":
+                # Merge all into one row with LLM summary
+                _all_steps = [s for _r in _choice_matched for s in _r.get("steps", [])]
+                _all_expected = [e for _r in _choice_matched for e in _r.get("expected_results", [])]
+                _merged_data: dict = {}
+                for _r in _choice_matched:
+                    _merged_data.update(_r.get("test_data", {}))
+                _failed = next((_r for _r in _choice_matched if _r.get("status") == "failed"), None)
+                _ids = [_r["id"] for _r in _choice_matched]
+                _summary_prompt = (
+                    f"Summarize what these {len(_choice_matched)} test steps collectively verify "
+                    f"in one short phrase (max 10 words, no quotes, no punctuation at end):\n"
+                    + "\n".join(f"- {_r['name']}" for _r in _choice_matched)
+                )
+                _group_name = await _asyncio.to_thread(agent.call_llm, _summary_prompt)
+                _group_name = re.sub(r'\*+', '', _group_name).strip().lstrip('-').strip().strip('"').strip("'").rstrip(".")
+                _grouped = {
+                    "id": f"GROUP_{_ids[0]}_{_ids[-1]}",
+                    "name": _group_name,
+                    "status": "failed" if _failed else "passed",
+                    "steps": _all_steps,
+                    "expected_results": _all_expected,
+                    "test_data": _merged_data,
+                    "error": _failed.get("error") if _failed else None,
+                    "grouped_ids": _ids,
+                }
+                _combined_confirm = (
+                    f"I'll combine all {len(_choice_matched)} results into one row:\n"
+                    f"**{_group_name}** ({_ids[0]}–{_ids[-1]})\n\n"
+                    "Shall I go ahead? *(yes / no)*"
+                )
+                set_pending_approval(_session_id, [_grouped])
+                append_message(_session_id, "assistant", _combined_confirm)
+
+                async def _row_combined():
+                    await sse_manager.broadcast(_session_id, {
+                        "type": "chat_response",
+                        "message": _combined_confirm,
+                        "intent": "approve",
+                    })
+
+                background_tasks.add_task(_row_combined)
+                return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+        # ── New approval request ──────────────────────────────────────────────
         _raw_results = get_execution_result(request.session_id)
         exec_results = _raw_results if isinstance(_raw_results, list) else []
+
+        # ── Mode: list_unadded — list all executed steps not yet in Excel ─────
+        if approve_mode == "list_unadded":
+            _confirmed_ids = get_confirmed_ids(request.session_id)
+            _unconfirmed = [r for r in exec_results if r.get("id") not in _confirmed_ids]
+
+            if not _unconfirmed:
+                if not exec_results:
+                    response_msg = (
+                        "I don't have any execution results yet. "
+                        "Please run the tests first, then I can export them to Excel."
+                    )
+                else:
+                    response_msg = "All executed test steps have already been added to Excel! ✅"
+            else:
+                _list_lines = []
+                for _r in _unconfirmed:
+                    _icon = "✅" if _r.get("status") == "passed" else "❌"
+                    _list_lines.append(f"- **{_r['id']}** {_r['name']} {_icon}")
+                response_msg = (
+                    "The following test steps are ready to add to Excel:\n"
+                    + "\n".join(_list_lines)
+                    + "\n\nShall I add all of these? *(yes / no)*"
+                )
+                set_pending_approval(_session_id, _unconfirmed)
+
+            append_message(_session_id, "assistant", response_msg)
+
+            async def _list_unadded_respond():
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": response_msg,
+                    "intent": "approve",
+                })
+
+            background_tasks.add_task(_list_unadded_respond)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+        # ── Mode: multi_group — each specified range becomes its own Excel row ─
+        if approve_mode == "multi_group":
+            _approve_ranges = metadata.get("approve_ranges") or []
+            _confirmed_ids = get_confirmed_ids(request.session_id)
+
+            def _resolve_range_results(range_from: int, range_to: int) -> list:
+                """Return exec_results whose numeric ID falls within [range_from, range_to]."""
+                import re as _rr
+                result = []
+                for _r in exec_results:
+                    _m = _rr.search(r'\d+', str(_r.get("id", "")))
+                    if _m and range_from <= int(_m.group(0)) <= range_to:
+                        result.append(_r)
+                if not result:
+                    # Fallback: positional (1-indexed)
+                    result = [exec_results[i - 1] for i in range(range_from, range_to + 1) if 0 < i <= len(exec_results)]
+                return result
+
+            _grouped_rows = []
+            _preview_lines = []
+            for _rng in _approve_ranges:
+                _rng_from = _rng.get("from", 1)
+                _rng_to = _rng.get("to", 1)
+                _rng_results = _resolve_range_results(_rng_from, _rng_to)
+                if not _rng_results:
+                    continue
+                _rng_steps = [s for _r in _rng_results for s in _r.get("steps", [])]
+                _rng_expected = [e for _r in _rng_results for e in _r.get("expected_results", [])]
+                _rng_data: dict = {}
+                for _r in _rng_results:
+                    _rng_data.update(_r.get("test_data", {}))
+                _rng_failed = next((_r for _r in _rng_results if _r.get("status") == "failed"), None)
+                _rng_ids = [_r["id"] for _r in _rng_results]
+                _rng_summary_prompt = (
+                    f"Summarize what these {len(_rng_results)} test steps collectively verify "
+                    f"in one short phrase (max 10 words, no quotes, no punctuation at end):\n"
+                    + "\n".join(f"- {_r['name']}" for _r in _rng_results)
+                )
+                _rng_name = await _asyncio.to_thread(agent.call_llm, _rng_summary_prompt)
+                _rng_name = re.sub(r'\*+', '', _rng_name).strip().lstrip('-').strip().strip('"').strip("'").rstrip(".")
+                _grouped_rows.append({
+                    "id": f"GROUP_{_rng_ids[0]}_{_rng_ids[-1]}",
+                    "name": _rng_name,
+                    "status": "failed" if _rng_failed else "passed",
+                    "steps": _rng_steps,
+                    "expected_results": _rng_expected,
+                    "test_data": _rng_data,
+                    "error": _rng_failed.get("error") if _rng_failed else None,
+                    "grouped_ids": _rng_ids,
+                })
+                _icon = "❌" if _rng_failed else "✅"
+                _preview_lines.append(
+                    f"- **Row {len(_preview_lines) + 1}**: {_rng_name} {_icon} "
+                    f"({_rng_ids[0]}–{_rng_ids[-1]}, {len(_rng_results)} steps)"
+                )
+
+            if not _grouped_rows:
+                _no_mg_msg = (
+                    "I couldn't find results for the specified ranges. "
+                    "Please run the tests first or check the range numbers."
+                )
+                append_message(_session_id, "assistant", _no_mg_msg)
+
+                async def _mg_none():
+                    await sse_manager.broadcast(_session_id, {
+                        "type": "chat_response",
+                        "message": _no_mg_msg,
+                        "intent": "approve",
+                    })
+
+                background_tasks.add_task(_mg_none)
+                return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+            _mg_confirm = (
+                f"I'll add {len(_grouped_rows)} separate row(s) to Excel:\n"
+                + "\n".join(_preview_lines)
+                + "\n\nShall I go ahead? *(yes / no)*"
+            )
+            set_pending_approval(_session_id, _grouped_rows)
+            append_message(_session_id, "assistant", _mg_confirm)
+
+            async def _multi_group_ask():
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": _mg_confirm,
+                    "intent": "approve",
+                })
+
+            background_tasks.add_task(_multi_group_ask)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+        # ── Resolve target IDs → matched results ──────────────────────────────
+        _confirmed_ids = get_confirmed_ids(request.session_id)
 
         if not exec_results:
             matched: list = []
         elif targets is None or targets == "all":
-            matched = exec_results
+            # Filter out already-confirmed results
+            matched = [
+                r for r in exec_results
+                if r.get("id") not in _confirmed_ids
+                and all(gid not in _confirmed_ids for gid in (r.get("grouped_ids") or []))
+            ]
         elif isinstance(targets, list) and targets and isinstance(targets[0], int):
-            # Look up by TC ID (e.g. 1 → "TC_001") so "approve test case 1" always
-            # means TC_001 regardless of execution order
-            _target_ids = {f"TC_{n:03d}" for n in targets}
+            # Look up by TS ID (e.g. 1 → "TS_001") so "approve test step 1" always
+            # means TS_001 regardless of execution order
+            _target_ids = {f"TS_{n:03d}" for n in targets}
             matched = [r for r in exec_results if r.get("id", "").upper() in _target_ids]
             if not matched:
                 # fallback: position-based (1-indexed) for sessions where IDs differ
@@ -1544,10 +1877,14 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
             ]
 
         if not matched:
-            response_msg = (
-                "I don't have any execution results to add. "
-                "Please run the tests first, then ask me to approve them."
-            )
+            # Distinguish between "nothing ran" vs "all already added"
+            if exec_results and (targets is None or targets == "all"):
+                response_msg = "All executed test results are already in Excel! ✅"
+            else:
+                response_msg = (
+                    "I don't have any execution results to add. "
+                    "Please run the tests first, then ask me to approve them."
+                )
 
             async def _approve_none():
                 await sse_manager.broadcast(_session_id, {
@@ -1557,25 +1894,102 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                 })
 
             background_tasks.add_task(_approve_none)
-        else:
-            # Store pending and ask user to confirm
-            set_pending_approval(_session_id, matched)
-            confirm_ask = (
-                "I'd like to add the following to Excel:\n"
-                + "\n".join(_result_lines(matched))
-                + "\n\nShall I go ahead? *(yes / no)*"
-            )
-            append_message(_session_id, "assistant", confirm_ask)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
 
-            async def _approve_ask():
+        # ── Mode: group — merge matched steps into a single Excel row ─────────
+        if approve_mode == "group":
+            _all_steps = [s for _r in matched for s in _r.get("steps", [])]
+            _all_expected = [e for _r in matched for e in _r.get("expected_results", [])]
+            _merged_data = {}
+            for _r in matched:
+                _merged_data.update(_r.get("test_data", {}))
+            _failed = next((_r for _r in matched if _r.get("status") == "failed"), None)
+            _ids = [_r["id"] for _r in matched]
+
+            # LLM-generated summary for the "Test Case" column
+            _summary_prompt = (
+                f"Summarize what these {len(matched)} test steps collectively verify "
+                f"in one short phrase (max 10 words, no quotes, no punctuation at end):\n"
+                + "\n".join(f"- {_r['name']}" for _r in matched)
+            )
+            _group_name = await _asyncio.to_thread(agent.call_llm, _summary_prompt)
+            _group_name = re.sub(r'\*+', '', _group_name).strip().lstrip('-').strip().strip('"').strip("'").rstrip(".")
+
+            _grouped = {
+                "id": f"GROUP_{_ids[0]}_{_ids[-1]}",
+                "name": _group_name,
+                "status": "failed" if _failed else "passed",
+                "steps": _all_steps,
+                "expected_results": _all_expected,
+                "test_data": _merged_data,
+                "error": _failed.get("error") if _failed else None,
+                "grouped_ids": _ids,
+            }
+            _confirm_ask = (
+                f"I'll add these {len(matched)} test steps as a single test case:\n"
+                f"**{_group_name}** ({_ids[0]}–{_ids[-1]})\n\n"
+                "Shall I go ahead? *(yes / no)*"
+            )
+            set_pending_approval(_session_id, [_grouped])
+            append_message(_session_id, "assistant", _confirm_ask)
+
+            async def _group_ask():
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_response",
-                    "message": confirm_ask,
+                    "message": _confirm_ask,
                     "intent": "approve",
                 })
 
-            background_tasks.add_task(_approve_ask)
+            background_tasks.add_task(_group_ask)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
 
+        # ── Mode: individual (default) — one row per matched result ───────────
+        # When "approve all" targets 2+ results without specifying row structure,
+        # ask the user first whether they want separate rows or a combined row.
+        if (targets is None or targets == "all") and len(matched) >= 2:
+            _unadded_lines = "\n".join(
+                f"- **{_r['id']}** {_r['name']} "
+                + ("✅ Passed" if _r.get("status") == "passed" else "❌ Failed")
+                for _r in matched
+            )
+            _row_q = (
+                f"I found **{len(matched)} unadded result(s)**:\n\n"
+                + _unadded_lines
+                + "\n\nHow would you like to add them?\n\n"
+                "- **Individual rows** — each test case as its own row *(reply: split)*\n"
+                "- **Combined row** — all merged into one row with a summary *(reply: combined)*\n\n"
+                "Or type *no* to cancel."
+            )
+            set_pending_row_choice(_session_id, {"results": matched})
+            append_message(_session_id, "assistant", _row_q)
+
+            async def _row_structure_ask():
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": _row_q,
+                    "intent": "approve",
+                })
+
+            background_tasks.add_task(_row_structure_ask)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+        # Single result or specific target — add directly without row-structure question
+        set_pending_approval(_session_id, matched)
+        confirm_ask = (
+            "I'd like to add the following to Excel:\n"
+            + "\n".join(_result_lines(matched))
+            + "\n\nShall I go ahead? *(yes / no)*"
+        )
+        append_message(_session_id, "assistant", confirm_ask)
+
+        async def _approve_ask():
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_response",
+                "message": confirm_ask,
+                "intent": "approve",
+            })
+
+        background_tasks.add_task(_approve_ask)
         return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
 
     # ── Informational ─────────────────────────────────────────────────────────
@@ -1605,7 +2019,22 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     # ── Edit ──────────────────────────────────────────────────────────────────
     elif intent == "edit":
         if not last_suite:
-            raise HTTPException(status_code=400, detail="No test cases to edit. Please generate test cases first.")
+            no_tc_msg = (
+                "I don't have any test cases to edit yet. "
+                "Please generate test cases first — share a URL or describe what you'd like to test."
+            )
+            append_message(_session_id, "user", request.user_message)
+            append_message(_session_id, "assistant", no_tc_msg)
+
+            async def _edit_no_tc():
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": no_tc_msg,
+                    "intent": "clarify",
+                })
+
+            background_tasks.add_task(_edit_no_tc)
+            return {"session_id": _session_id, "status": "thinking", "intent": "clarify"}
         compact = session["compact"]
         append_message(_session_id, "user", request.user_message)
         _user_message = request.user_message
@@ -1714,16 +2143,12 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                     browser_already_on_page=_browser_alive,
                 )
 
-                # Re-sequence TC IDs to continue from the highest existing ID in this session
-                import re as _re
-                _prior = last_suite or {}
-                _max_num = max(
-                    (int(m.group(0)) for tc in _prior.get("test_cases", [])
-                     if (m := _re.search(r'\d+', str(tc.get("id", ""))))),
-                    default=0,
-                )
+                # Re-sequence TC IDs using the session-level global counter so IDs
+                # are continuous across page navigations and multiple generations.
+                _max_num = get_max_tc_id(_session_id)
                 for _i, _tc in enumerate(test_suite.get("test_cases", [])):
-                    _tc["id"] = f"TC_{_max_num + _i + 1:03d}"
+                    _tc["id"] = f"TS_{_max_num + _i + 1:03d}"
+                set_max_tc_id(_session_id, _max_num + len(test_suite.get("test_cases", [])))
 
                 confirm_msg = await _asyncio.to_thread(agent.generate_confirm, test_suite, compact)
                 if _new_creds:

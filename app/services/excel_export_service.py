@@ -15,8 +15,7 @@ def _steps_to_text(steps: List[Dict]) -> str:
     - fill steps → "Fill <field> with <Key>" (plain key name, no literal value)
     """
     lines = []
-    for step in steps:
-        num = step.get("step_number", "?")
+    for num, step in enumerate(steps, start=1):
         instruction = step.get("instruction", "")
         action_type = (step.get("action") or {}).get("type", "")
         td = step.get("test_data") or {}
