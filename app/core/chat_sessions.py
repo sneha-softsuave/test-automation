@@ -31,6 +31,32 @@ def create_session(page_structure: Dict[str, Any], compact: Dict[str, Any]) -> s
     return session_id
 
 
+def create_pending_session() -> str:
+    """
+    Reserve a session_id immediately (before page scraping completes).
+    The session has no page_structure yet — call finalize_session() once ready.
+    This lets the frontend open an SSE connection before the LLM starts.
+    """
+    session_id = str(uuid.uuid4())
+    _sessions[session_id] = {
+        "page_structure": None,
+        "compact": None,
+        "messages": [],
+        "last_execution_result": None,
+        "execution_session_id": None,
+        "credentials": {},
+    }
+    return session_id
+
+
+def finalize_session(session_id: str, page_structure: Dict[str, Any], compact: Dict[str, Any]) -> None:
+    """Populate page_structure and compact into a pending session."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        session["page_structure"] = page_structure
+        session["compact"] = compact
+
+
 def get_session(session_id: str) -> Optional[Dict[str, Any]]:
     """Return the session dict or None if not found."""
     return _sessions.get(session_id)
@@ -99,6 +125,28 @@ def get_messages(session_id: str, max_messages: int = 10) -> list:
 def delete_session(session_id: str) -> None:
     """Remove a session from memory."""
     _sessions.pop(session_id, None)
+
+
+def set_pending_approval(session_id: str, results: list) -> None:
+    """Store results awaiting user confirmation before adding to Excel."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        session["pending_approval"] = results
+
+
+def get_pending_approval(session_id: str) -> Optional[list]:
+    """Return pending approval results, or None if none queued."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        return session.get("pending_approval")
+    return None
+
+
+def clear_pending_approval(session_id: str) -> None:
+    """Remove pending approval results."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        session.pop("pending_approval", None)
 
 
 def set_credentials(session_id: str, creds: Dict[str, Any]) -> None:

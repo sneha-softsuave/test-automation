@@ -9,7 +9,7 @@ from typing import Dict, Any
 class SelectorExtractor:
     """Tool for extracting selectors from web pages using Playwright."""
 
-    def __init__(self, headless: bool = True, timeout: int = 30000):
+    def __init__(self, headless: bool = True, timeout: int = 60000):
         self.headless = headless
         self.timeout = timeout
 

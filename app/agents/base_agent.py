@@ -177,8 +177,16 @@ class BaseAgent(ABC):
         )
         return response.choices[0].message.content.strip()
 
-    def call_llm(self, prompt: str) -> str:
+    _MARKDOWN_INSTRUCTION = (
+        "\n\nRespond in well-formatted Markdown. Use **bold** for key terms and element "
+        "names, bullet lists for enumerations, and `code` for selectors or technical "
+        "values. Do NOT use h1 headings."
+    )
+
+    def call_llm(self, prompt: str, markdown: bool = True) -> str:
         """Call the appropriate LLM based on provider. Signature unchanged."""
+        if markdown:
+            prompt = prompt + self._MARKDOWN_INSTRUCTION
         print(f"Calling {self.provider.value} API with model: {self.model}...")
         try:
             from app.services.llm_wrapper import call_llm as _wrap
@@ -200,13 +208,17 @@ class BaseAgent(ABC):
                 return self._call_waymore(prompt)
             raise
 
-    def call_llm_chat(self, system: str, messages: list) -> str:
+    def call_llm_chat(self, system: str, messages: list, markdown: bool = True) -> str:
         """
         Multi-turn conversation call.
         system  : system/context prompt (page summary, test suite, etc.)
         messages: [{role: "user"|"assistant", content: str}, ...]
                   The final entry should be the current user turn.
+        markdown: when True, appends a Markdown formatting instruction to the system prompt.
+                  Pass False for calls that must return raw JSON.
         """
+        if markdown:
+            system = system + self._MARKDOWN_INSTRUCTION
         print(f"[call_llm_chat] {self.provider.value} | turns={len(messages)}")
         try:
             if self.provider == LLMProvider.ANTHROPIC:
@@ -227,7 +239,7 @@ class BaseAgent(ABC):
             for m in messages:
                 role = "User" if m["role"] == "user" else "Assistant"
                 combined += f"{role}: {m['content']}\n\n"
-            return self.call_llm(combined.strip())
+            return self.call_llm(combined.strip(), markdown=False)
 
     @abstractmethod
     def execute(self, *args, **kwargs) -> Any:

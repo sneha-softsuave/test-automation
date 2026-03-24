@@ -255,6 +255,82 @@ def compact_page_elements(page_structure: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Intent classifier prompt
+# ---------------------------------------------------------------------------
+
+INTENT_CLASSIFIER_PROMPT = """You are an intent classifier for a test automation chatbot.
+Classify the user's message into exactly one of 6 intents.
+
+CONTEXT:
+- Page under test: {page_url}
+- Available test cases:
+{test_cases_list}
+- Recent conversation (last 3 turns):
+{history}
+
+USER MESSAGE: "{user_message}"
+
+━━━ INTENT DEFINITIONS ━━━
+
+EXECUTE ★ HIGHEST PRIORITY — User wants to RUN test cases in a real browser
+  Keywords: run, execute, play, start, launch, go ahead, try, trigger
+  Examples: "run test 1", "execute all", "Execute 1", "execute 2", "execute 3",
+            "run TC_001", "execute test case 1", "run all tests", "start test 2",
+            "play test 1", "go ahead and run", "execute the login test"
+  ★ RULE: If message contains "execute"/"run"/"play"/"start"/"launch" + (number OR "all" OR test name) → ALWAYS EXECUTE
+  ★ RULE: A bare number after "execute"/"run" refers to the test case at that position
+
+EDIT — User wants to modify existing test case definitions (steps, selectors, names, expected results)
+  Keywords: edit, change, update, modify, fix, rename, replace, remove step, add step to
+  Examples: "change step 2 to click submit", "rename the test", "update the expected result"
+  NOT edit: running tests, creating new tests, asking questions
+
+INFORMATIONAL — User wants to know something or see information (no action required)
+  Keywords: what, how, why, which, show me, list, explain, describe, tell me, how many
+  Examples: "what test cases do I have?", "show me step 3", "how many tests?"
+
+APPROVE — User wants to save/confirm execution RESULTS to the Excel report
+  Keywords: add to excel, save results, approve, confirm, export, approve test case N, yes approve
+  Examples: "add test 1 to excel", "save all results", "approve test case 1", "confirm TC2",
+            "yes approve test case 1", "approve all", "approve tc 2"
+  ⚠ "click approve button" = EXECUTE (browser action, not saving to Excel)
+
+GENERATE — Create NEW test cases or expand the test suite
+  Keywords: generate, create, make, add new test, write test, I need tests for, test the X feature
+  Examples: "generate tests for checkout", "add a test for password reset", "test the signup flow"
+  NOT generate: running existing tests (that is EXECUTE)
+
+CLARIFY — Intent is genuinely ambiguous — multiple intents equally possible
+  Use when: message is vague, incomplete, or matches 2+ intents with no clear winner
+  Examples: "do it", "help", "what about the login?" (no clear action), "test it"
+  ★ THIS is the default for uncertain messages — NOT GENERATE
+  ★ When clarifying, state your best guess about what the user wants, then ask to confirm
+
+━━━ PRIORITY RULES (stop at first match) ━━━
+0. "execute"/"run"/"play"/"start" + (digit OR "all" OR known test name) → EXECUTE immediately
+1. Any clear execute action word + test reference or UI element → EXECUTE
+2. approve/confirm + "test case N" or "tc N" or "excel/results/export" → APPROVE
+3. Question word OR "show/list/explain" with no action → INFORMATIONAL
+4. Modify/change/fix existing steps → EDIT
+5. Clearly creating new tests (generate/create/make/write) → GENERATE
+6. Anything ambiguous or unclear → CLARIFY (never silently fall back to GENERATE)
+
+━━━ RESPONSE FORMAT ━━━
+Return ONLY valid JSON, no other text:
+{{
+  "intent": "execute|edit|informational|approve|generate|clarify",
+  "confidence": 0.0,
+  "reasoning": "one sentence why",
+  "clarify_message": "REQUIRED when intent=clarify: Start with your best guess of what the user wants (e.g. 'It looks like you want to run test 1 — is that right?'). Be specific, reference the actual test case names/numbers if relevant. Then list what you can do.",
+  "metadata": {{
+    "execute_targets": "all or list of test case names/numbers or null",
+    "approve_targets": "all or list of numbers or names or null",
+    "approve_response": "brief confirmation message or null"
+  }}
+}}"""
+
+
+# ---------------------------------------------------------------------------
 # Intro / confirm prompts
 # ---------------------------------------------------------------------------
 
@@ -268,9 +344,9 @@ PAGE SUMMARY (JSON):
 USER QUESTION:
 {question}
 
-Answer the question directly and helpfully in 2-4 sentences. If relevant, reference specific elements visible on the page.
+Answer the question directly and helpfully. If relevant, reference specific elements visible on the page.
 Do NOT generate test cases. Do NOT output JSON.
-Return ONLY the plain text answer."""
+Return ONLY the Markdown answer."""
 
 
 EDIT_PROMPT = """You are an AI test assistant. The user wants to make a specific edit to an existing test suite.
@@ -301,7 +377,7 @@ Write 2-3 sentences in plain, friendly English:
 3. End by asking the user what they would like to test.
 
 Tone: concise, conversational, helpful.
-Return ONLY the message text. No JSON. No markdown headings. No preamble."""
+Return ONLY the message text. No JSON. No preamble."""
 
 PAGE_CONFIRM_PROMPT = """You are an AI test assistant. You just generated the following test suite.
 
@@ -309,9 +385,10 @@ TEST SUITE SUMMARY:
 - Total test cases: {tc_count}
 - Test case names: {tc_names}
 
-Write 1 short sentence (max 20 words) confirming what you created.
-Example: "I've created 3 test cases covering valid login, invalid credentials, and forgot password."
-Return ONLY the sentence. No JSON. No extra text."""
+Write 1-2 sentences (max 30 words) confirming what you created.
+Use **bold** for test case names. You may use a short bullet list if more than 3 cases.
+Example: "I've created 3 test cases: **Valid Login**, **Invalid Credentials**, and **Forgot Password**."
+Return ONLY the sentence or list. No JSON. No extra text."""
 
 
 GENERATOR_PROMPT = """You are an expert Playwright test case generator.
@@ -511,6 +588,8 @@ IMPORTANT:
 - Use the actual selectors found in the page data (inputs, buttons, headings above)
 - Generate as many test cases as needed to cover the user intent
 - Keep selectors accurate to what exists on the real page
+
+{browser_context_note}
 """
 
 
@@ -614,6 +693,84 @@ class TestCaseGeneratorAgent(BaseAgent):
             except Exception:
                 return "I can see the page has been analysed. Could you clarify what you'd like to know?"
 
+    def classify_approve_intent(self, user_message: str, test_cases: list) -> dict:
+        """
+        Returns {"approve": True, "targets": "all"|[ints]|[names], "response": str}
+        or      {"approve": False}
+        Uses the LLM so it handles any natural-language phrasing or name reference.
+        """
+        import json as _json
+        tc_lines = "\n".join(
+            f"{i + 1}. {tc.get('name', f'Test {i + 1}')}"
+            for i, tc in enumerate(test_cases)
+        ) or "(no test cases generated yet)"
+
+        prompt = (
+            f"Available test cases:\n{tc_lines}\n\n"
+            f'User message: "{user_message}"\n\n'
+            "Is the user asking to add, approve, save, confirm, include, or export "
+            "test case results to Excel or a spreadsheet?\n\n"
+            "Reply ONLY with valid JSON — no other text:\n"
+            '- If YES: {"approve": true, "targets": "all" | [1, 2] | ["Exact Name"], '
+            '"response": "brief one-line confirmation"}\n'
+            "  - Use \"all\" if they want everything\n"
+            "  - Use 1-based integer array if they reference by number\n"
+            "  - Use name strings (exactly from the list above) if they reference by name\n"
+            '- If NO:  {"approve": false}'
+        )
+        try:
+            result = self.call_llm(prompt).strip()
+            # strip markdown code fences if present
+            if result.startswith("```"):
+                result = result.split("```")[1]
+                if result.startswith("json"):
+                    result = result[4:]
+            return _json.loads(result)
+        except Exception as e:
+            logger.warning(f"[classify_approve_intent] failed: {e}")
+            return {"approve": False}
+
+    def classify_intent(
+        self,
+        user_message: str,
+        test_cases: list,
+        page_url: str = "",
+        history: list = None,
+    ) -> dict:
+        """
+        Semantically classifies user message into one of 6 intents:
+        execute | edit | informational | approve | generate | clarify
+        Falls back to {"intent": "generate"} on any error.
+        """
+        import json as _json
+
+        tc_lines = "\n".join(
+            f"{i + 1}. {tc.get('name', f'Test {i + 1}')}"
+            for i, tc in enumerate(test_cases)
+        ) or "(no test cases yet)"
+
+        recent = ""
+        for m in (history or [])[-6:]:
+            role = "User" if m["role"] == "user" else "Assistant"
+            recent += f"{role}: {m['content'][:200]}\n"
+
+        prompt = INTENT_CLASSIFIER_PROMPT.format(
+            page_url=page_url or "unknown",
+            test_cases_list=tc_lines,
+            history=recent.strip() or "(start of conversation)",
+            user_message=user_message,
+        )
+        try:
+            raw = self.call_llm(prompt).strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            return _json.loads(raw)
+        except Exception as e:
+            logger.warning(f"[classify_intent] failed: {e}")
+            return {"intent": "generate", "confidence": 0.0, "metadata": {}}
+
     def generate_edit(self, test_suite: Dict[str, Any], instruction: str, history: list = None) -> Dict[str, Any]:
         """
         Apply a surgical edit to an existing test suite based on user instruction.
@@ -627,7 +784,7 @@ class TestCaseGeneratorAgent(BaseAgent):
         )
         messages = _trim_history(history or []) + [{"role": "user", "content": instruction}]
         try:
-            raw = self.call_llm_chat(system, messages)
+            raw = self.call_llm_chat(system, messages, markdown=False)
             return self._parse_json_response(raw)
         except Exception as e:
             logger.warning(f"[generate_edit] multi-turn failed ({e}), falling back to single-turn")
@@ -636,7 +793,7 @@ class TestCaseGeneratorAgent(BaseAgent):
                     suite_json=_json.dumps(test_suite, indent=2),
                     instruction=instruction,
                 )
-                raw = self.call_llm(prompt)
+                raw = self.call_llm(prompt, markdown=False)
                 return self._parse_json_response(raw)
             except Exception as e2:
                 logger.error(f"[generate_edit] Failed: {e2}")
@@ -664,6 +821,7 @@ class TestCaseGeneratorAgent(BaseAgent):
         base_url: Optional[str] = None,
         test_email: str = "test@example.com",
         test_password: str = "password123",
+        browser_already_on_page: bool = False,
     ) -> Dict[str, Any]:
         """
         Generate a complete EnhancedTestSuite from page structure and user intent.
@@ -704,6 +862,22 @@ class TestCaseGeneratorAgent(BaseAgent):
             parsed = urlparse(url)
             base_url = f"{parsed.scheme}://{parsed.netloc}"
 
+        if browser_already_on_page:
+            browser_context_note = (
+                f"BROWSER SESSION: The browser is ALREADY OPEN on this page ({url}). "
+                f"This is a continuous test session — do NOT add a goto step to navigate "
+                f"to {url}. The browser is already there. Start each test case directly "
+                f"from the first real interaction (click, fill, assert) on the elements "
+                f"listed above. Only add a goto step if the test explicitly needs to "
+                f"navigate to a DIFFERENT page (e.g. a sub-page or external URL)."
+            )
+        else:
+            browser_context_note = (
+                f"BROWSER SESSION: The browser starts fresh. Add a goto step as the "
+                f"first step of each test case to navigate to the test page ({url}). "
+                f"Use the full URL in the goto step's test_data.url field."
+            )
+
         prompt = GENERATOR_PROMPT.format(
             url=url,
             title=title,
@@ -720,13 +894,15 @@ class TestCaseGeneratorAgent(BaseAgent):
             base_url=base_url,
             test_email=test_email,
             test_password=test_password,
+            browser_context_note=browser_context_note,
         )
 
         logger.info(
-            f"Generating test cases | provider={self.provider} | url={url} | intent={intent[:80]}"
+            f"Generating test cases | provider={self.provider} | url={url} | "
+            f"browser_already_on_page={browser_already_on_page} | intent={intent[:80]}"
         )
 
-        raw = self.call_llm(prompt)
+        raw = self.call_llm(prompt, markdown=False)
         return self._parse_json_response(raw)
 
     def _parse_json_response(self, raw: str) -> Dict[str, Any]:

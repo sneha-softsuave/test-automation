@@ -27,11 +27,11 @@ def extract_selectors(url: str, headless: bool = True, timeout: int = 30000, sto
         page = context.new_page()
 
         try:
-            # Use "load" instead of "networkidle" — networkidle times out on pages
-            # with continuous polling, websockets, or long-lived analytics requests.
-            # "load" fires once the DOM and all subresources are ready, which is
-            # sufficient for element extraction.
-            page.goto(url, timeout=timeout, wait_until="load")
+            # Use "domcontentloaded" — fires as soon as the HTML is parsed and the
+            # DOM is built, before images/stylesheets/JS bundles finish loading.
+            # "load" can time-out on React SPAs that lazy-load many resources;
+            # the DOM is all we need for element extraction.
+            page.goto(url, timeout=timeout, wait_until="domcontentloaded")
             # Best-effort: wait for network to settle so dynamic content renders.
             # Capped at 5 s and silently ignored — never blocks extraction.
             try:

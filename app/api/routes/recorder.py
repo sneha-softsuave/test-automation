@@ -473,6 +473,12 @@ In 1-2 sentences, explain what went wrong and what the user should change in the
         _cmd_tokens["cost_usd"] = round(stats_after["total_cost_usd"] - stats_before["total_cost_usd"], 8)
         return executed_steps, last_screenshot_b64, last_url
 
+    # Immediately signal "parsing command" to the chat window via SSE
+    await sse_manager.broadcast(request.session_id, {
+        "type": "chat_thinking",
+        "message": "Parsing command…",
+    })
+
     try:
         executed_steps, screenshot_b64, current_url = await _run_in_plain_thread(_execute)
     except Exception as e:

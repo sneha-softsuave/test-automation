@@ -995,63 +995,81 @@ class ChatGenerateRequest(PydanticBaseModel):
 @router.post("/analyze-url")
 async def analyze_url(
     request: AnalyzeUrlRequest,
+    background_tasks: BackgroundTasks,
     headless: Optional[bool] = Query(default=True),
 ):
     """
     Step 1 of the chatbot Generate flow.
 
-    Scrapes the URL, builds a compact page summary, asks the LLM to describe
-    the page in plain English, creates a server-side session, and returns
-    { session_id, message, compact_summary }.
+    Returns a session_id immediately so the frontend can open an SSE connection.
+    The scraping + LLM intro run in a background task and are delivered via SSE
+    as a 'chat_page_ready' event.
     """
-    from app.agents.test_case_generator import TestCaseGeneratorAgent, compact_page_elements
-    from app.agents.base_agent import LLMProvider as AgentLLMProvider
-    from app.tools.selector_extractor import SelectorExtractor
-    from app.core.chat_sessions import create_session, append_message
+    from app.core.chat_sessions import create_pending_session, finalize_session, append_message
+    from app.core.sse_manager import sse_manager
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
     validate_api_key(provider_name)
 
-    print(f"\n[analyze-url] Scraping {request.url} | provider={provider_name}")
+    session_id = create_pending_session()
+    print(f"\n[analyze-url] session={session_id} | url={request.url} | provider={provider_name}")
 
-    try:
-        extractor = SelectorExtractor(headless=headless)
-        page_structure = await extractor.extract_selectors(request.url)
+    async def _analyze():
+        import asyncio as _asyncio
+        from app.agents.test_case_generator import TestCaseGeneratorAgent, compact_page_elements
+        from app.agents.base_agent import LLMProvider as AgentLLMProvider
+        from app.tools.selector_extractor import SelectorExtractor
+        try:
+            await sse_manager.broadcast(session_id, {
+                "type": "chat_thinking",
+                "message": "Analyzing page…",
+            })
+            extractor = SelectorExtractor(headless=headless)
+            page_structure = await extractor.extract_selectors(request.url)
+            compact = compact_page_elements(page_structure)
 
-        compact = compact_page_elements(page_structure)
+            provider_enum = AgentLLMProvider(provider_name)
+            agent = TestCaseGeneratorAgent(provider=provider_enum)
+            message = await _asyncio.to_thread(agent.generate_intro, compact)
 
-        provider_enum = AgentLLMProvider(provider_name)
-        agent = TestCaseGeneratorAgent(provider=provider_enum)
-        message = agent.generate_intro(compact)
+            finalize_session(session_id, page_structure, compact)
+            append_message(session_id, "assistant", message)
 
-        session_id = create_session(page_structure, compact)
-        append_message(session_id, "assistant", message)
+            print(f"[analyze-url] Session ready: {session_id}")
+            await sse_manager.broadcast(session_id, {
+                "type": "chat_page_ready",
+                "message": message,
+                "compact_summary": compact,
+                "session_id": session_id,
+            })
+        except Exception as e:
+            import traceback
+            print(f"[analyze-url] Error: {traceback.format_exc()}")
+            await sse_manager.broadcast(session_id, {
+                "type": "chat_error",
+                "message": f"Failed to analyse page: {str(e)}",
+            })
 
-        print(f"[analyze-url] Session created: {session_id}")
-        return {
-            "session_id": session_id,
-            "message": message,
-            "compact_summary": compact,
-        }
-
-    except Exception as e:
-        import traceback
-        print(f"[analyze-url] Error: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error analysing URL: {str(e)}")
+    background_tasks.add_task(_analyze)
+    return {"session_id": session_id, "status": "thinking"}
 
 
 @router.post("/chat-generate")
-async def chat_generate(request: ChatGenerateRequest):
+async def chat_generate(request: ChatGenerateRequest, background_tasks: BackgroundTasks):
     """
     Step 2+ of the chatbot Generate flow.
 
-    Retrieves the server-side session (full page_structure), generates test cases
-    from the user's message, appends to conversation history, and returns
-    { session_id, message, test_suite }.
+    Returns immediately with {status:"thinking"} then streams the result via SSE
+    on the session_id channel using chat_thinking → chat_test_suite events.
     """
+    import asyncio as _asyncio
     from app.agents.test_case_generator import TestCaseGeneratorAgent
     from app.agents.base_agent import LLMProvider as AgentLLMProvider
-    from app.core.chat_sessions import get_session, append_message, set_last_test_suite, get_last_test_suite, get_messages
+    from app.core.chat_sessions import (
+        get_session, append_message, set_last_test_suite, get_last_test_suite,
+        get_messages, get_credentials, set_credentials,
+    )
+    from app.core.sse_manager import sse_manager
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
     validate_api_key(provider_name)
@@ -1066,16 +1084,12 @@ async def chat_generate(request: ChatGenerateRequest):
     history = get_messages(request.session_id)
     append_message(request.session_id, "user", request.user_message)
 
-    # Extract and persist any credentials mentioned in the message
-    from app.core.chat_sessions import get_credentials, set_credentials
     new_creds = _extract_credentials(request.user_message)
     session_creds = get_credentials(request.session_id)
     if new_creds:
         session_creds = {**session_creds, **new_creds}
         set_credentials(request.session_id, session_creds)
 
-    # Build a contextual intent that includes the prior test cases and full
-    # conversation so follow-up messages like "remove forgot password" work correctly.
     last_suite = get_last_test_suite(request.session_id)
     if last_suite:
         prior_tc_names = ", ".join(
@@ -1090,7 +1104,6 @@ async def chat_generate(request: ChatGenerateRequest):
     else:
         effective_intent = request.user_message
 
-    # Prepend last 3 user messages for conversational context
     recent_user_lines = [m["content"][:300] for m in history if m["role"] == "user"][-3:]
     if recent_user_lines:
         effective_intent = (
@@ -1099,48 +1112,80 @@ async def chat_generate(request: ChatGenerateRequest):
             + "\n\n" + effective_intent
         )
 
-    print(f"\n[chat-generate] session={request.session_id} | provider={provider_name}")
-    print(f"[chat-generate] effective_intent={effective_intent[:120]}")
+    # Snapshot values needed inside the background task
+    _session_id = request.session_id
+    _app_name = request.app_name or "My App"
+    _test_email = session_creds.get("email") or request.test_email or "test@example.com"
+    _test_password = session_creds.get("password") or request.test_password or "password123"
+    _new_creds = new_creds
+    _provider_name = provider_name
 
-    try:
-        provider_enum = AgentLLMProvider(provider_name)
-        agent = TestCaseGeneratorAgent(provider=provider_enum)
+    async def _generate():
+        try:
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_thinking",
+                "message": "Generating test cases…",
+            })
 
-        test_suite = agent.generate(
-            page_structure=page_structure,
-            intent=effective_intent,
-            app_name=request.app_name or "My App",
-            base_url=None,
-            test_email=session_creds.get("email") or request.test_email or "test@example.com",
-            test_password=session_creds.get("password") or request.test_password or "password123",
-        )
+            from app.services.executor_session_manager import executor_session_manager as _esm_gen
+            _browser_alive = _esm_gen.get_session(_session_id) is not None
 
-        confirm_msg = agent.generate_confirm(test_suite, compact)
-        # Prepend credential acknowledgment if we just captured new creds
-        if new_creds:
-            parts = []
-            if new_creds.get("email"):
-                parts.append(f"email: {new_creds['email']}")
-            if new_creds.get("password"):
-                parts.append(f"password: {new_creds['password']}")
-            ack = f"Got it — I'll use {' and '.join(parts)} for tests requiring login. " if parts else ""
-            confirm_msg = ack + confirm_msg
-        append_message(request.session_id, "assistant", confirm_msg)
-        set_last_test_suite(request.session_id, test_suite)
+            provider_enum = AgentLLMProvider(_provider_name)
+            agent = TestCaseGeneratorAgent(provider=provider_enum)
 
-        tc_count = len(test_suite.get("test_cases", []))
-        print(f"[chat-generate] Generated {tc_count} test case(s)")
+            test_suite = await _asyncio.to_thread(
+                agent.generate,
+                page_structure=page_structure,
+                intent=effective_intent,
+                app_name=_app_name,
+                base_url=None,
+                test_email=_test_email,
+                test_password=_test_password,
+                browser_already_on_page=_browser_alive,
+            )
 
-        return {
-            "session_id": request.session_id,
-            "message": confirm_msg,
-            "test_suite": test_suite,
-        }
+            # Re-sequence TC IDs to continue from the highest existing ID in this session
+            import re as _re
+            _prior = last_suite or {}
+            _max_num = max(
+                (int(m.group(0)) for tc in _prior.get("test_cases", [])
+                 if (m := _re.search(r'\d+', str(tc.get("id", ""))))),
+                default=0,
+            )
+            for _i, _tc in enumerate(test_suite.get("test_cases", [])):
+                _tc["id"] = f"TC_{_max_num + _i + 1:03d}"
 
-    except Exception as e:
-        import traceback
-        print(f"[chat-generate] Error: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error generating test cases: {str(e)}")
+            confirm_msg = await _asyncio.to_thread(agent.generate_confirm, test_suite, compact)
+            if _new_creds:
+                parts = []
+                if _new_creds.get("email"):
+                    parts.append(f"email: {_new_creds['email']}")
+                if _new_creds.get("password"):
+                    parts.append(f"password: {_new_creds['password']}")
+                ack = f"Got it — I'll use {' and '.join(parts)} for tests requiring login. " if parts else ""
+                confirm_msg = ack + confirm_msg
+
+            append_message(_session_id, "assistant", confirm_msg)
+            set_last_test_suite(_session_id, test_suite)
+
+            tc_count = len(test_suite.get("test_cases", []))
+            print(f"[chat-generate] Generated {tc_count} test case(s) for session {_session_id[:8]}")
+
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_test_suite",
+                "message": confirm_msg,
+                "test_suite": test_suite,
+            })
+        except Exception as e:
+            import traceback
+            print(f"[chat-generate] Error: {traceback.format_exc()}")
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_error",
+                "message": f"Error generating test cases: {str(e)}",
+            })
+
+    background_tasks.add_task(_generate)
+    return {"session_id": request.session_id, "status": "thinking"}
 
 
 # ---------------------------------------------------------------------------
@@ -1299,6 +1344,420 @@ def _classify_intent(message: str) -> str:
     return "generate"
 
 
+# ---------------------------------------------------------------------------
+# POST /chat-message — unified LLM-classified intent entry point
+# ---------------------------------------------------------------------------
+
+class ChatMessageRequest(PydanticBaseModel):
+    session_id: str
+    user_message: str
+    llm_provider: Optional[str] = None
+    headless: bool = True
+    timeout: int = 30000
+
+
+@router.post("/chat-message")
+async def chat_message(request: ChatMessageRequest, background_tasks: BackgroundTasks):
+    """
+    Unified entry point for all chat intents.
+    1. Classifies intent via LLM (fast synchronous call with full context).
+    2. Routes internally to the same handler logic as the existing endpoints.
+    3. Returns immediately; SSE delivers results on the session channel.
+    """
+    import asyncio as _asyncio
+    from app.agents.test_case_generator import TestCaseGeneratorAgent
+    from app.agents.base_agent import LLMProvider as AgentLLMProvider
+    from app.core.chat_sessions import (
+        get_session, append_message, get_last_test_suite, set_last_test_suite,
+        get_messages, get_credentials, set_credentials,
+    )
+    from app.core.sse_manager import sse_manager
+
+    provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
+    validate_api_key(provider_name)
+
+    session = get_session(request.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+
+    last_suite = get_last_test_suite(request.session_id)
+    test_cases = last_suite.get("test_cases", []) if last_suite else []
+    page_url = session.get("compact", {}).get("url", "")
+    history = get_messages(request.session_id)
+
+    # Extract credentials first — always useful regardless of intent
+    new_creds = _extract_credentials(request.user_message)
+    if new_creds:
+        existing = get_credentials(request.session_id)
+        set_credentials(request.session_id, {**existing, **new_creds})
+
+    provider_enum = AgentLLMProvider(provider_name)
+    agent = TestCaseGeneratorAgent(provider=provider_enum)
+
+    # ── Fast pre-classification — bypass LLM for unambiguous patterns ─────────
+    import re as _intent_re
+    from app.core.chat_sessions import get_pending_approval as _get_pending
+    _msg = request.user_message.strip()
+    _pending_results = _get_pending(request.session_id)
+
+    _YES_RE = _intent_re.compile(
+        r'^(yes|yeah|yep|yup|sure|ok|okay|confirm|add it|go ahead|do it|proceed)\b',
+        _intent_re.IGNORECASE,
+    )
+    _NO_RE = _intent_re.compile(
+        r'^(no|nope|nah|cancel|skip|don\'t|dont|stop)\b',
+        _intent_re.IGNORECASE,
+    )
+
+    if _pending_results is not None and _YES_RE.match(_msg):
+        classification: dict = {
+            "intent": "approve",
+            "confidence": 1.0,
+            "reasoning": "pre-classified: confirming pending approval",
+            "metadata": {"approve_targets": "__pending_confirm__"},
+        }
+    elif _pending_results is not None and _NO_RE.match(_msg):
+        classification = {
+            "intent": "approve",
+            "confidence": 1.0,
+            "reasoning": "pre-classified: cancelling pending approval",
+            "metadata": {"approve_targets": "__pending_cancel__"},
+        }
+    else:
+        _EXEC_RE = _intent_re.compile(
+            r'^(execute|run|play|start|launch)\s*(?:test\s*case\s*|test\s*|tc\s*)?(\d+(?:\s*[,\s]\s*\d+)*|all)\b',
+            _intent_re.IGNORECASE,
+        )
+        _exec_m = _EXEC_RE.match(_msg)
+        if _exec_m:
+            _raw_targets = _exec_m.group(2).strip().lower()
+            _exec_targets: object = "all" if _raw_targets == "all" else [
+                int(n) for n in _intent_re.findall(r'\d+', _raw_targets)
+            ]
+            classification = {
+                "intent": "execute",
+                "confidence": 1.0,
+                "reasoning": "pre-classified: execute keyword + test reference",
+                "metadata": {"execute_targets": _exec_targets},
+            }
+        else:
+            # ── Classify intent via LLM (non-blocking) ───────────────────────
+            classification = await _asyncio.to_thread(
+                agent.classify_intent,
+                request.user_message,
+                test_cases,
+                page_url,
+                history[-6:],
+            )
+
+    intent = classification.get("intent", "generate")
+    metadata = classification.get("metadata", {})
+    print(f"[chat-message] intent={intent} confidence={classification.get('confidence')} reason={classification.get('reasoning', '')[:80]}")
+    # ────────────────────────────────────────────────────────────────────────
+
+    _session_id = request.session_id
+
+    # ── Execute ──────────────────────────────────────────────────────────────
+    if intent == "execute":
+        # Delegate to /chat-execute logic by building an equivalent request
+        execute_req = ChatExecuteRequest(
+            session_id=request.session_id,
+            user_message=request.user_message,
+            llm_provider=request.llm_provider,
+            headless=request.headless,
+            timeout=request.timeout,
+        )
+        return await chat_execute(execute_req, background_tasks)
+
+    # ── Approve ──────────────────────────────────────────────────────────────
+    elif intent == "approve":
+        from app.core.chat_sessions import (
+            get_execution_result, get_pending_approval,
+            set_pending_approval, clear_pending_approval,
+        )
+        targets = metadata.get("approve_targets")
+        append_message(_session_id, "user", request.user_message)
+
+        def _result_lines(results: list) -> list[str]:
+            lines = []
+            for r in results:
+                icon = "✅" if r.get("status") == "passed" else "❌"
+                desc = (r.get("expected_results") or [None])[0] or f"{len(r.get('steps', []))} steps"
+                lines.append(f"- **{r['name']}** {icon} {r.get('status', '').capitalize()} — {desc}")
+            return lines
+
+        # ── User confirmed a pending approval ────────────────────────────────
+        if targets == "__pending_confirm__":
+            confirmed = get_pending_approval(request.session_id) or []
+            clear_pending_approval(request.session_id)
+            if confirmed:
+                success_msg = "✅ Added to Excel successfully!\n" + "\n".join(_result_lines(confirmed))
+            else:
+                success_msg = "Nothing to add — please run the tests first and then approve."
+
+            async def _do_confirm():
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_approve",
+                    "results": confirmed,
+                    "message": success_msg,
+                })
+
+            background_tasks.add_task(_do_confirm)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+        # ── User cancelled a pending approval ────────────────────────────────
+        if targets == "__pending_cancel__":
+            clear_pending_approval(request.session_id)
+            cancel_msg = "Okay, I won't add anything to Excel. Let me know if you change your mind."
+            append_message(_session_id, "assistant", cancel_msg)
+
+            async def _do_cancel():
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": cancel_msg,
+                    "intent": "approve",
+                })
+
+            background_tasks.add_task(_do_cancel)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+        # ── New approval request — match results and ask for confirmation ─────
+        _raw_results = get_execution_result(request.session_id)
+        exec_results = _raw_results if isinstance(_raw_results, list) else []
+
+        if not exec_results:
+            matched: list = []
+        elif targets is None or targets == "all":
+            matched = exec_results
+        elif isinstance(targets, list) and targets and isinstance(targets[0], int):
+            # Look up by TC ID (e.g. 1 → "TC_001") so "approve test case 1" always
+            # means TC_001 regardless of execution order
+            _target_ids = {f"TC_{n:03d}" for n in targets}
+            matched = [r for r in exec_results if r.get("id", "").upper() in _target_ids]
+            if not matched:
+                # fallback: position-based (1-indexed) for sessions where IDs differ
+                matched = [exec_results[n - 1] for n in targets if 0 < n <= len(exec_results)]
+        else:
+            matched = [
+                r for r in exec_results
+                if any(str(t).lower() in r.get("name", "").lower() for t in (targets or []))
+            ]
+
+        if not matched:
+            response_msg = (
+                "I don't have any execution results to add. "
+                "Please run the tests first, then ask me to approve them."
+            )
+
+            async def _approve_none():
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": response_msg,
+                    "intent": "approve",
+                })
+
+            background_tasks.add_task(_approve_none)
+        else:
+            # Store pending and ask user to confirm
+            set_pending_approval(_session_id, matched)
+            confirm_ask = (
+                "I'd like to add the following to Excel:\n"
+                + "\n".join(_result_lines(matched))
+                + "\n\nShall I go ahead? *(yes / no)*"
+            )
+            append_message(_session_id, "assistant", confirm_ask)
+
+            async def _approve_ask():
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": confirm_ask,
+                    "intent": "approve",
+                })
+
+            background_tasks.add_task(_approve_ask)
+
+        return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+    # ── Informational ─────────────────────────────────────────────────────────
+    elif intent == "informational":
+        compact = session["compact"]
+        append_message(_session_id, "user", request.user_message)
+        _user_message = request.user_message
+
+        async def _info():
+            try:
+                await sse_manager.broadcast(_session_id, {"type": "chat_thinking", "message": "Thinking…"})
+                answer = await _asyncio.to_thread(agent.answer_question, compact, _user_message, history)
+                append_message(_session_id, "assistant", answer)
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": answer,
+                    "intent": "informational",
+                })
+            except Exception as e:
+                import traceback
+                print(f"[chat-message/informational] Error: {traceback.format_exc()}")
+                await sse_manager.broadcast(_session_id, {"type": "chat_error", "message": f"Error: {str(e)}"})
+
+        background_tasks.add_task(_info)
+        return {"session_id": _session_id, "status": "thinking", "intent": "informational"}
+
+    # ── Edit ──────────────────────────────────────────────────────────────────
+    elif intent == "edit":
+        if not last_suite:
+            raise HTTPException(status_code=400, detail="No test cases to edit. Please generate test cases first.")
+        compact = session["compact"]
+        append_message(_session_id, "user", request.user_message)
+        _user_message = request.user_message
+
+        async def _edit():
+            try:
+                await sse_manager.broadcast(_session_id, {"type": "chat_thinking", "message": "Applying edits…"})
+                updated = await _asyncio.to_thread(agent.generate_edit, last_suite, _user_message, history)
+                set_last_test_suite(_session_id, updated)
+                edit_msg = await _asyncio.to_thread(agent.generate_confirm, updated, compact)
+                append_message(_session_id, "assistant", edit_msg)
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_test_suite",
+                    "message": edit_msg,
+                    "test_suite": updated,
+                    "intent": "edit",
+                })
+            except Exception as e:
+                import traceback
+                print(f"[chat-message/edit] Error: {traceback.format_exc()}")
+                await sse_manager.broadcast(_session_id, {"type": "chat_error", "message": f"Error: {str(e)}"})
+
+        background_tasks.add_task(_edit)
+        return {"session_id": _session_id, "status": "thinking", "intent": "edit"}
+
+    # ── Clarify ───────────────────────────────────────────────────────────────
+    elif intent == "clarify":
+        # Use the LLM's context-aware clarify_message; build a dynamic fallback if absent
+        clarify_msg = classification.get("clarify_message") or ""
+        if not clarify_msg.strip():
+            _tc_names = [tc.get("name", f"Test {i+1}") for i, tc in enumerate(test_cases)]
+            _tc_hint = (
+                f" I can see you have {len(_tc_names)} test case(s): "
+                + ", ".join(f"**{n}**" for n in _tc_names[:5])
+                + ("..." if len(_tc_names) > 5 else "") + "."
+            ) if _tc_names else ""
+            clarify_msg = (
+                f"I'm not sure what you'd like to do with \"{request.user_message}\"."
+                f"{_tc_hint} Did you mean to:\n"
+                "- **Run tests** — say *\"execute all\"* or *\"run test 1\"*\n"
+                "- **Generate new test cases** — say *\"generate tests for checkout\"*\n"
+                "- **Edit a test** — say *\"change step 2 to click submit\"*\n"
+                "- **Save results to Excel** — say *\"approve test case 1\"*\n\n"
+                "What would you like to do?"
+            )
+        append_message(_session_id, "user", request.user_message)
+        append_message(_session_id, "assistant", clarify_msg)
+
+        async def _clarify():
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_response",
+                "message": clarify_msg,
+                "intent": "clarify",
+            })
+
+        background_tasks.add_task(_clarify)
+        return {"session_id": _session_id, "status": "thinking", "intent": "clarify"}
+
+    # ── Generate (default) ────────────────────────────────────────────────────
+    else:
+        page_structure = session["page_structure"]
+        compact = session["compact"]
+        session_creds = get_credentials(_session_id)
+
+        if last_suite:
+            prior_tc_names = ", ".join(
+                f"{tc.get('id', '')}: {tc.get('name', '')}"
+                for tc in last_suite.get("test_cases", [])
+            )
+            effective_intent = (
+                f"Previously generated test cases: {prior_tc_names}\n\n"
+                f"User's follow-up instruction: {request.user_message}\n\n"
+                "Apply the follow-up instruction to refine or replace the test cases as requested."
+            )
+        else:
+            effective_intent = request.user_message
+
+        recent_user_lines = [m["content"][:300] for m in history if m["role"] == "user"][-3:]
+        if recent_user_lines:
+            effective_intent = (
+                "Recent conversation context:\n"
+                + "\n".join(f"- {l}" for l in recent_user_lines)
+                + "\n\n" + effective_intent
+            )
+
+        append_message(_session_id, "user", request.user_message)
+        _test_email = session_creds.get("email") or "test@example.com"
+        _test_password = session_creds.get("password") or "password123"
+        _new_creds = new_creds
+
+        async def _generate():
+            try:
+                await sse_manager.broadcast(_session_id, {"type": "chat_thinking", "message": "Generating test cases…"})
+
+                from app.services.executor_session_manager import executor_session_manager as _esm_gen
+                _browser_alive = _esm_gen.get_session(_session_id) is not None
+
+                test_suite = await _asyncio.to_thread(
+                    agent.generate,
+                    page_structure=page_structure,
+                    intent=effective_intent,
+                    app_name="My App",
+                    base_url=None,
+                    test_email=_test_email,
+                    test_password=_test_password,
+                    browser_already_on_page=_browser_alive,
+                )
+
+                # Re-sequence TC IDs to continue from the highest existing ID in this session
+                import re as _re
+                _prior = last_suite or {}
+                _max_num = max(
+                    (int(m.group(0)) for tc in _prior.get("test_cases", [])
+                     if (m := _re.search(r'\d+', str(tc.get("id", ""))))),
+                    default=0,
+                )
+                for _i, _tc in enumerate(test_suite.get("test_cases", [])):
+                    _tc["id"] = f"TC_{_max_num + _i + 1:03d}"
+
+                confirm_msg = await _asyncio.to_thread(agent.generate_confirm, test_suite, compact)
+                if _new_creds:
+                    parts = []
+                    if _new_creds.get("email"):
+                        parts.append(f"email: {_new_creds['email']}")
+                    if _new_creds.get("password"):
+                        parts.append(f"password: {_new_creds['password']}")
+                    ack = f"Got it — I'll use {' and '.join(parts)} for tests requiring login. " if parts else ""
+                    confirm_msg = ack + confirm_msg
+
+                append_message(_session_id, "assistant", confirm_msg)
+                set_last_test_suite(_session_id, test_suite)
+
+                tc_count = len(test_suite.get("test_cases", []))
+                print(f"[chat-message/generate] Generated {tc_count} test case(s) for session {_session_id[:8]}")
+
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_test_suite",
+                    "message": confirm_msg,
+                    "test_suite": test_suite,
+                })
+            except Exception as e:
+                import traceback
+                print(f"[chat-message/generate] Error: {traceback.format_exc()}")
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_error",
+                    "message": f"Error generating test cases: {str(e)}",
+                })
+
+        background_tasks.add_task(_generate)
+        return {"session_id": _session_id, "status": "thinking", "intent": "generate"}
+
+
 def _parse_tc_selection(message: str, test_cases: list) -> list:
     """
     Parse which test cases the user wants to run.
@@ -1335,13 +1794,18 @@ class ChatInfoRequest(PydanticBaseModel):
 
 
 @router.post("/chat-informational")
-async def chat_informational(request: ChatInfoRequest):
+async def chat_informational(request: ChatInfoRequest, background_tasks: BackgroundTasks):
     """
     Answer an informational question about the analysed page without generating test cases.
+
+    Returns immediately with {status:"thinking"} then streams the answer via SSE
+    on the session_id channel using chat_thinking → chat_response events.
     """
+    import asyncio as _asyncio
     from app.agents.test_case_generator import TestCaseGeneratorAgent
     from app.agents.base_agent import LLMProvider as AgentLLMProvider
     from app.core.chat_sessions import get_session, append_message, get_messages
+    from app.core.sse_manager import sse_manager
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
     validate_api_key(provider_name)
@@ -1354,21 +1818,39 @@ async def chat_informational(request: ChatInfoRequest):
     history = get_messages(request.session_id)
     append_message(request.session_id, "user", request.user_message)
 
-    try:
-        provider_enum = AgentLLMProvider(provider_name)
-        agent = TestCaseGeneratorAgent(provider=provider_enum)
-        answer = agent.answer_question(compact, request.user_message, history=history)
-        append_message(request.session_id, "assistant", answer)
+    _session_id = request.session_id
+    _user_message = request.user_message
+    _provider_name = provider_name
 
-        return {
-            "session_id": request.session_id,
-            "message": answer,
-            "intent": "informational",
-        }
-    except Exception as e:
-        import traceback
-        print(f"[chat-informational] Error: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    async def _answer():
+        try:
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_thinking",
+                "message": "Thinking…",
+            })
+
+            provider_enum = AgentLLMProvider(_provider_name)
+            agent = TestCaseGeneratorAgent(provider=provider_enum)
+            answer = await _asyncio.to_thread(
+                agent.answer_question, compact, _user_message, history
+            )
+            append_message(_session_id, "assistant", answer)
+
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_response",
+                "message": answer,
+                "intent": "informational",
+            })
+        except Exception as e:
+            import traceback
+            print(f"[chat-informational] Error: {traceback.format_exc()}")
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_error",
+                "message": f"Error: {str(e)}",
+            })
+
+    background_tasks.add_task(_answer)
+    return {"session_id": request.session_id, "status": "thinking"}
 
 
 # ---------------------------------------------------------------------------
@@ -1585,9 +2067,10 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
     chat_session_id = request.session_id
 
     async def _run_and_notify():
-        import multiprocessing as _mp
+        import queue as _queue
         import asyncio as _asyncio
-        from app.tools.enhanced_executor import execute_enhanced
+        from app.services.executor_session_manager import executor_session_manager as _esm
+        from app.tools.enhanced_executor import DEFAULT_ACTION_TIMEOUT as _DEFAULT_TIMEOUT
         from urllib.parse import urlparse as _urlparse
 
         _base_url = partial_suite.get("base_url", "")
@@ -1615,8 +2098,9 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
 
         # Track URLs already being/been scraped so we never double-scrape
         _scraped_nav_urls: set = set()
-        # Holds the most recent concurrent re-scrape task so finally can await it
-        _scrape_tasks: list = []
+        # Scrapes detected during execution — deferred so they run AFTER chat_execution_done
+        _pending_scrapes: list = []   # [(nav_url, storage_state), ...]
+        _scrape_tasks: list = []      # asyncio Tasks (started after execution completes)
 
         async def _do_page_scrape(nav_url: str, storage_state):
             """Re-scrape a navigated page and push the AI summary to the chatbot."""
@@ -1661,12 +2145,8 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
             except Exception as _nav_err:
                 print(f"[chat-execute] Re-analysis failed for {nav_url}: {_nav_err}")
 
-        # Carry browser cookies forward from the previous execution so session stays alive
-        _prev_result = get_execution_result(chat_session_id) or {}
-        _initial_storage_state = _prev_result.get("final_storage_state")
-
-        # Queue for live screenshot/navigation/step events from the Playwright subprocess
-        update_queue = _mp.Queue()
+        # Queue for live screenshot/navigation/step events from the executor thread
+        update_queue = _queue.Queue()
         _fwd_state = {"running": True}
 
         async def _forward_updates():
@@ -1689,24 +2169,22 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                             "elements_summary": msg.get("elements_summary", ""),
                             "image_b64": msg.get("image", ""),
                         })
-                        # Re-scrape only on genuine post-login navigation.
-                        # The first page_navigated is always the test's initial page
-                        # load (e.g. navigating to /login as step 1). Track that URL
-                        # and skip it — only subsequent navigations to DIFFERENT pages
-                        # (e.g. /dashboard after login) trigger the re-scrape.
+                        # Collect genuinely new post-login navigations for deferred
+                        # re-scraping.  We intentionally do NOT start the scrape here
+                        # because _do_page_scrape broadcasts page_analysis_start, which
+                        # would appear in the chat before chat_execution_done.
+                        # The scrape tasks are created after execution completes.
                         nav_ss = msg.get("storage_state")
                         if nav_url and nav_ss and _meaningful_navigation(nav_url, _base_url):
                             cur_path = _nav_path(nav_url)
                             if _nav_state["initial_path"] is None:
-                                # First navigation — this is the test setup page, skip
+                                # First navigation — test setup page, skip
                                 _nav_state["initial_path"] = cur_path
                             elif (cur_path != _nav_state["initial_path"]
                                     and nav_url not in _scraped_nav_urls):
-                                # Navigated to a genuinely new page — re-scrape it
+                                # Defer: start scraping after chat_execution_done
                                 _scraped_nav_urls.add(nav_url)
-                                _scrape_tasks.append(
-                                    _asyncio.create_task(_do_page_scrape(nav_url, nav_ss))
-                                )
+                                _pending_scrapes.append((nav_url, nav_ss))
                     elif msg_type == "test_started":
                         await sse_manager.broadcast(exec_session_id, {
                             "type": "step_update",
@@ -1735,23 +2213,52 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                 "message": f"Starting execution of {count} test case(s)...",
             })
 
-            # Run ALL selected test cases in ONE call — browser stays open across all TCs
-            full_result = await execute_enhanced(
+            # Get or create a persistent executor session for this chat session.
+            # The browser stays open between "Execute" clicks — no relaunch overhead.
+            _exec_session = _esm.get_or_create_session(
+                chat_session_id, headless=bool(request.headless)
+            )
+            _timeout = request.timeout or _DEFAULT_TIMEOUT
+
+            # Run ALL selected test cases on the persistent browser thread.
+            # asyncio.to_thread keeps the event loop free so SSE screenshots
+            # can flow while the executor is running.
+            full_result = await _asyncio.to_thread(
+                _exec_session.run_test_suite,
                 partial_suite,
-                headless=request.headless,
-                timeout=request.timeout,
-                update_queue=update_queue,
-                initial_storage_state=_initial_storage_state,
+                update_queue,
+                _timeout,
+                None,  # signal_file — not used in chat-execute
             )
 
             all_results = full_result.get("results", [])
             total_passed = full_result.get("passed", 0)
             total_failed = full_result.get("failed", 0)
-            set_execution_result(chat_session_id, full_result)
 
             summary_msg = f"Execution complete! {total_passed}/{count} test{'s' if count != 1 else ''} passed."
             if total_failed > 0:
                 summary_msg += f" {total_failed} failed."
+
+            # Build formatted tc_results once — reused for SSE payload and session storage
+            tc_results_data = [
+                {
+                    "id": tc.get("id"),
+                    "name": tc.get("name"),
+                    "status": "passed" if r.get("status") == "PASSED" else "failed",
+                    "steps": tc.get("steps", []),
+                    "expected_results": tc.get("expected_results", []),
+                    "test_data": partial_suite.get("test_data", {}),
+                    "error": r.get("error"),
+                }
+                for tc, r in zip(selected, all_results)
+            ]
+            # Merge into accumulated results keyed by TC ID so previous runs aren't lost
+            _existing_raw = get_execution_result(chat_session_id)
+            _existing = _existing_raw if isinstance(_existing_raw, list) else []
+            _by_id = {r["id"]: r for r in _existing if r.get("id")}
+            for _r in tc_results_data:
+                _by_id[_r["id"]] = _r  # upsert: latest run wins for same ID
+            set_execution_result(chat_session_id, list(_by_id.values()))
 
             await sse_manager.broadcast(exec_session_id, {
                 "type": "chat_execution_done",
@@ -1759,24 +2266,22 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                 "message": summary_msg,
                 "summary": {"total": count, "passed": total_passed, "failed": total_failed},
                 "final_url": full_result.get("final_url", ""),
-                "tc_results": [
-                    {
-                        "id": tc.get("id"),
-                        "name": tc.get("name"),
-                        "status": "passed" if r.get("status") == "PASSED" else "failed",
-                        "steps": tc.get("steps", []),
-                        "expected_results": tc.get("expected_results", []),
-                        "test_data": partial_suite.get("test_data", {}),
-                        "error": r.get("error"),
-                    }
-                    for tc, r in zip(selected, all_results)
-                ],
+                "tc_results": tc_results_data,
             })
 
+            # ── Start deferred navigation scrapes (collected during execution) ──
+            # These are started HERE so page_analysis_start only appears in the
+            # chat AFTER the execution summary (chat_execution_done) is visible.
+            for _nav_url, _nav_ss in _pending_scrapes:
+                _rescrape_done.add(exec_session_id)
+                print(f"[chat-execute] Deferred re-scrape → {_nav_url}")
+                _scrape_tasks.append(
+                    _asyncio.create_task(_do_page_scrape(_nav_url, _nav_ss))
+                )
+
             # ── Post-execution fallback re-scrape ─────────────────────────────
-            # The concurrent scrape in _forward_updates handles the common case.
-            # This fallback runs only when the final_url was NOT scraped during
-            # execution (e.g. the nav happened after the last step, in cleanup).
+            # Runs only when the final_url was NOT captured during execution
+            # (e.g. navigation happened after the last measured step).
             final_url = full_result.get("final_url", "")
             if (
                 final_url
@@ -1841,16 +2346,20 @@ class ChatEditRequest(PydanticBaseModel):
 
 
 @router.post("/chat-edit")
-async def chat_edit(request: ChatEditRequest):
+async def chat_edit(request: ChatEditRequest, background_tasks: BackgroundTasks):
     """
     Apply a surgical edit to the stored test suite based on user instruction.
-    Returns the full updated suite inline (no SSE needed).
+
+    Returns immediately with {status:"thinking"} then streams the result via SSE
+    on the session_id channel using chat_thinking → chat_test_suite events.
     """
+    import asyncio as _asyncio
     from app.agents.test_case_generator import TestCaseGeneratorAgent
     from app.agents.base_agent import LLMProvider as AgentLLMProvider
     from app.core.chat_sessions import (
         get_session, append_message, get_last_test_suite, set_last_test_suite, get_messages,
     )
+    from app.core.sse_manager import sse_manager
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
     validate_api_key(provider_name)
@@ -1863,36 +2372,52 @@ async def chat_edit(request: ChatEditRequest):
     if not last_suite:
         raise HTTPException(status_code=400, detail="No test cases to edit. Please generate test cases first.")
 
+    compact = session["compact"]
     history = get_messages(request.session_id)
     append_message(request.session_id, "user", request.user_message)
 
-    try:
-        provider_enum = AgentLLMProvider(provider_name)
-        agent = TestCaseGeneratorAgent(provider=provider_enum)
-        updated_suite = agent.generate_edit(last_suite, request.user_message, history=history)
-        set_last_test_suite(request.session_id, updated_suite)
+    _session_id = request.session_id
+    _user_message = request.user_message
+    _provider_name = provider_name
 
-        tc_count = len(updated_suite.get("test_cases", []))
-        confirm_msg = agent.generate_confirm(updated_suite, session["compact"])
-        edit_msg = f"Done! I've updated the test suite. {confirm_msg}"
-        append_message(request.session_id, "assistant", edit_msg)
+    async def _edit():
+        try:
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_thinking",
+                "message": "Applying edits…",
+            })
 
-        print(f"[chat-edit] session={request.session_id} updated {tc_count} test case(s)")
+            provider_enum = AgentLLMProvider(_provider_name)
+            agent = TestCaseGeneratorAgent(provider=provider_enum)
+            updated_suite = await _asyncio.to_thread(
+                agent.generate_edit, last_suite, _user_message, history
+            )
+            set_last_test_suite(_session_id, updated_suite)
 
-        return {
-            "session_id": request.session_id,
-            "message": edit_msg,
-            "test_suite": updated_suite,
-            "intent": "edit",
-        }
-    except Exception as e:
-        import traceback
-        print(f"[chat-edit] Error: {traceback.format_exc()}")
-        # Return original suite unchanged on LLM failure
-        err_msg = "I couldn't apply that edit. Please try rephrasing your instruction."
-        return {
-            "session_id": request.session_id,
-            "message": err_msg,
-            "test_suite": last_suite,
-            "intent": "edit",
-        }
+            tc_count = len(updated_suite.get("test_cases", []))
+            confirm_msg = await _asyncio.to_thread(agent.generate_confirm, updated_suite, compact)
+            edit_msg = f"Done! I've updated the test suite. {confirm_msg}"
+            append_message(_session_id, "assistant", edit_msg)
+
+            print(f"[chat-edit] session={_session_id[:8]} updated {tc_count} test case(s)")
+
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_test_suite",
+                "message": edit_msg,
+                "test_suite": updated_suite,
+                "intent": "edit",
+            })
+        except Exception as e:
+            import traceback
+            print(f"[chat-edit] Error: {traceback.format_exc()}")
+            # Broadcast the original suite unchanged on LLM failure
+            err_msg = "I couldn't apply that edit. Please try rephrasing your instruction."
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_test_suite",
+                "message": err_msg,
+                "test_suite": last_suite,
+                "intent": "edit",
+            })
+
+    background_tasks.add_task(_edit)
+    return {"session_id": request.session_id, "status": "thinking"}
