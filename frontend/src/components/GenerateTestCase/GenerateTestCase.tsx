@@ -390,8 +390,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           });
           if (suite) {
             setLastTestSuite(suite);
-            const firstTcId = suite.test_cases?.[0]?.id ?? null;
-            if (firstTcId) setChatExpandedTc(firstTcId);
+            setChatExpandedTc(null);
             if (data.intent !== 'edit') {
               addNotification('success', `Generated ${suite.test_cases?.length ?? 0} test case(s)`);
             }
