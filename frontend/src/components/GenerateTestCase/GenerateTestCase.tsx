@@ -187,7 +187,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const [testEmail, setTestEmail] = useState('');
   const [testPassword, setTestPassword] = useState('');
   const [selectedProvider, setSelectedProvider] = useState(llmProvider);
-  const [showOptional, setShowOptional] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingStep, setLoadingStep] = useState<0 | 1 | 2>(0);
@@ -204,6 +203,9 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const [chatTextInput, setChatTextInput] = useState('');
   const [chatExpandedTc, setChatExpandedTc] = useState<string | null>(null);
   const chatMessagesEndRef = useRef<HTMLDivElement>(null);
+  const chatScrollContainerRef = useRef<HTMLDivElement>(null);
+  const chatContentRef = useRef<HTMLDivElement>(null);
+  const isUserScrolledUpRef = useRef(false);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const lastExecMsgRef = useRef<ChatMsg | null>(null);
 
@@ -551,9 +553,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       }
       const data: ApiResult = await res.json();
       setResult(data);
-      if (data.test_suite?.test_cases?.length > 0) {
-        setExpandedTc(data.test_suite.test_cases[0].id);
-      }
       addNotification('success', `Generated ${data.test_suite?.test_cases?.length ?? 0} test case(s) successfully`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -642,10 +641,34 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   // Chatbot generate mode handlers
   // ==========================================================================
 
-  // Auto-scroll chat to bottom
+  // Auto-scroll chat to bottom — paused when user manually scrolls up
+  const scrollChatToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    if (isUserScrolledUpRef.current) return;
+    chatMessagesEndRef.current?.scrollIntoView({ behavior });
+  }, []);
+
+  const handleChatScroll = useCallback(() => {
+    const el = chatScrollContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    // Resume auto-scroll when user returns within 50 px of the bottom
+    isUserScrolledUpRef.current = distanceFromBottom > 50;
+  }, []);
+
+  // ResizeObserver — fires whenever the content div grows (new messages, test
+  // suite cards, framer-motion layout, etc.) so scroll happens after actual DOM paint
   useEffect(() => {
-    chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages, chatPhase]);
+    const content = chatContentRef.current;
+    if (!content) return;
+    const observer = new ResizeObserver(() => scrollChatToBottom());
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [scrollChatToBottom]);
+
+  // Scroll on every typewriter tick so streaming text feels live
+  useEffect(() => {
+    if (typingMsg) scrollChatToBottom();
+  }, [typingMsg, scrollChatToBottom]);
 
   // Typewriter animation — advances 4 chars every 12ms ≈ ~330 chars/s
   useEffect(() => {
@@ -1584,7 +1607,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             value={mode === 'record' ? recProvider : selectedProvider}
             onChange={val => {
               if (mode === 'record') setRecProvider(val as typeof recProvider);
-              else setSelectedProvider(val);
+              else setSelectedProvider(val as typeof selectedProvider);
             }}
             disabled={loading || recStatus === 'executing' || recStatus === 'completing'}
           />
@@ -1621,7 +1644,14 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           {/* ── CHAT PANEL (full-width or split-left) ── */}
           <div className={styles.genChatPanel}>
           {/* Scrollable messages area */}
-          <div className={styles.chatMessages}>
+          <div
+            className={styles.chatMessages}
+            ref={chatScrollContainerRef}
+            onScroll={handleChatScroll}
+          >
+
+            {/* Content wrapper — ResizeObserver watches this for auto-scroll */}
+            <div ref={chatContentRef}>
 
             {/* Static greeting bubble */}
             <motion.div
@@ -1789,6 +1819,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                 )}
               </motion.div>
             ))}
+
+            </div>{/* end chatContentRef wrapper */}
 
             <div ref={chatMessagesEndRef} />
           </div>

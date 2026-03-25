@@ -364,6 +364,7 @@ USER QUESTION:
 
 Answer the question directly and helpfully. If relevant, reference specific elements visible on the page.
 Do NOT generate test cases. Do NOT output JSON.
+Use 1-2 suitable professional emojis where natural — keep it subtle and professional.
 Return ONLY the Markdown answer."""
 
 
@@ -395,7 +396,8 @@ Write 2-3 sentences in plain, friendly English:
 3. End by asking the user what they would like to test.
 
 Tone: concise, conversational, helpful.
-Return ONLY the message text. No JSON. No preamble."""
+Use 1-2 suitable professional emojis to make the message friendly — never overdo it.
+Use Markdown formatting. Return ONLY the message text. No JSON. No preamble."""
 
 PAGE_CONFIRM_PROMPT = """You are an AI test assistant. You just generated the following test suite.
 
@@ -405,8 +407,9 @@ TEST SUITE SUMMARY:
 
 Write 1-2 sentences (max 30 words) confirming what you created.
 Use **bold** for test case names. You may use a short bullet list if more than 3 cases.
-Example: "I've created 3 test cases: **Valid Login**, **Invalid Credentials**, and **Forgot Password**."
-Return ONLY the sentence or list. No JSON. No extra text."""
+Start the message with a suitable professional emoji.
+Example: "✅ I've created 3 test cases: **Valid Login**, **Invalid Credentials**, and **Forgot Password**."
+Return ONLY the sentence or list. Use Markdown formatting. No JSON. No extra text."""
 
 
 GENERATOR_PROMPT = """You are an expert Playwright test case generator.

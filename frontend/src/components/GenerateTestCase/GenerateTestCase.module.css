@@ -451,6 +451,8 @@
   font-size: 0.9rem;
   line-height: 1.5;
   word-break: break-word;
+  width: fit-content;
+  max-width: 80%;
 }
 
 /* ── Inline edit box ───────────────────────────────────────────── */
