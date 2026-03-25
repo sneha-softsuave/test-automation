@@ -35,7 +35,7 @@ _CRED_PWD_RE = _cred_re.compile(
 
 
 def _extract_credentials(text: str) -> dict:
-    """Extract email/password from a user message."""
+    """Fast regex-based credential extraction (fallback)."""
     creds: dict = {}
     email_m = _CRED_EMAIL_RE.search(text)
     if email_m:
@@ -44,6 +44,34 @@ def _extract_credentials(text: str) -> dict:
     if pwd_m:
         creds["password"] = pwd_m.group(1)
     return creds
+
+
+def _extract_credentials_semantic(text: str, agent) -> dict:
+    """
+    Semantically extract email/password using LLM.
+    Handles any natural language format the user may provide.
+    Falls back to regex if LLM fails or returns nothing.
+    """
+    import json as _j
+    prompt = (
+        "Extract the login credentials (email address and password) from the message below.\n"
+        "Return ONLY a JSON object with keys 'email' and 'password'.\n"
+        "Use null for any field not found. No explanation, no extra text.\n\n"
+        f"Message: \"{text}\"\n\n"
+        "JSON:"
+    )
+    try:
+        raw = agent.call_llm(prompt).strip()
+        # Strip markdown code fences if the model wraps the JSON
+        raw = _cred_re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=_cred_re.MULTILINE).strip()
+        result = _j.loads(raw)
+        return {
+            k: str(v)
+            for k, v in result.items()
+            if v and str(v).lower() not in ('null', 'none', '')
+        }
+    except Exception:
+        return _extract_credentials(text)
 
 
 # Per-exec-session idempotency guard for the post-execution re-scrape
@@ -1383,14 +1411,14 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     page_url = session.get("compact", {}).get("url", "")
     history = get_messages(request.session_id)
 
-    # Extract credentials first — always useful regardless of intent
-    new_creds = _extract_credentials(request.user_message)
+    provider_enum = AgentLLMProvider(provider_name)
+    agent = TestCaseGeneratorAgent(provider=provider_enum)
+
+    # Semantically extract credentials — handles any natural language format
+    new_creds = await _asyncio.to_thread(_extract_credentials_semantic, request.user_message, agent)
     if new_creds:
         existing = get_credentials(request.session_id)
         set_credentials(request.session_id, {**existing, **new_creds})
-
-    provider_enum = AgentLLMProvider(provider_name)
-    agent = TestCaseGeneratorAgent(provider=provider_enum)
 
     # ── Fast pre-classification — bypass LLM for unambiguous patterns ─────────
     import re as _intent_re
@@ -1525,6 +1553,18 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                 "confidence": 1.0,
                 "reasoning": "pre-classified: export/list-unadded pattern",
                 "metadata": {"approve_targets": "all", "approve_mode": "list_unadded"},
+            }
+        elif _has_approve_kw and _intent_re.search(r'\b\d+\b', _msg):
+            # Generic specific-list: "add TC001 and TC006", "add only 6 7 10",
+            # "add test case 1 and 6", "approve TS003, TS007" — extract all numbers
+            _approve_list_nums = list(dict.fromkeys(
+                int(n) for n in _intent_re.findall(r'\b(\d+)\b', _msg)
+            ))
+            classification = {
+                "intent": "approve",
+                "confidence": 1.0,
+                "reasoning": "pre-classified: approve keyword + specific number list",
+                "metadata": {"approve_targets": _approve_list_nums},
             }
         else:
             # ── Classify intent via LLM (non-blocking) ───────────────────────

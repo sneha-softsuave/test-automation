@@ -454,6 +454,28 @@ Test Email: {test_email}
 Test Password: {test_password}
 
 ─────────────────────────────────────────────────────────────
+FEASIBILITY & SELECTION RULES
+─────────────────────────────────────────────────────────────
+Only generate test cases that are fully executable using the given PAGE STRUCTURE.
+Every step must map to a real element or valid page state.
+Do not invent UI elements, selectors, flows, or pages.
+Skip any part of the USER INTENT that is not supported by the page.
+Generate only high-value, realistic scenarios.
+Include positive/negative cases only if they are possible with existing elements.
+
+─────────────────────────────────────────────────────────────
+SELF-CHECK BEFORE OUTPUT
+─────────────────────────────────────────────────────────────
+Before returning JSON, ensure:
+- Every test case is executable using the given PAGE STRUCTURE.
+- Every step maps to a real selector or valid page state.
+- No steps depend on missing elements, pages, or hidden functionality.
+- No unsupported USER INTENT scenarios are included.
+- All selectors are grounded in the provided page data (no invention).
+
+If any test case fails these checks, remove or fix it before output.
+
+─────────────────────────────────────────────────────────────
 OUTPUT FORMAT — return ONLY this JSON, no extra text
 ─────────────────────────────────────────────────────────────
 

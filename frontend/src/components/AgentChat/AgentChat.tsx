@@ -51,6 +51,7 @@ import { LiveExcelGrid } from '../LiveExcelGrid/LiveExcelGrid';
 import { TerminalDisplay } from '../TerminalDisplay/TerminalDisplay';
 import { AgentAtomDiagram } from '../AgentAtomDiagram/AgentAtomDiagram';
 import { ProviderSelect } from '../ProviderSelect/ProviderSelect';
+import { WaterfallLoader } from '../WaterfallLoader';
 import styles from './AgentChat.module.css';
 
 // Message type alias for local use (matches AgentMessage from store but with Date timestamp)
@@ -670,8 +671,8 @@ export const AgentChat = () => {
             failed: summary.failed,
             retries: summary.retries ?? 0,
           },
-          execution_results: (data.execution_results as import('../../services/api').ExecutionResult) || { total: summary.total, passed: summary.passed, failed: summary.failed, results: [] },
-          parsed_suite: (data.parsed_suite as import('../../services/api').TestSuite) || null,
+          execution_results: (data.execution_results as import('../../store/useStore').ExecutionResult) || { total: summary.total, passed: summary.passed, failed: summary.failed, results: [] },
+          parsed_suite: (data.parsed_suite as import('../../store/useStore').TestSuite) || null,
           report: null,
           generated_script: null,
           orchestration: (data.orchestration as import('../../services/api').MultiAgentResponse['orchestration']) || { iterations: 0, action_history: [], sub_agents_used: ['ReporterAgent'] },
@@ -1487,15 +1488,10 @@ export const AgentChat = () => {
                       {currentPhase === 'debugging' && <XCircle size={18} />}
                       {currentPhase === 'complete' && <CheckCircle size={18} />}
                     </div>
-                    <span className={styles.phaseText}>
-                      {currentPhase === 'thinking' && 'Thinking...'}
-                      {currentPhase === 'planning' && 'Planning'}
-                      {currentPhase === 'executing' && 'Executing'}
-                      {currentPhase === 'debugging' && 'Debugging'}
-                      {currentPhase === 'complete' && 'Complete'}
-                    </span>
-                    {currentPhase && currentPhase !== 'complete' && (
-                      <Loader2 size={14} className={styles.phaseSpinner} />
+                    {currentPhase && currentPhase !== 'complete' ? (
+                      <WaterfallLoader compact />
+                    ) : (
+                      <span className={styles.phaseText}>Complete</span>
                     )}
                   </div>
 

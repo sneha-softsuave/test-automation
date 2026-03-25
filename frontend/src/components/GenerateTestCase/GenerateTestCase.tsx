@@ -12,6 +12,7 @@ import { SaveToProjectModal } from './SaveToProjectModal';
 import { saveTestToProject } from '../../services/api';
 import type { TestSuite } from '../../store/useStore';
 import { ProviderSelect } from '../ProviderSelect/ProviderSelect';
+import { WaterfallLoader } from '../WaterfallLoader';
 import styles from './GenerateTestCase.module.css';
 import ReactMarkdown from 'react-markdown';
 
@@ -1685,11 +1686,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                       {(() => {
                         if (msg.thinking) {
                           return (
-                            <div className={styles.genTypingIndicator}>
-                              <div className={styles.genTypingDot} />
-                              <div className={styles.genTypingDot} />
-                              <div className={styles.genTypingDot} />
-                            </div>
+                            <WaterfallLoader compact />
                           );
                         }
                         const displayed = (typingMsg && typingMsg.id === msg.id)
@@ -2028,8 +2025,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
               >
-                <div className={styles.spinner} />
-                <p className={styles.loadingTitle}>Launching browser…</p>
+                <WaterfallLoader />
                 <p className={styles.loadingStep}>
                   {recInstruction.trim()
                     ? `Opening ${recUrl} — will execute your test steps automatically`
@@ -2537,8 +2533,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
               animate={{ opacity: 1, y: 0 }}
               style={{ marginTop: 12 }}
             >
-              <div className={styles.spinner} />
-              <p className={styles.loadingTitle}>Finalizing test suite…</p>
+              <WaterfallLoader />
               <p className={styles.loadingStep}>Closing browser and building test suite from {allRecSteps.length} step(s)</p>
             </motion.div>
           )}
