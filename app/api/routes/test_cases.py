@@ -1070,6 +1070,24 @@ async def analyze_url(
                 "compact_summary": compact,
                 "session_id": session_id,
             })
+
+            # Launch persistent browser and send preview screenshot (non-fatal)
+            try:
+                from app.services.executor_session_manager import executor_session_manager as _esm
+                import asyncio as _asyncio
+
+                _exec_session = _esm.get_or_create_session(session_id, headless=True)
+                _preview = await _asyncio.to_thread(_exec_session.preview, request.url)
+                if _preview.get("success"):
+                    await sse_manager.broadcast(session_id, {
+                        "type": "browser_preview",
+                        "url": _preview["url"],
+                        "title": _preview.get("title", ""),
+                        "image_b64": _preview["image_b64"],
+                    })
+            except Exception as _pe:
+                print(f"[analyze-url] Browser preview failed (non-fatal): {_pe}")
+
         except Exception as e:
             import traceback
             print(f"[analyze-url] Error: {traceback.format_exc()}")

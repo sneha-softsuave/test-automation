@@ -259,93 +259,83 @@ def compact_page_elements(page_structure: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 INTENT_CLASSIFIER_PROMPT = """You are an intent classifier for a test automation chatbot.
-Classify the user's message into exactly one of 6 intents.
 
-CONTEXT:
-- Page under test: {page_url}
-- Available test cases:
-{test_cases_list}
-- Recent conversation (last 3 turns):
-{history}
+Classify the USER MESSAGE into ONE intent: 
+execute | edit | informational | approve | generate | clarify
 
-USER MESSAGE: "{user_message}"
+CONTEXT
+Page: {page_url}
+Test Cases: {test_cases_list}
+Recent Conversation: {history}
+User Message: "{user_message}"
 
-━━━ INTENT DEFINITIONS ━━━
+INTENTS
 
-EXECUTE ★ HIGHEST PRIORITY — User wants to RUN test cases in a real browser
-  Keywords: run, execute, play, start, launch, go ahead, try, trigger
-  Examples: "run test 1", "execute all", "Execute 1", "execute 2", "execute 3",
-            "run TC_001", "execute test case 1", "run all tests", "start test 2",
-            "play test 1", "go ahead and run", "execute the login test"
-  ★ RULE: If message contains "execute"/"run"/"play"/"start"/"launch" + (number OR "all" OR test name) → ALWAYS EXECUTE
-  ★ RULE: A bare number after "execute"/"run" refers to the test case at that position
+EXECUTE (highest priority)
+- Intent: User wants to run tests in a browser
+- Indicators: phrases meaning "run this test" or "start executing tests", with numbers, test names, or "all"
+- Examples: "run test 1", "execute all tests", "start login test", "play TC_003", "go ahead and run it"
 
-EDIT — User wants to modify existing test case definitions (steps, selectors, names, expected results)
-  Keywords: edit, change, update, modify, fix, rename, replace, remove step, add step to
-  Examples: "change step 2 to click submit", "rename the test", "update the expected result"
-  NOT edit: running tests, creating new tests, asking questions
+EDIT
+- Intent: User wants to modify existing test cases (steps, selectors, names, expected results)
+- Indicators: phrases meaning change/update a test
+- Examples: "update step 2 to click submit", "rename test case", "change expected result"
 
-INFORMATIONAL — User wants to know something or see information (no action required)
-  Keywords: what, how, why, which, show me, list, explain, describe, tell me, how many
-  Examples: "what test cases do I have?", "show me step 3", "how many tests?"
+INFORMATIONAL
+- Intent: User asks questions or wants info; no execution
+- Indicators: words/phrases like "what", "how", "which", "show me", "list", "explain", "describe"
+- Examples: "show me step 3", "how many tests exist?", "what test cases are available?"
 
-APPROVE — User wants to save/confirm execution RESULTS to the Excel report
-  Keywords: add to excel, save results, approve, confirm, export, approve test step N, yes approve
-  Sub-modes (set approve_mode in metadata):
-    • "individual"   — default; approve specific step(s) or all as separate rows
-      Examples: "approve test step 1", "add TS_001 to excel", "approve all", "confirm TS_002"
-    • "group"        — combine a SINGLE RANGE of steps into ONE Excel row
-      Examples: "add test steps from 1 to 10", "group steps 3 to 7 into one row",
-                "append steps 1 to 5 as a single test case"
-      → set approve_range: {{"from": N, "to": M}}
-    • "multi_group"  — TWO OR MORE named ranges, each becoming a SEPARATE Excel row with its own summary
-      Examples: "add 1 to 5 in one row and 6 to 10 in another row",
-                "add steps 1 to 3 as one case and 4 to 7 as another",
-                "put 1-5 in row 1 and 6-10 in row 2"
-      → set approve_ranges: [{{"from": N1, "to": M1}}, {{"from": N2, "to": M2}}, ...]
-    • "list_unadded" — list every executed step not yet in Excel, then ask to confirm
-      Examples: "export to excel", "export all results", "list unadded steps",
-                "what steps haven't been added yet?", "show me what's not in excel"
-  ⚠ "click approve button" = EXECUTE (browser action, not saving to Excel)
+APPROVE
+- Intent: User wants to save/confirm results to Excel
+- Indicators: phrases meaning approve, confirm, export, save executed steps
+- Modes:
+    - individual (default)
+    - group → combine a range of steps in one row
+    - multi_group → multiple ranges, each in a separate row
+    - list_unadded → list steps not yet added
+- Examples: "approve step 1", "add steps 1 to 5 in one row", "export all results"
+⚠ Special case: "click approve button" = EXECUTE
 
-GENERATE — Create NEW test cases or expand the test suite
-  Keywords: generate, create, make, add new test, write test, I need tests for, test the X feature
-  Examples: "generate tests for checkout", "add a test for password reset", "test the signup flow"
-  NOT generate: running existing tests (that is EXECUTE)
+GENERATE
+- Intent: User wants to create new test cases
+- Indicators: phrases meaning generate, add, write, or create tests
+- Examples: "generate tests for checkout", "add a test for password reset", "write a signup test"
 
-CLARIFY — Intent is genuinely ambiguous — multiple intents equally possible
-  Use when: message is vague, incomplete, or matches 2+ intents with no clear winner
-  Examples: "do it", "help", "what about the login?" (no clear action), "test it"
-  ★ THIS is the default for uncertain messages — NOT GENERATE
-  ★ When clarifying, state your best guess about what the user wants, then ask to confirm
+CLARIFY (default fallback)
+- Intent: Message is ambiguous or unclear
+- Model should guess the most likely intent and ask for confirmation if needed
 
-━━━ PRIORITY RULES (stop at first match) ━━━
-0. "execute"/"run"/"play"/"start" + (digit OR "all" OR known test name) → EXECUTE immediately
-1. Any clear execute action word + test reference or UI element → EXECUTE
-2. approve/confirm + "test step N" or "ts N" or "excel/results/export" → APPROVE
-   "add steps N to M" or "group steps N to M" → APPROVE (mode=group)
-   "add N to M in one row AND P to Q in another" → APPROVE (mode=multi_group)
-   "export to excel" / "list unadded" → APPROVE (mode=list_unadded)
-3. Question word OR "show/list/explain" with no action → INFORMATIONAL
-4. Modify/change/fix existing steps → EDIT
-5. Clearly creating new tests (generate/create/make/write) → GENERATE
-6. Anything ambiguous or unclear → CLARIFY (never silently fall back to GENERATE)
+PRIORITY
+0. execute keyword + (number/all/name) → EXECUTE
+1. any clear run action → EXECUTE
+2. approve/export → APPROVE
+3. question → INFORMATIONAL
+4. modify → EDIT
+5. create → GENERATE
+6. else → CLARIFY
 
-━━━ RESPONSE FORMAT ━━━
-Return ONLY valid JSON, no other text:
+OUTPUT
+Return ONLY valid JSON:
+
 {{
   "intent": "execute|edit|informational|approve|generate|clarify",
   "confidence": 0.0,
-  "reasoning": "one sentence why",
-  "clarify_message": "REQUIRED when intent=clarify: Start with your best guess of what the user wants (e.g. 'It looks like you want to run test 1 — is that right?'). Be specific, reference the actual test case names/numbers if relevant. Then list what you can do.",
+  "reasoning": "one short sentence",
+  "clarify_message": "only if intent=clarify, suggest likely intent and options",
   "metadata": {{
-    "execute_targets": "all or list of test case names/numbers or null",
-    "approve_targets": "all or list of numbers or names or null",
-    "approve_mode": "individual|group|multi_group|list_unadded or null",
-    "approve_range": {{"from": N, "to": M}} or null,
-    "approve_ranges": [{{"from": N1, "to": M1}}, {{"from": N2, "to": M2}}] or null
+    "execute_targets": null,
+    "approve_targets": null,
+    "approve_mode": null,
+    "approve_range": null,
+    "approve_ranges": null
   }}
-}}"""
+}}
+
+Notes:
+- Prioritize semantic understanding; do NOT rely on exact keywords alone
+- Use examples to infer intent even with phrasing variations
+- Stop at first match according to PRIORITY rules"""
 
 
 # ---------------------------------------------------------------------------

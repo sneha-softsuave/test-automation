@@ -1045,7 +1045,7 @@ def _find_selector_dynamically_sync(page, selector_hints: Dict, test_data: Dict 
 
                 data.buttons.push({
                     id: el.id || '',
-                    type: el.type || el.tagName.toLowerCase(),
+                    type: el.type || (el.tagName ? el.tagName.toLowerCase() : ''),
                     text: (el.innerText || el.value || '').trim().toLowerCase(),
                     'aria-label': ariaLabelOriginal.toLowerCase(),
                     'aria-label-original': ariaLabelOriginal,

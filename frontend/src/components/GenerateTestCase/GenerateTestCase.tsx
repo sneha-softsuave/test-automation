@@ -218,6 +218,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const execStepsEndRef = useRef<HTMLDivElement>(null);
   const [execScreenshot, setExecScreenshot] = useState<string | null>(null);
   const [execCurrentUrl, setExecCurrentUrl] = useState('');
+  const [browserPreviewLoading, setBrowserPreviewLoading] = useState(false);
   const [execPanelView, setExecPanelView] = useState<'browser' | 'excel'>('browser');
   const [confirmedExecResults, setConfirmedExecResults] = useState<ExecTestResult[]>([]);
   const [confirmedTcIds, setConfirmedTcIds] = useState<Set<string>>(new Set());
@@ -473,6 +474,12 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           });
           setChatPhase('chatting');
 
+        // ── Browser preview (loaded on URL submit, before execution) ──────
+        } else if (data.type === 'browser_preview') {
+          if (data.image_b64) setExecScreenshot(String(data.image_b64));
+          if (data.url) setExecCurrentUrl(String(data.url));
+          setBrowserPreviewLoading(false);
+
         // ── Recorder events ────────────────────────────────────────────────
         } else if (data.type === 'recorder_screenshot') {
           setRecScreenshot(data.image_b64);
@@ -702,6 +709,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     setChatUrlInput(trimmedUrl);
     appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: trimmedUrl });
     setChatPhase('analyzing');
+    setBrowserPreviewLoading(true);
     chatThinkingIdRef.current = null; // reset any stale thinking state
     _showThinking('Analyzing page…'); // show dots immediately, before network round-trip
 
@@ -1523,8 +1531,17 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
               />
             ) : (
               <div className={styles.screenshotPlaceholder}>
-                <MonitorPlay size={48} style={{ color: '#cbd5e1' }} />
-                <span>{chatPhase === 'analyzing' ? 'Analysing page…' : 'Execute a test case to see live browser'}</span>
+                {browserPreviewLoading ? (
+                  <>
+                    <Loader2 size={36} className={styles.spin} style={{ color: '#6366f1' }} />
+                    <span>Loading browser…</span>
+                  </>
+                ) : (
+                  <>
+                    <MonitorPlay size={48} style={{ color: '#cbd5e1' }} />
+                    <span>Execute a test case to see live browser</span>
+                  </>
+                )}
               </div>
             )}
             {chatPhase === 'executing' && (
@@ -1686,7 +1703,9 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                       {(() => {
                         if (msg.thinking) {
                           return (
-                            <WaterfallLoader compact />
+                            <div style={{ paddingLeft: 16, paddingTop: 6 }}>
+                              <WaterfallLoader compact />
+                            </div>
                           );
                         }
                         const displayed = (typingMsg && typingMsg.id === msg.id)
@@ -1815,6 +1834,18 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                 )}
               </motion.div>
             ))}
+
+            {/* ── Floating loading bubble pinned after last message ── */}
+            {(chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing') && !chatMessages.some(m => m.thinking) && (
+              <div className={styles.chatBotMessage} style={{ marginBottom: 16 }}>
+                <div className={styles.chatBotAvatar}><Sparkles size={14} /></div>
+                <div className={styles.chatBotContent}>
+                  <div style={{ paddingLeft: 16, paddingTop: 6 }}>
+                    <WaterfallLoader compact />
+                  </div>
+                </div>
+              </div>
+            )}
 
             </div>{/* end chatContentRef wrapper */}
 

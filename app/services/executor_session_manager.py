@@ -107,6 +107,34 @@ class ExecutorSession:
         self._job_queue.put((fn, fut))
         return fut.result()
 
+    def preview(self, url: str) -> Dict:
+        """Navigate to URL and capture a screenshot without running tests."""
+        import base64 as _b64
+
+        def _nav():
+            try:
+                self._page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                try:
+                    self._page.wait_for_load_state("networkidle", timeout=10_000)
+                except Exception:
+                    pass
+                title = ""
+                try:
+                    title = self._page.title()
+                except Exception:
+                    pass
+                ss = self._page.screenshot(type="png")
+                return {
+                    "success": True,
+                    "url": self._page.url,
+                    "title": title,
+                    "image_b64": _b64.b64encode(ss).decode("utf-8"),
+                }
+            except Exception as e:
+                return {"success": False, "url": url, "error": str(e)}
+
+        return self.run_in_pw_thread(_nav)
+
     # ------------------------------------------------------------------ #
     # Test suite execution                                                 #
     # ------------------------------------------------------------------ #
