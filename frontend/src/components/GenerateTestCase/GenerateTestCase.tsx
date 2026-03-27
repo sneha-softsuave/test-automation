@@ -843,17 +843,18 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         break;
       }
       case 'page_analysis_start': {
-        // Backend is scraping the navigated page — show a transient status in chat
-        appendChatMsg({
-          id: `nav_start_${Date.now()}`,
-          role: 'assistant',
-          content: String(data.message ?? 'Analyzing the new page…'),
-        });
+        // Show gradient loading bubble while the new page is being analyzed
+        const navThinkingId = `nav_thinking_${Date.now()}`;
+        chatThinkingIdRef.current = navThinkingId;
+        setChatMessages(prev => [...prev, { id: navThinkingId, role: 'assistant', content: String(data.message ?? 'Analyzing the new page…'), thinking: true }]);
         if (data.url) setExecCurrentUrl(String(data.url));
         break;
       }
       case 'page_analysis_done': {
-        // Replace the "analyzing…" message with the full page intro
+        // Replace the thinking bubble with the full page intro
+        const tid = chatThinkingIdRef.current;
+        chatThinkingIdRef.current = null;
+        if (tid) setChatMessages(prev => prev.filter(m => m.id !== tid));
         const navMsg = String(data.message ?? '');
         if (navMsg) {
           appendChatMsg({ id: `nav_done_${Date.now()}`, role: 'assistant', content: navMsg });
