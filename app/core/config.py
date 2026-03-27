@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Default LLM provider used if none specified (groq is cost-effective and fast)
     DEFAULT_LLM_PROVIDER: str = "groq"
 
+    # Playwright MCP server
+    MCP_SERVER_URL: str = "http://localhost:3000"
+
     # Image Analysis (Vision) — OFF by default
     # When ON: if a selector fails during recording, a screenshot is sent to the
     # vision model which suggests alternative selectors based on what it sees.

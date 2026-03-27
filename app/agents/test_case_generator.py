@@ -655,6 +655,9 @@ Generate test cases that cover the user's intent. For a login page:
 
 Use REAL selectors from the page data above. For each fill/click step provide 2-3 fallback selectors.
 
+ANY response that is not valid JSON will be treated as a system failure.
+You MUST return JSON. No exceptions. No explanations. No plain text. Ever.
+
 Return ONLY valid JSON starting with {{ and ending with }}:
 {{
   "project": "{app_name} Tests",
@@ -886,7 +889,7 @@ class TestCaseGeneratorAgent(BaseAgent):
         import json as _json
         prompt = PAGE_INTRO_PROMPT.format(compact_json=_json.dumps(compact, indent=2))
         try:
-            return self.call_llm(prompt).strip()
+            return self.call_llm(prompt, prompt_label="PAGE_INTRO_PROMPT").strip()
         except Exception as e:
             logger.warning(f"[generate_intro] LLM call failed: {e}")
             title = compact.get("title") or compact.get("url") or "this page"
@@ -907,7 +910,7 @@ class TestCaseGeneratorAgent(BaseAgent):
         )
         messages = _trim_history(history or []) + [{"role": "user", "content": question}]
         try:
-            return self.call_llm_chat(system, messages).strip()
+            return self.call_llm_chat(system, messages, prompt_label="INFORMATIONAL_PROMPT").strip()
         except Exception as e:
             logger.warning(f"[answer_question] LLM call failed: {e}")
             try:
@@ -915,7 +918,7 @@ class TestCaseGeneratorAgent(BaseAgent):
                     compact_json=_json.dumps(compact, indent=2),
                     question=question,
                 )
-                return self.call_llm(prompt).strip()
+                return self.call_llm(prompt, prompt_label="INFORMATIONAL_PROMPT").strip()
             except Exception:
                 return "I can see the page has been analysed. Could you clarify what you'd like to know?"
 
@@ -945,7 +948,7 @@ class TestCaseGeneratorAgent(BaseAgent):
             '- If NO:  {"approve": false}'
         )
         try:
-            result = self.call_llm(prompt).strip()
+            result = self.call_llm(prompt, prompt_label="APPROVE_CLASSIFIER").strip()
             # strip markdown code fences if present
             if result.startswith("```"):
                 result = result.split("```")[1]
@@ -989,7 +992,8 @@ class TestCaseGeneratorAgent(BaseAgent):
         messages = trimmed + [{"role": "user", "content": user_message}]
 
         try:
-            raw = self.call_llm_chat(system, messages, markdown=False).strip()
+            raw = self.call_llm_chat(system, messages, markdown=False,
+                                     prompt_label="INTENT_CLASSIFIER").strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
@@ -1017,7 +1021,8 @@ class TestCaseGeneratorAgent(BaseAgent):
         )
         messages = _trim_history(history or []) + [{"role": "user", "content": instruction}]
         try:
-            raw = self.call_llm_chat(system, messages, markdown=False)
+            raw = self.call_llm_chat(system, messages, markdown=False,
+                                     prompt_label="EDIT_PROMPT")
             return self._parse_json_response(raw)
         except Exception as e:
             logger.warning(f"[generate_edit] multi-turn failed ({e}), falling back to single-turn")
@@ -1026,7 +1031,7 @@ class TestCaseGeneratorAgent(BaseAgent):
                     suite_json=_json.dumps(test_suite, indent=2),
                     instruction=instruction,
                 )
-                raw = self.call_llm(prompt, markdown=False)
+                raw = self.call_llm(prompt, markdown=False, prompt_label="EDIT_PROMPT")
                 return self._parse_json_response(raw)
             except Exception as e2:
                 logger.error(f"[generate_edit] Failed: {e2}")
@@ -1041,7 +1046,7 @@ class TestCaseGeneratorAgent(BaseAgent):
         tc_names = ", ".join(tc.get("name", tc.get("id", "")) for tc in test_cases[:5])
         prompt = PAGE_CONFIRM_PROMPT.format(tc_count=tc_count, tc_names=tc_names)
         try:
-            return self.call_llm(prompt).strip()
+            return self.call_llm(prompt, prompt_label="PAGE_CONFIRM_PROMPT").strip()
         except Exception as e:
             logger.warning(f"[generate_confirm] LLM call failed: {e}")
             return f"I've created {tc_count} test case(s) for you."
@@ -1166,7 +1171,8 @@ class TestCaseGeneratorAgent(BaseAgent):
             f"history_turns={len(trimmed)} | form_data_keys={list((form_data or {}).keys())}"
         )
 
-        raw = self.call_llm_chat(system_prompt, messages, markdown=False)
+        raw = self.call_llm_chat(system_prompt, messages, markdown=False,
+                                 prompt_label="GENERATOR_PROMPT")
 
         return self._parse_json_response(raw)
 

@@ -183,17 +183,17 @@ class BaseAgent(ABC):
         "values. Do NOT use h1 headings."
     )
 
-    def call_llm(self, prompt: str, markdown: bool = True) -> str:
+    def call_llm(self, prompt: str, markdown: bool = True, prompt_label: str = "") -> str:
         """Call the appropriate LLM based on provider. Signature unchanged."""
         if markdown:
             prompt = prompt + self._MARKDOWN_INSTRUCTION
-        print(f"Calling {self.provider.value} API with model: {self.model}...")
         try:
             from app.services.llm_wrapper import call_llm as _wrap
             result = _wrap(
                 provider=self.provider.value, model=self.model,
                 prompt=prompt, client=self.client, max_tokens=self.max_tokens,
                 agent_name=self.__class__.__name__,
+                prompt_label=prompt_label,
             )
             return result["text"]
         except Exception:
@@ -208,7 +208,8 @@ class BaseAgent(ABC):
                 return self._call_waymore(prompt)
             raise
 
-    def call_llm_chat(self, system: str, messages: list, markdown: bool = True) -> str:
+    def call_llm_chat(self, system: str, messages: list, markdown: bool = True,
+                      prompt_label: str = "") -> str:
         """
         Multi-turn conversation call. Routes through llm_wrapper.call_llm_chat so
         every call is token-tracked and logged — identical to call_llm().
@@ -220,7 +221,6 @@ class BaseAgent(ABC):
         """
         if markdown:
             system = system + self._MARKDOWN_INSTRUCTION
-        print(f"[call_llm_chat] {self.provider.value} | turns={len(messages)}")
         try:
             from app.services.llm_wrapper import call_llm_chat as _wrap_chat
             result = _wrap_chat(
@@ -228,6 +228,8 @@ class BaseAgent(ABC):
                 system=system, messages=messages,
                 client=self.client, max_tokens=self.max_tokens,
                 agent_name=self.__class__.__name__,
+                json_mode=not markdown,
+                prompt_label=prompt_label,
             )
             return result["text"]
         except Exception as e:
@@ -236,7 +238,7 @@ class BaseAgent(ABC):
             for m in messages:
                 role = "User" if m["role"] == "user" else "Assistant"
                 combined += f"{role}: {m['content']}\n\n"
-            return self.call_llm(combined.strip(), markdown=False)
+            return self.call_llm(combined.strip(), markdown=False, prompt_label=prompt_label)
 
     @abstractmethod
     def execute(self, *args, **kwargs) -> Any:

@@ -1,3 +1,6 @@
+import json
+import os
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, HttpUrl
 from typing import Optional
@@ -5,6 +8,19 @@ from typing import Optional
 from app.tools.selector_extractor import SelectorExtractor
 
 router = APIRouter()
+
+LOGS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "logs")
+LAST_SCRAPE_JSON = os.path.join(LOGS_DIR, "last_scrape.json")
+LAST_SCRAPE_TXT  = os.path.join(LOGS_DIR, "last_scrape.txt")
+
+
+def _save_last_scrape(data: dict) -> None:
+    """Overwrite last_scrape.json and last_scrape.txt with the latest scrape result."""
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    with open(LAST_SCRAPE_JSON, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    with open(LAST_SCRAPE_TXT, "w", encoding="utf-8") as f:
+        f.write(json.dumps(data, indent=2, ensure_ascii=False))
 
 
 class UrlInput(BaseModel):
@@ -41,7 +57,7 @@ async def extract_selectors(
         extractor = SelectorExtractor(headless=headless, timeout=timeout)
         result = await extractor.extract_selectors(input_data.url)
 
-        return {
+        response = {
             "message": "Selectors extracted successfully",
             "url": result.get("url"),
             "title": result.get("title"),
@@ -55,6 +71,8 @@ async def extract_selectors(
             "elements_with_id": result.get("elements_with_id"),
             "elements_with_testid": result.get("elements_with_testid")
         }
+        _save_last_scrape({**response, "scraped_at": datetime.utcnow().isoformat()})
+        return response
 
     except Exception as e:
         import traceback
@@ -86,7 +104,7 @@ async def extract_selectors_get(
         extractor = SelectorExtractor(headless=headless, timeout=timeout)
         result = await extractor.extract_selectors(url)
 
-        return {
+        response = {
             "message": "Selectors extracted successfully",
             "url": result.get("url"),
             "title": result.get("title"),
@@ -100,6 +118,8 @@ async def extract_selectors_get(
             "elements_with_id": result.get("elements_with_id"),
             "elements_with_testid": result.get("elements_with_testid")
         }
+        _save_last_scrape({**response, "scraped_at": datetime.utcnow().isoformat()})
+        return response
 
     except Exception as e:
         import traceback
