@@ -1649,14 +1649,14 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     # ── Execute ──────────────────────────────────────────────────────────────
     if intent == "execute":
         if not last_suite:
-            no_tc_msg = (
-                "I don't have any test cases to run yet. "
-                "Please generate test cases first — share a URL or describe what you'd like to test."
-            )
+            _exec_user_msg = request.user_message
             append_message(_session_id, "user", request.user_message)
-            append_message(_session_id, "assistant", no_tc_msg)
 
             async def _exec_no_tc():
+                no_tc_msg = await _asyncio.to_thread(
+                    agent.narrate, "no_test_cases_execute", _exec_user_msg, page_url, {}
+                )
+                append_message(_session_id, "assistant", no_tc_msg)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_response",
                     "message": no_tc_msg,
@@ -1701,20 +1701,29 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
             confirmed = get_pending_approval(request.session_id) or []
             clear_pending_approval(request.session_id)
             if confirmed:
-                success_msg = "✅ Added to Excel successfully!\n" + "\n".join(_result_lines(confirmed))
                 # Mark all TS IDs (including grouped sub-IDs) as confirmed
                 _all_confirmed_ids = []
                 for _r in confirmed:
                     _all_confirmed_ids.append(_r.get("id", ""))
                     _all_confirmed_ids.extend(_r.get("grouped_ids", []))
                 add_confirmed_ids(request.session_id, [i for i in _all_confirmed_ids if i])
-            else:
-                success_msg = "Nothing to add — please run the tests first and then approve."
+            _confirm_user_msg = request.user_message
+            _confirm_results = confirmed
 
             async def _do_confirm():
+                if _confirm_results:
+                    _ctx = {"confirmed": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in _confirm_results]}
+                    success_msg = await _asyncio.to_thread(
+                        agent.narrate, "approve_success", _confirm_user_msg, page_url, _ctx
+                    )
+                else:
+                    success_msg = await _asyncio.to_thread(
+                        agent.narrate, "approve_nothing_to_add", _confirm_user_msg, page_url, {}
+                    )
+                append_message(_session_id, "assistant", success_msg)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_approve",
-                    "results": confirmed,
+                    "results": _confirm_results,
                     "message": success_msg,
                 })
 
@@ -1724,10 +1733,13 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
         # ── User cancelled a pending approval ────────────────────────────────
         if targets == "__pending_cancel__":
             clear_pending_approval(request.session_id)
-            cancel_msg = "Okay, I won't add anything to Excel. Let me know if you change your mind."
-            append_message(_session_id, "assistant", cancel_msg)
+            _cancel_user_msg = request.user_message
 
             async def _do_cancel():
+                cancel_msg = await _asyncio.to_thread(
+                    agent.narrate, "approve_cancel", _cancel_user_msg, page_url, {}
+                )
+                append_message(_session_id, "assistant", cancel_msg)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_response",
                     "message": cancel_msg,
@@ -1744,10 +1756,13 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
             _choice_matched = _choice_data.get("results", [])
 
             if targets == "__row_choice_cancel__" or not _choice_matched:
-                _cancel_row_msg = "Okay, cancelled. Let me know when you'd like to add results to Excel."
-                append_message(_session_id, "assistant", _cancel_row_msg)
+                _rc_user_msg = request.user_message
 
                 async def _row_cancel():
+                    _cancel_row_msg = await _asyncio.to_thread(
+                        agent.narrate, "approve_row_cancel", _rc_user_msg, page_url, {}
+                    )
+                    append_message(_session_id, "assistant", _cancel_row_msg)
                     await sse_manager.broadcast(_session_id, {
                         "type": "chat_response",
                         "message": _cancel_row_msg,
@@ -1760,14 +1775,15 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
             if targets == "__row_choice_individual__":
                 # Add each as a separate row
                 set_pending_approval(_session_id, _choice_matched)
-                _choice_confirm = (
-                    "I'll add each as a separate row:\n"
-                    + "\n".join(_result_lines(_choice_matched))
-                    + "\n\nShall I go ahead? *(yes / no)*"
-                )
-                append_message(_session_id, "assistant", _choice_confirm)
+                _ri_matched = _choice_matched
+                _ri_user_msg = request.user_message
 
                 async def _row_individual():
+                    _choice_confirm = await _asyncio.to_thread(
+                        agent.narrate, "approve_confirm_individual", _ri_user_msg, page_url,
+                        {"matched": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in _ri_matched]}
+                    )
+                    append_message(_session_id, "assistant", _choice_confirm)
                     await sse_manager.broadcast(_session_id, {
                         "type": "chat_response",
                         "message": _choice_confirm,
@@ -1803,15 +1819,18 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                     "error": _failed.get("error") if _failed else None,
                     "grouped_ids": _ids,
                 }
-                _combined_confirm = (
-                    f"I'll combine all {len(_choice_matched)} results into one row:\n"
-                    f"**{_group_name}** ({_ids[0]}–{_ids[-1]})\n\n"
-                    "Shall I go ahead? *(yes / no)*"
-                )
                 set_pending_approval(_session_id, [_grouped])
-                append_message(_session_id, "assistant", _combined_confirm)
+                _rcomb_group_name = _group_name
+                _rcomb_ids = _ids
+                _rcomb_count = len(_choice_matched)
+                _rcomb_user_msg = request.user_message
 
                 async def _row_combined():
+                    _combined_confirm = await _asyncio.to_thread(
+                        agent.narrate, "approve_confirm_group", _rcomb_user_msg, page_url,
+                        {"name": _rcomb_group_name, "id_range": f"{_rcomb_ids[0]}–{_rcomb_ids[-1]}", "count": _rcomb_count}
+                    )
+                    append_message(_session_id, "assistant", _combined_confirm)
                     await sse_manager.broadcast(_session_id, {
                         "type": "chat_response",
                         "message": _combined_confirm,
@@ -1830,29 +1849,20 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
             _confirmed_ids = get_confirmed_ids(request.session_id)
             _unconfirmed = [r for r in exec_results if r.get("id") not in _confirmed_ids]
 
+            _lu_user_msg = request.user_message
             if not _unconfirmed:
-                if not exec_results:
-                    response_msg = (
-                        "I don't have any execution results yet. "
-                        "Please run the tests first, then I can export them to Excel."
-                    )
-                else:
-                    response_msg = "All executed test steps have already been added to Excel! ✅"
+                _lu_situation = "approve_no_results" if not exec_results else "approve_all_added"
+                _lu_ctx: dict = {}
             else:
-                _list_lines = []
-                for _r in _unconfirmed:
-                    _icon = "✅" if _r.get("status") == "passed" else "❌"
-                    _list_lines.append(f"- **{_r['id']}** {_r['name']} {_icon}")
-                response_msg = (
-                    "The following test steps are ready to add to Excel:\n"
-                    + "\n".join(_list_lines)
-                    + "\n\nShall I add all of these? *(yes / no)*"
-                )
+                _lu_situation = "approve_list_unadded"
+                _lu_ctx = {"unadded": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in _unconfirmed]}
                 set_pending_approval(_session_id, _unconfirmed)
 
-            append_message(_session_id, "assistant", response_msg)
-
             async def _list_unadded_respond():
+                response_msg = await _asyncio.to_thread(
+                    agent.narrate, _lu_situation, _lu_user_msg, page_url, _lu_ctx
+                )
+                append_message(_session_id, "assistant", response_msg)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_response",
                     "message": response_msg,
@@ -1923,14 +1933,13 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                     f"({_rng_ids[0]}–{_rng_ids[-1]}, {len(_rng_results)} steps)"
                 )
 
+            _mg_user_msg = request.user_message
             if not _grouped_rows:
-                _no_mg_msg = (
-                    "I couldn't find results for the specified ranges. "
-                    "Please run the tests first or check the range numbers."
-                )
-                append_message(_session_id, "assistant", _no_mg_msg)
-
                 async def _mg_none():
+                    _no_mg_msg = await _asyncio.to_thread(
+                        agent.narrate, "approve_multi_group_no_results", _mg_user_msg, page_url, {}
+                    )
+                    append_message(_session_id, "assistant", _no_mg_msg)
                     await sse_manager.broadcast(_session_id, {
                         "type": "chat_response",
                         "message": _no_mg_msg,
@@ -1940,15 +1949,18 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                 background_tasks.add_task(_mg_none)
                 return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
 
-            _mg_confirm = (
-                f"I'll add {len(_grouped_rows)} separate row(s) to Excel:\n"
-                + "\n".join(_preview_lines)
-                + "\n\nShall I go ahead? *(yes / no)*"
-            )
             set_pending_approval(_session_id, _grouped_rows)
-            append_message(_session_id, "assistant", _mg_confirm)
+            _mg_rows_ctx = [
+                {"name": r.get("name"), "id_range": f"{r['grouped_ids'][0]}–{r['grouped_ids'][-1]}" if r.get("grouped_ids") else r.get("id", ""), "status": r.get("status")}
+                for r in _grouped_rows
+            ]
 
             async def _multi_group_ask():
+                _mg_confirm = await _asyncio.to_thread(
+                    agent.narrate, "approve_confirm_multi_group", _mg_user_msg, page_url,
+                    {"rows": _mg_rows_ctx}
+                )
+                append_message(_session_id, "assistant", _mg_confirm)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_response",
                     "message": _mg_confirm,
@@ -1985,16 +1997,14 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
             ]
 
         if not matched:
-            # Distinguish between "nothing ran" vs "all already added"
-            if exec_results and (targets is None or targets == "all"):
-                response_msg = "All executed test results are already in Excel! ✅"
-            else:
-                response_msg = (
-                    "I don't have any execution results to add. "
-                    "Please run the tests first, then ask me to approve them."
-                )
+            _an_user_msg = request.user_message
+            _an_situation = "approve_all_added" if (exec_results and (targets is None or targets == "all")) else "approve_no_results"
 
             async def _approve_none():
+                response_msg = await _asyncio.to_thread(
+                    agent.narrate, _an_situation, _an_user_msg, page_url, {}
+                )
+                append_message(_session_id, "assistant", response_msg)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_response",
                     "message": response_msg,
@@ -2033,15 +2043,18 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                 "error": _failed.get("error") if _failed else None,
                 "grouped_ids": _ids,
             }
-            _confirm_ask = (
-                f"I'll add these {len(matched)} test steps as a single test case:\n"
-                f"**{_group_name}** ({_ids[0]}–{_ids[-1]})\n\n"
-                "Shall I go ahead? *(yes / no)*"
-            )
             set_pending_approval(_session_id, [_grouped])
-            append_message(_session_id, "assistant", _confirm_ask)
+            _ga_group_name = _group_name
+            _ga_ids = _ids
+            _ga_count = len(matched)
+            _ga_user_msg = request.user_message
 
             async def _group_ask():
+                _confirm_ask = await _asyncio.to_thread(
+                    agent.narrate, "approve_confirm_group", _ga_user_msg, page_url,
+                    {"name": _ga_group_name, "id_range": f"{_ga_ids[0]}–{_ga_ids[-1]}", "count": _ga_count}
+                )
+                append_message(_session_id, "assistant", _confirm_ask)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_response",
                     "message": _confirm_ask,
@@ -2055,23 +2068,16 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
         # When "approve all" targets 2+ results without specifying row structure,
         # ask the user first whether they want separate rows or a combined row.
         if (targets is None or targets == "all") and len(matched) >= 2:
-            _unadded_lines = "\n".join(
-                f"- **{_r['id']}** {_r['name']} "
-                + ("✅ Passed" if _r.get("status") == "passed" else "❌ Failed")
-                for _r in matched
-            )
-            _row_q = (
-                f"I found **{len(matched)} unadded result(s)**:\n\n"
-                + _unadded_lines
-                + "\n\nHow would you like to add them?\n\n"
-                "- **Individual rows** — each test case as its own row *(reply: split)*\n"
-                "- **Combined row** — all merged into one row with a summary *(reply: combined)*\n\n"
-                "Or type *no* to cancel."
-            )
             set_pending_row_choice(_session_id, {"results": matched})
-            append_message(_session_id, "assistant", _row_q)
+            _rs_matched = matched
+            _rs_user_msg = request.user_message
 
             async def _row_structure_ask():
+                _row_q = await _asyncio.to_thread(
+                    agent.narrate, "approve_row_structure", _rs_user_msg, page_url,
+                    {"results": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in _rs_matched]}
+                )
+                append_message(_session_id, "assistant", _row_q)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_response",
                     "message": _row_q,
@@ -2083,14 +2089,15 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
 
         # Single result or specific target — add directly without row-structure question
         set_pending_approval(_session_id, matched)
-        confirm_ask = (
-            "I'd like to add the following to Excel:\n"
-            + "\n".join(_result_lines(matched))
-            + "\n\nShall I go ahead? *(yes / no)*"
-        )
-        append_message(_session_id, "assistant", confirm_ask)
+        _ai_matched = matched
+        _ai_user_msg = request.user_message
 
         async def _approve_ask():
+            confirm_ask = await _asyncio.to_thread(
+                agent.narrate, "approve_confirm_individual", _ai_user_msg, page_url,
+                {"matched": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in _ai_matched]}
+            )
+            append_message(_session_id, "assistant", confirm_ask)
             await sse_manager.broadcast(_session_id, {
                 "type": "chat_response",
                 "message": confirm_ask,
@@ -2137,14 +2144,14 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     # ── Edit ──────────────────────────────────────────────────────────────────
     elif intent == "edit":
         if not last_suite:
-            no_tc_msg = (
-                "I don't have any test cases to edit yet. "
-                "Please generate test cases first — share a URL or describe what you'd like to test."
-            )
+            _edit_user_msg = request.user_message
             append_message(_session_id, "user", request.user_message)
-            append_message(_session_id, "assistant", no_tc_msg)
 
             async def _edit_no_tc():
+                no_tc_msg = await _asyncio.to_thread(
+                    agent.narrate, "no_test_cases_edit", _edit_user_msg, page_url, {}
+                )
+                append_message(_session_id, "assistant", no_tc_msg)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_response",
                     "message": no_tc_msg,
@@ -2190,28 +2197,19 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
 
     # ── Clarify ───────────────────────────────────────────────────────────────
     elif intent == "clarify":
-        # Use the LLM's context-aware clarify_message; build a dynamic fallback if absent
         clarify_msg = classification.get("clarify_message") or ""
-        if not clarify_msg.strip():
-            _tc_names = [tc.get("name", f"Test {i+1}") for i, tc in enumerate(test_cases)]
-            _tc_hint = (
-                f" I can see you have {len(_tc_names)} test case(s): "
-                + ", ".join(f"**{n}**" for n in _tc_names[:5])
-                + ("..." if len(_tc_names) > 5 else "") + "."
-            ) if _tc_names else ""
-            clarify_msg = (
-                f"I'm not sure what you'd like to do with \"{request.user_message}\"."
-                f"{_tc_hint} Did you mean to:\n"
-                "- **Run tests** — say *\"execute all\"* or *\"run test 1\"*\n"
-                "- **Generate new test cases** — say *\"generate tests for checkout\"*\n"
-                "- **Edit a test** — say *\"change step 2 to click submit\"*\n"
-                "- **Save results to Excel** — say *\"approve test case 1\"*\n\n"
-                "What would you like to do?"
-            )
+        _clarify_user_msg = request.user_message
+        _clarify_tc_names = [tc.get("name", "") for tc in test_cases]
         append_message(_session_id, "user", request.user_message)
-        append_message(_session_id, "assistant", clarify_msg)
 
         async def _clarify():
+            nonlocal clarify_msg
+            if not clarify_msg.strip():
+                clarify_msg = await _asyncio.to_thread(
+                    agent.narrate, "clarify_fallback", _clarify_user_msg, page_url,
+                    {"test_cases": _clarify_tc_names}
+                )
+            append_message(_session_id, "assistant", clarify_msg)
             await sse_manager.broadcast(_session_id, {
                 "type": "chat_response",
                 "message": clarify_msg,
@@ -2236,13 +2234,6 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
 
         # Use corrected intent if any corrections were made
         effective_intent = _corrected_msg if _corrections else request.user_message
-        # Build a short inline note to prepend to the confirm message (set later)
-        _correction_note = ""
-        if _corrections:
-            _note_parts = ", ".join(
-                f'"{orig}" → "{fixed}"' for orig, fixed in _corrections.items()
-            )
-            _correction_note = f"_(Auto-corrected element names: {_note_parts})_\n\n"
 
         append_message(_session_id, "user", request.user_message)
         _test_email = session_creds.get("email") or "test@example.com"
@@ -2277,24 +2268,16 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                     _tc["id"] = f"TS_{_max_num + _i + 1:03d}"
                 set_max_tc_id(_session_id, _max_num + len(test_suite.get("test_cases", [])))
 
-                confirm_msg = await _asyncio.to_thread(agent.generate_confirm, test_suite, compact)
+                confirm_msg = await _asyncio.to_thread(
+                    agent.generate_confirm, test_suite, compact,
+                    corrections=_corrections if _corrections else None,
+                    new_creds=_new_creds if _new_creds else None,
+                )
                 _tok_after = _get_stats()
                 _msg_tokens = _tok_after["total_tokens"] - _tok_before["total_tokens"]
                 _msg_cost = round(_tok_after["total_cost_usd"] - _tok_before["total_cost_usd"], 8)
                 add_session_tokens(_session_id, _msg_tokens, _msg_cost)
                 _sess_tok = get_session_tokens(_session_id)
-
-                if _correction_note:
-                    confirm_msg = _correction_note + confirm_msg
-
-                if _new_creds:
-                    parts = []
-                    if _new_creds.get("email"):
-                        parts.append(f"email: {_new_creds['email']}")
-                    if _new_creds.get("password"):
-                        parts.append(f"password: {_new_creds['password']}")
-                    ack = f"Got it — I'll use {' and '.join(parts)} for tests requiring login. " if parts else ""
-                    confirm_msg = ack + confirm_msg
 
                 append_message(_session_id, "assistant", confirm_msg)
                 set_last_test_suite(_session_id, test_suite)

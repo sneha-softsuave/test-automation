@@ -68,7 +68,7 @@ def call_llm_chat(provider: str, model: str, system: str, messages: list,
     else:  # openai, groq, waymore
         full_messages = [{"role": "system", "content": system}] + messages
         kwargs = {"model": model, "max_tokens": max_tokens, "messages": full_messages}
-        if json_mode and provider in ("openai", "waymore"):
+        if json_mode and provider in ("openai", "waymore", "groq"):
             kwargs["response_format"] = {"type": "json_object"}
         response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content

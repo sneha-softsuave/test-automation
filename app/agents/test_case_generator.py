@@ -428,7 +428,7 @@ Return ONLY valid JSON:
   "intent": "execute|edit|informational|approve|generate|clarify",
   "confidence": 0.0,
   "reasoning": "one short sentence",
-  "clarify_message": "only if intent=clarify, suggest likely intent and options",
+  "clarify_message": "warm, friendly ask — NEVER empty when intent=clarify; suggest likely intent and next steps",
   "metadata": {{
     "execute_targets": null,
     "approve_targets": null,
@@ -498,7 +498,7 @@ OUTPUT — return ONLY this JSON, no extra text:
   "intent": "execute|edit|informational|approve|generate|clarify",
   "confidence": 0.95,
   "reasoning": "one short sentence",
-  "clarify_message": "only if intent=clarify",
+  "clarify_message": "warm, friendly ask — NEVER empty when intent=clarify",
   "metadata": {{
     "execute_targets": null,
     "approve_targets": null,
@@ -528,7 +528,8 @@ PAGE SUMMARY (JSON):
 USER QUESTION:
 {question}
 
-Answer the question directly and helpfully. If relevant, reference specific elements visible on the page.
+Answer the question directly and helpfully. Be warm and conversational — like a knowledgeable
+colleague, not a technical manual. If relevant, reference specific elements visible on the page.
 Do NOT generate test cases. Do NOT output JSON.
 Use 1-2 suitable professional emojis where natural — keep it subtle and professional.
 Return ONLY the Markdown answer."""
@@ -565,17 +566,57 @@ Tone: concise, conversational, helpful.
 Use 1-2 suitable professional emojis to make the message friendly — never overdo it.
 Use Markdown formatting. Return ONLY the message text. No JSON. No preamble."""
 
-PAGE_CONFIRM_PROMPT = """You are an AI test assistant. You just generated the following test suite.
+PAGE_CONFIRM_PROMPT = """You are a warm, conversational AI test automation assistant reporting back to the user.
+
+YOU (the assistant) just created the following test suite for the user.
 
 TEST SUITE SUMMARY:
 - Total test cases: {tc_count}
 - Test case names: {tc_names}
+{context_block}
+Tell the user what YOU created in 1-3 sentences. Speak in first person ("I've created...", "Done! Here are...", "All set —", etc.).
+Vary your opening — don't always start the same way. Reference the test names using **bold**.
+You may use a short bullet list if more than 3 cases.
+If context_block has credential or correction info, weave it in naturally.
+Use a professional emoji. Use Markdown. Return ONLY the message, no JSON."""
 
-Write 1-2 sentences (max 30 words) confirming what you created.
-Use **bold** for test case names. You may use a short bullet list if more than 3 cases.
-Start the message with a suitable professional emoji.
-Example: "✅ I've created 3 test cases: **Valid Login**, **Invalid Credentials**, and **Forgot Password**."
-Return ONLY the sentence or list. Use Markdown formatting. No JSON. No extra text."""
+
+NARRATOR_PROMPT = """\
+You are a warm, conversational AI test automation assistant.
+
+User said: "{user_message}"
+Current page: {page_url}
+Situation: {situation}
+Context:
+{context_json}
+
+Generate a natural, friendly response for this situation.
+Situation guide:
+- no_test_cases_execute  : No test cases to run. Encourage them to generate first.
+- no_test_cases_edit     : No test cases to edit. Encourage them to generate first.
+- approve_cancel         : User cancelled adding to Excel. Acknowledge warmly.
+- approve_row_cancel     : User cancelled the row structure choice. Acknowledge warmly.
+- approve_success        : Added to Excel. Celebrate! List confirmed results from context.
+- approve_nothing_to_add : No new results to add. Suggest running tests first.
+- approve_all_added      : Everything already in Excel. Celebrate!
+- approve_no_results     : No execution results. Guide them to run tests first.
+- approve_multi_group_no_results: Ranges not found. Ask them to check range numbers.
+- approve_confirm_individual: Show matched results from context, ask yes/no to add to Excel.
+- approve_confirm_group  : Show grouped name + range from context, ask yes/no.
+- approve_confirm_multi_group: Show each grouped row from context, ask yes/no.
+- approve_list_unadded   : List unadded results from context, offer to add all (yes/no).
+- approve_row_structure  : Show results from context, ask: individual rows or combined?
+- clarify_fallback       : Unclear message. Warmly list what the assistant can do and ask
+                           what they need. Reference existing test cases if any.
+- generate_complete      : (fallback) Confirm test cases were created. Use tc_count + tc_names from context.
+- generate_failed        : Generation returned 0 test cases. Apologise warmly, ask the user to rephrase or try a different URL.
+
+Rules:
+- warm and natural
+- Include all relevant data from the context JSON in the response
+- Confirmation messages must end with a clear yes/no question
+- Use Markdown formatting. No JSON in output.\
+"""
 
 
 GENERATOR_PROMPT = """You are an expert Playwright test case generator.
@@ -1148,19 +1189,48 @@ class TestCaseGeneratorAgent(BaseAgent):
                 logger.error(f"[generate_edit] Failed: {e2}")
                 raise
 
-    def generate_confirm(self, test_suite: Dict[str, Any], compact: Dict[str, Any]) -> str:
+    def generate_confirm(self, test_suite: Dict[str, Any], compact: Dict[str, Any],
+                         corrections: dict = None, new_creds: dict = None) -> str:
         """
         Call LLM to produce a short confirmation message after test cases are generated.
         """
         test_cases = test_suite.get("test_cases", [])
         tc_count = len(test_cases)
+        if tc_count == 0:
+            return self.narrate("generate_failed", "", context={})
         tc_names = ", ".join(tc.get("name", tc.get("id", "")) for tc in test_cases[:5])
-        prompt = PAGE_CONFIRM_PROMPT.format(tc_count=tc_count, tc_names=tc_names)
+        context_lines = []
+        if corrections:
+            note = ", ".join(f'"{k}" → "{v}"' for k, v in corrections.items())
+            context_lines.append(f"Auto-corrected element names: {note}")
+        if new_creds:
+            parts = [f"email: {new_creds['email']}" if new_creds.get("email") else "",
+                     f"password: {new_creds['password']}" if new_creds.get("password") else ""]
+            context_lines.append(f"New credentials stored: {', '.join(p for p in parts if p)}")
+        context_block = ("\nAdditional context:\n" + "\n".join(f"- {l}" for l in context_lines) + "\n") if context_lines else ""
+        prompt = PAGE_CONFIRM_PROMPT.format(tc_count=tc_count, tc_names=tc_names, context_block=context_block)
         try:
             return self.call_llm(prompt, prompt_label="PAGE_CONFIRM_PROMPT").strip()
         except Exception as e:
             logger.warning(f"[generate_confirm] LLM call failed: {e}")
-            return f"I've created {tc_count} test case(s) for you."
+            return self.narrate("generate_complete", "",
+                                context={"tc_count": tc_count, "tc_names": tc_names})
+
+    def narrate(self, situation: str, user_message: str,
+                page_url: str = "", context: dict = None) -> str:
+        """
+        Generate a warm, conversational LLM response for a given situation.
+        Used to replace all hard-coded user-facing strings with dynamic LLM output.
+        """
+        import json as _json
+        prompt = NARRATOR_PROMPT.format(
+            user_message=user_message or "",
+            page_url=page_url or "not set",
+            situation=situation,
+            context_json=_json.dumps(context or {}, indent=2),
+        )
+        return self.call_llm(prompt, markdown=True,
+                             prompt_label=f"NARRATOR_{situation.upper()}")
 
     def generate(
         self,
@@ -1306,9 +1376,14 @@ class TestCaseGeneratorAgent(BaseAgent):
         raw = re.sub(r"\s*```\s*$", "", raw)
         raw = raw.strip()
 
+        if not raw:
+            raise ValueError("LLM returned empty response after stripping code fences")
+
         # Find the outermost JSON object by tracking brace depth
         # This correctly handles trailing text after the closing }
         start = raw.find("{")
+        if start == -1:
+            raise ValueError(f"LLM returned no JSON object. Raw (first 200): {raw[:200]}")
         if start != -1:
             depth = 0
             end = start
