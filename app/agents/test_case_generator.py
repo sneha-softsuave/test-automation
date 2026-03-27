@@ -6,7 +6,8 @@ Generates an EnhancedTestSuite from a crawled page structure + user intent.
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from difflib import get_close_matches
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from app.agents.base_agent import BaseAgent, LLMProvider
@@ -22,6 +23,90 @@ def _trim_history(history: list, max_turns: int = 8, max_chars_per_msg: int = 60
         {"role": m["role"], "content": m["content"][:max_chars_per_msg]}
         for m in trimmed
     ]
+
+
+def fuzzy_correct_intent(
+    message: str, page_structure: Dict[str, Any], cutoff: float = 0.88
+) -> Tuple[str, Dict[str, str]]:
+    """
+    Fuzzy-match element name references in `message` against actual DOM elements
+    from `page_structure`. Returns (corrected_message, corrections_map).
+
+    corrections_map: {original_phrase: corrected_name}
+    Only corrects when similarity >= `cutoff` but NOT already an exact match
+    (case-insensitive). Longer n-grams are tested first (greedy, left-to-right).
+
+    Cutoff is intentionally high (0.88) to avoid false positives on common words
+    like "login" → "Log in" or phrases with trailing punctuation like "Email :".
+    Only genuine misspellings (e.g. "selct project" → "Select Project") trigger.
+    """
+    # Collect all element display names from the page structure
+    element_names: List[str] = []
+    for elem in page_structure.get("inputs", []):
+        for key in ("label", "placeholder", "ariaLabel", "name"):
+            v = (elem.get(key) or "").strip()
+            if v and len(v) > 1:
+                element_names.append(v)
+    for elem in page_structure.get("buttons", []):
+        for key in ("text", "ariaLabel", "name"):
+            v = (elem.get(key) or "").strip()
+            if v and len(v) > 1:
+                element_names.append(v)
+    for elem in page_structure.get("custom_dropdowns", []):
+        for key in ("label", "text", "ariaLabel"):
+            v = (elem.get(key) or "").strip()
+            if v and len(v) > 1:
+                element_names.append(v)
+    for elem in page_structure.get("interactive", []):
+        for key in ("text", "ariaLabel"):
+            v = (elem.get(key) or "").strip()
+            if v and len(v) > 1:
+                element_names.append(v)
+
+    if not element_names:
+        return message, {}
+
+    _lower_names = {n.lower(): n for n in element_names}
+    words = message.split()
+    corrections: Dict[str, str] = {}
+    replaced_ranges: List[Tuple[int, int]] = []  # (start_idx, end_idx) word ranges already corrected
+
+    for n in range(min(4, len(words)), 0, -1):
+        for i in range(len(words) - n + 1):
+            # Skip if this range overlaps an already-corrected range
+            if any(s <= i < e or s < i + n <= e for s, e in replaced_ranges):
+                continue
+            phrase = " ".join(words[i : i + n])
+            phrase_lower = phrase.lower()
+
+            # Already an exact match — no correction needed
+            if phrase_lower in _lower_names:
+                continue
+
+            # Skip phrases that are only punctuation or contain punctuation chars
+            # (e.g. "Email :" would match "Email" — colon makes it a false positive)
+            _stripped = re.sub(r"[^a-z0-9 ]", "", phrase_lower).strip()
+            if not _stripped or _stripped != phrase_lower.strip():
+                continue
+
+            # Skip very short single-word phrases (< 4 chars) — too prone to false matches
+            if n == 1 and len(_stripped) < 4:
+                continue
+
+            matches = get_close_matches(phrase_lower, list(_lower_names.keys()), n=1, cutoff=cutoff)
+            if matches:
+                canonical = _lower_names[matches[0]]
+                corrections[phrase] = canonical
+                replaced_ranges.append((i, i + n))
+
+    if not corrections:
+        return message, {}
+
+    corrected = message
+    for orig, fixed in corrections.items():
+        corrected = corrected.replace(orig, fixed, 1)
+
+    return corrected, corrections
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +715,31 @@ DISAMBIGUATION — Dropdown trigger vs. navigation button:
         or page.locator('button[aria-label*="collapse" i]')
 
 ─────────────────────────────────────────────────────────────
+STEP INSTRUCTION NAMING — MANDATORY
+─────────────────────────────────────────────────────────────
+The `instruction` field MUST always include the EXACT element name as it appears
+in the PAGE STRUCTURE above (the label, placeholder, aria-label, or button text).
+Always quote the exact name in single quotes inside the instruction.
+
+Pattern → Example:
+  Buttons:          "Click the '<exact-text>' button"
+                    e.g. "Click the 'Submit' button"
+  Dropdowns:        "Click on the '<exact-label>' dropdown"
+                    e.g. "Click on the 'Select Project' dropdown"
+                    NOT  "Click on the dropdown to select a project"  ← WRONG
+  Custom dropdowns: "Select '<value>' from the '<exact-label>' dropdown"
+                    e.g. "Select 'Project_Test_001' from the 'Select Project' dropdown"
+  Inputs / fields:  "Fill in the '<exact-label/placeholder>' field with <value>"
+                    e.g. "Fill in the 'Email Address' field with test@example.com"
+  Assertions:       "Verify that '<exact-element-or-text>' is visible / shows '<value>'"
+  Navigation:       "Navigate to <url>"
+
+NEVER write vague instructions that omit the element name:
+  ✗ "Click on the dropdown to select a project"  → ✓ "Click on the 'Select Project' dropdown"
+  ✗ "Enter valid email"                          → ✓ "Fill in the 'Email' field with <email>"
+  ✗ "Click the button"                           → ✓ "Click the 'Save' button"
+
+─────────────────────────────────────────────────────────────
 SELF-CHECK BEFORE OUTPUT
 ─────────────────────────────────────────────────────────────
 Before returning JSON, ensure:
@@ -638,6 +748,7 @@ Before returning JSON, ensure:
 - No steps depend on missing elements, pages, or hidden functionality.
 - No unsupported USER INTENT scenarios are included.
 - All selectors are grounded in the provided page data (no invention).
+- Every `instruction` field quotes the exact element name in single quotes.
 
 If any test case fails these checks, remove or fix it before output.
 
@@ -1171,10 +1282,20 @@ class TestCaseGeneratorAgent(BaseAgent):
             f"history_turns={len(trimmed)} | form_data_keys={list((form_data or {}).keys())}"
         )
 
-        raw = self.call_llm_chat(system_prompt, messages, markdown=False,
-                                 prompt_label="GENERATOR_PROMPT")
-
-        return self._parse_json_response(raw)
+        last_exc: Exception = None
+        for _attempt in range(3):
+            if _attempt > 0:
+                logger.warning(f"generate() retry {_attempt}/2 after transient failure")
+            raw = self.call_llm_chat(system_prompt, messages, markdown=False)
+            if not raw.strip():
+                last_exc = ValueError("LLM returned empty response")
+                continue
+            try:
+                return self._parse_json_response(raw)
+            except ValueError as e:
+                last_exc = e
+                continue
+        raise last_exc
 
     def _parse_json_response(self, raw: str) -> Dict[str, Any]:
         """Extract and parse JSON from LLM response."""

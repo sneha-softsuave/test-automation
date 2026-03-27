@@ -1883,8 +1883,13 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
             _grouped_rows = []
             _preview_lines = []
             for _rng in _approve_ranges:
-                _rng_from = _rng.get("from", 1)
-                _rng_to = _rng.get("to", 1)
+                # LLM may return ranges as dicts {"from":1,"to":2} or as lists [1,2]
+                if isinstance(_rng, (list, tuple)):
+                    _rng_from = int(_rng[0]) if len(_rng) > 0 else 1
+                    _rng_to = int(_rng[1]) if len(_rng) > 1 else _rng_from
+                else:
+                    _rng_from = _rng.get("from", 1)
+                    _rng_to = _rng.get("to", 1)
                 _rng_results = _resolve_range_results(_rng_from, _rng_to)
                 if not _rng_results:
                     continue
@@ -2222,9 +2227,22 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
         compact = session["compact"]
         session_creds = get_credentials(_session_id)
 
-        # Clean intent — just the raw user message.
-        # History + form_data are passed to agent.generate() as separate args.
-        effective_intent = request.user_message
+        # ── Fuzzy element-name correction (silent auto-correct) ───────────────
+        # Compare element names the user typed against actual DOM element names.
+        # Auto-correct close-but-not-exact matches and proceed immediately —
+        # no confirmation prompt, just inform the user in the generation message.
+        from app.agents.test_case_generator import fuzzy_correct_intent as _fce
+        _corrected_msg, _corrections = _fce(request.user_message, page_structure)
+
+        # Use corrected intent if any corrections were made
+        effective_intent = _corrected_msg if _corrections else request.user_message
+        # Build a short inline note to prepend to the confirm message (set later)
+        _correction_note = ""
+        if _corrections:
+            _note_parts = ", ".join(
+                f'"{orig}" → "{fixed}"' for orig, fixed in _corrections.items()
+            )
+            _correction_note = f"_(Auto-corrected element names: {_note_parts})_\n\n"
 
         append_message(_session_id, "user", request.user_message)
         _test_email = session_creds.get("email") or "test@example.com"
@@ -2265,6 +2283,9 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                 _msg_cost = round(_tok_after["total_cost_usd"] - _tok_before["total_cost_usd"], 8)
                 add_session_tokens(_session_id, _msg_tokens, _msg_cost)
                 _sess_tok = get_session_tokens(_session_id)
+
+                if _correction_note:
+                    confirm_msg = _correction_note + confirm_msg
 
                 if _new_creds:
                     parts = []
@@ -2743,6 +2764,23 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                                 # Defer: start scraping after chat_execution_done
                                 _scraped_nav_urls.add(nav_url)
                                 _pending_scrapes.append((nav_url, nav_ss))
+                    elif msg_type == "step_started":
+                        await sse_manager.broadcast(exec_session_id, {
+                            "type": "chat_step_executing",
+                            "test_id": msg.get("test_id", ""),
+                            "test_name": msg.get("test_name", ""),
+                            "step_number": msg.get("step_number", 0),
+                            "total_steps": msg.get("total_steps", 0),
+                            "instruction": msg.get("instruction", ""),
+                        })
+                        await sse_manager.broadcast(exec_session_id, {
+                            "type": "step_update",
+                            "test_id": msg.get("test_id", ""),
+                            "test_name": msg.get("test_name", ""),
+                            "step_number": msg.get("step_number", 0),
+                            "instruction": msg.get("instruction", ""),
+                            "status": "running",
+                        })
                     elif msg_type == "test_started":
                         await sse_manager.broadcast(exec_session_id, {
                             "type": "step_update",

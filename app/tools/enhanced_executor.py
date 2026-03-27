@@ -12,8 +12,8 @@ from datetime import datetime
 
 # Load environment variables for timeout configuration
 # These can be configured in .env file
-STEP_MAX_RETRIES = int(os.getenv("STEP_MAX_RETRIES", "3"))  # 3 retries = 4 total attempts per step
-RETRY_TIMEOUT_MULTIPLIER = float(os.getenv("RETRY_TIMEOUT_MULTIPLIER", "1.3"))  # Increase timeout each retry
+STEP_MAX_RETRIES = int(os.getenv("STEP_MAX_RETRIES", "2"))  # 2 retries = 3 total attempts per step
+RETRY_TIMEOUT_MULTIPLIER = float(os.getenv("RETRY_TIMEOUT_MULTIPLIER", "1.0"))  # Flat timeout — escalation doesn't help when element is wrong/missing
 DEFAULT_ACTION_TIMEOUT = int(os.getenv("DEFAULT_ACTION_TIMEOUT", "30000"))  # Default timeout in ms
 WAIT_TIMEOUT = int(os.getenv("WAIT_TIMEOUT", "10000"))  # Wait operations timeout
 NAVIGATION_TIMEOUT = int(os.getenv("NAVIGATION_TIMEOUT", "30000"))  # Navigation timeout
@@ -500,8 +500,14 @@ def _execute_single_test_sync(
                             failed_selectors=failed_selectors
                         )
 
-                        # On last retry, try live DOM + LLM selector rescue
-                        if attempt == max_step_retries and page:
+                        # On FIRST retry, run live DOM + LLM selector rescue.
+                        # Keyword-based alternative selectors often match the wrong element
+                        # (e.g. sidebar "Our Project" button when looking for "Select Project"
+                        # dropdown option). The live rescue asks the LLM to read the actual
+                        # DOM and instruction — it finds the correct element in one API call.
+                        # Running it early (attempt 1) avoids burning 2-3 more retry cycles
+                        # on the same wrong keyword match.
+                        if attempt == 1 and page:
                             step_update("step_retry", {
                                 "message": f"Step {step_num}: trying live selector rescue...",
                                 "step_number": step_num,
@@ -762,14 +768,29 @@ def _execute_single_test_sync(
                             page.wait_for_load_state("load", timeout=5000)
                         except Exception:
                             pass
-                        # Step 2: Wait for any loading overlay/spinner to disappear.
-                        # Returns immediately if no spinner exists — zero penalty.
+                        # Step 2: Brief pause so React can mount its loading overlay.
+                        # Without this, wait_for_function below runs before the spinner
+                        # element appears in the DOM → querySelector returns null →
+                        # !null === true → screenshot taken while spinner is mid-render.
+                        try:
+                            page.wait_for_timeout(600)
+                        except Exception:
+                            pass
+                        # Step 3: Wait for loading overlay/spinner to disappear.
+                        # Covers Material UI (MuiCircularProgress, MuiBackdrop),
+                        # generic React spinners, and common class-name patterns.
                         try:
                             page.wait_for_function(
                                 "() => !document.querySelector("
-                                "'[role=\"progressbar\"], [class*=\"spinner\"], "
-                                "[class*=\"loading\"], [class*=\"skeleton\"]')",
-                                timeout=2000,
+                                "'[role=\"progressbar\"], "
+                                "[class*=\"spinner\"], [class*=\"Spinner\"], "
+                                "[class*=\"loading\"], [class*=\"Loading\"], "
+                                "[class*=\"skeleton\"], [class*=\"Skeleton\"], "
+                                "[class*=\"circular\"], [class*=\"Circular\"], "
+                                "[class*=\"progress\"], [class*=\"Progress\"], "
+                                "[class*=\"overlay\"], [class*=\"Overlay\"], "
+                                "[class*=\"backdrop\"], [class*=\"Backdrop\"]')",
+                                timeout=5000,
                             )
                         except Exception:
                             pass
@@ -2714,7 +2735,7 @@ def _execute_action_sync(
         # Case 2: Element is visible but disabled - wait for it to become enabled
         if not click_done and element_exists and is_visible and not is_enabled:
             print(f"    Button is disabled, waiting for it to become enabled (max 60s)...")
-            for i in range(120):  # 120 * 500ms = 60 seconds
+            for i in range(20):  # 20 * 500ms = 10 seconds
                 # Check for Next/Skip signal every iteration
                 ctrl = _check_step_control(signal_file)
                 if ctrl in ("next", "skip"):

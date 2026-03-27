@@ -266,6 +266,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const sseRef = useRef<EventSource | null>(null);
   const activeMsgIdRef = useRef<string | null>(null); // tracks which message is currently executing
   const chatThinkingIdRef = useRef<string | null>(null); // ID of the current typing-indicator bubble
+  const execStepMsgIdRef = useRef<string | null>(null); // ID of the live "Executing step…" chat bubble
   const modeRef = useRef<Mode>(mode); // kept current so stale closures can read it
   useEffect(() => { modeRef.current = mode; }, [mode]);
   const instructionRef = useRef<HTMLTextAreaElement>(null);
@@ -817,6 +818,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         break;
       }
       case 'chat_execution_done': {
+        execStepMsgIdRef.current = null; // reset so next run gets a fresh bubble
         // Show results and unblock input — keep SSE open for page_analysis_done that may follow
         const summary = data.summary as ExecSummary;
         setExecSummary(summary);
@@ -879,6 +881,28 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         });
         break;
       }
+      case 'chat_step_executing': {
+        // Show/update a single live "Executing…" bubble in the chat for each step
+        const stepNum = Number(data.step_number ?? 0);
+        const totalSteps = Number(data.total_steps ?? 0);
+        const stepInstr = String(data.instruction ?? '');
+        const stepContent = totalSteps > 0
+          ? `▶ Step ${stepNum}/${totalSteps}: ${stepInstr}`
+          : `▶ Step ${stepNum}: ${stepInstr}`;
+        if (!execStepMsgIdRef.current) {
+          // First step — create the bubble
+          const msgId = `exec_step_${Date.now()}`;
+          execStepMsgIdRef.current = msgId;
+          appendChatMsg({ id: msgId, role: 'assistant', content: stepContent });
+        } else {
+          // Subsequent steps — update existing bubble in-place
+          const msgId = execStepMsgIdRef.current;
+          setChatMessages(prev => prev.map(m =>
+            m.id === msgId ? { ...m, content: stepContent } : m
+          ));
+        }
+        break;
+      }
       case 'agent_phase':
         // Phase update — add a brief status step
         if (data.message) {
@@ -903,6 +927,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const handleChatExecute = async (userMessage: string, inputData?: Record<string, string>) => {
     if (!chatSessionId) return;
     setChatPhase('executing');
+    execStepMsgIdRef.current = null; // reset for fresh run
     setExecSteps([]);
     setExecSummary(null);
     setExecScreenshot(null);
