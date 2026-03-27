@@ -88,6 +88,10 @@ interface ChatMsg {
   testSuite?: GeneratedSuite;
   execSummary?: ExecSummary;
   execTestCases?: ExecTestResult[];
+  tokens_used?: number;
+  cost_usd?: number;
+  session_total_tokens?: number;
+  session_total_cost?: number;
 }
 
 function upsertExecStep(prev: ExecStepMsg[], incoming: ExecStepMsg): ExecStepMsg[] {
@@ -389,6 +393,10 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             role: 'assistant',
             content: String(data.message ?? ''),
             testSuite: suite,
+            tokens_used: data.tokens_used,
+            cost_usd: data.cost_usd,
+            session_total_tokens: data.session_total_tokens,
+            session_total_cost: data.session_total_cost,
           });
           if (suite) {
             setLastTestSuite(suite);
@@ -404,6 +412,10 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             id: `ca_${Date.now()}`,
             role: 'assistant',
             content: String(data.message ?? ''),
+            tokens_used: data.tokens_used,
+            cost_usd: data.cost_usd,
+            session_total_tokens: data.session_total_tokens,
+            session_total_cost: data.session_total_cost,
           });
           setChatPhase('chatting');
 
@@ -1719,6 +1731,19 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                           </div>
                         );
                       })()}
+                      {/* Token usage — shown below the bubble for LLM responses */}
+                      {!msg.thinking && msg.tokens_used != null && msg.tokens_used > 0 && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, paddingLeft: 2 }}>
+                          <span style={{ fontSize: '0.68rem', color: '#94a3b8', whiteSpace: 'nowrap' }}>
+                            {msg.tokens_used.toLocaleString()} tokens · ${(msg.cost_usd ?? 0).toFixed(5)}
+                          </span>
+                          {msg.session_total_tokens != null && msg.session_total_tokens > 0 && (
+                            <span style={{ fontSize: '0.68rem', color: '#64748b', whiteSpace: 'nowrap' }}>
+                              · session: {msg.session_total_tokens.toLocaleString()} tokens · ${(msg.session_total_cost ?? 0).toFixed(5)}
+                            </span>
+                          )}
+                        </div>
+                      )}
                       {/* Execution result card with per-TC confirm buttons */}
                       {msg.execSummary && (
                         <div className={styles.genExecResultCard}>

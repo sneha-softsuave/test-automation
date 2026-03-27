@@ -28,6 +28,7 @@ def create_session(page_structure: Dict[str, Any], compact: Dict[str, Any]) -> s
         "execution_session_id": None,
         "credentials": {},
         "max_tc_id": 0,
+        "session_tokens": {"total_tokens": 0, "cost_usd": 0.0},
     }
     return session_id
 
@@ -47,6 +48,7 @@ def create_pending_session() -> str:
         "execution_session_id": None,
         "credentials": {},
         "max_tc_id": 0,
+        "session_tokens": {"total_tokens": 0, "cost_usd": 0.0},
     }
     return session_id
 
@@ -216,3 +218,20 @@ def set_max_tc_id(session_id: str, value: int) -> None:
     session = _sessions.get(session_id)
     if session is not None:
         session["max_tc_id"] = value
+
+
+def add_session_tokens(session_id: str, tokens: int, cost: float) -> None:
+    """Accumulate LLM token usage for this session (per-message diff)."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        st = session.setdefault("session_tokens", {"total_tokens": 0, "cost_usd": 0.0})
+        st["total_tokens"] += tokens
+        st["cost_usd"] = round(st["cost_usd"] + cost, 8)
+
+
+def get_session_tokens(session_id: str) -> Dict[str, Any]:
+    """Return cumulative token usage for this session."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        return dict(session.get("session_tokens", {"total_tokens": 0, "cost_usd": 0.0}))
+    return {"total_tokens": 0, "cost_usd": 0.0}

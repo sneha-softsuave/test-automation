@@ -210,7 +210,8 @@ class BaseAgent(ABC):
 
     def call_llm_chat(self, system: str, messages: list, markdown: bool = True) -> str:
         """
-        Multi-turn conversation call.
+        Multi-turn conversation call. Routes through llm_wrapper.call_llm_chat so
+        every call is token-tracked and logged — identical to call_llm().
         system  : system/context prompt (page summary, test suite, etc.)
         messages: [{role: "user"|"assistant", content: str}, ...]
                   The final entry should be the current user turn.
@@ -221,18 +222,14 @@ class BaseAgent(ABC):
             system = system + self._MARKDOWN_INSTRUCTION
         print(f"[call_llm_chat] {self.provider.value} | turns={len(messages)}")
         try:
-            if self.provider == LLMProvider.ANTHROPIC:
-                response = self.client.messages.create(
-                    model=self.model, max_tokens=self.max_tokens, temperature=0,
-                    system=system, messages=messages,
-                )
-                return response.content[0].text.strip()
-            else:  # OpenAI-compatible: OpenAI, Groq, Waymore
-                full_messages = [{"role": "system", "content": system}] + messages
-                response = self.client.chat.completions.create(
-                    model=self.model, max_tokens=self.max_tokens, messages=full_messages,
-                )
-                return response.choices[0].message.content.strip()
+            from app.services.llm_wrapper import call_llm_chat as _wrap_chat
+            result = _wrap_chat(
+                provider=self.provider.value, model=self.model,
+                system=system, messages=messages,
+                client=self.client, max_tokens=self.max_tokens,
+                agent_name=self.__class__.__name__,
+            )
+            return result["text"]
         except Exception as e:
             print(f"[call_llm_chat] failed ({e}), falling back to single-turn")
             combined = f"{system}\n\n"

@@ -74,6 +74,36 @@ def _extract_credentials_semantic(text: str, agent) -> dict:
         return _extract_credentials(text)
 
 
+def _extract_form_data_semantic(text: str, agent) -> dict:
+    """
+    Extract general form field values (dates, names, descriptions, locations, etc.)
+    from the user's message using LLM. Returns {field_name: value} dict.
+    Only called when message is longer than 60 chars (likely contains real data).
+    """
+    import json as _j
+    if len(text.strip()) < 60:
+        return {}
+    prompt = (
+        "Extract any specific data values a user wants to enter into a form from the message below.\n"
+        "Return ONLY a JSON object where keys are field names and values are the data to enter.\n"
+        "Include: dates, times, names, descriptions, locations, IDs, amounts, statuses.\n"
+        "Use null for any ambiguous field. No explanation, no extra text.\n\n"
+        f"Message: \"{text[:800]}\"\n\n"
+        "JSON:"
+    )
+    try:
+        raw = agent.call_llm(prompt, markdown=False).strip()
+        raw = _cred_re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=_cred_re.MULTILINE).strip()
+        result = _j.loads(raw)
+        return {
+            k: str(v)
+            for k, v in result.items()
+            if v and str(v).lower() not in ('null', 'none', '')
+        }
+    except Exception:
+        return {}
+
+
 # Per-exec-session idempotency guard for the post-execution re-scrape
 _rescrape_done: set = set()
 
@@ -1114,9 +1144,10 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
     from app.core.chat_sessions import (
         get_session, append_message, set_last_test_suite, get_last_test_suite,
         get_messages, get_credentials, set_credentials,
-        get_max_tc_id, set_max_tc_id,
+        get_max_tc_id, set_max_tc_id, add_session_tokens, get_session_tokens,
     )
     from app.core.sse_manager import sse_manager
+    from app.utils.logger import get_stats as _get_stats
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
     validate_api_key(provider_name)
@@ -1138,26 +1169,17 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
         set_credentials(request.session_id, session_creds)
 
     last_suite = get_last_test_suite(request.session_id)
-    if last_suite:
-        prior_tc_names = ", ".join(
-            f"{tc.get('id', '')}: {tc.get('name', '')}"
-            for tc in last_suite.get("test_cases", [])
-        )
-        effective_intent = (
-            f"Previously generated test cases: {prior_tc_names}\n\n"
-            f"User's follow-up instruction: {request.user_message}\n\n"
-            "Apply the follow-up instruction to refine or replace the test cases as requested."
-        )
-    else:
-        effective_intent = request.user_message
 
-    recent_user_lines = [m["content"][:300] for m in history if m["role"] == "user"][-3:]
-    if recent_user_lines:
-        effective_intent = (
-            "Recent conversation context:\n"
-            + "\n".join(f"- {l}" for l in recent_user_lines)
-            + "\n\n" + effective_intent
-        )
+    # Clean intent — just the raw user message.
+    # History is passed directly to agent.generate() as real messages.
+    effective_intent = request.user_message
+
+    # Extract form data via LLM for fill steps (dates, names, descriptions, etc.)
+    _classifier_form_data: dict = {}
+    try:
+        _classifier_form_data = _extract_form_data_semantic(request.user_message, agent)
+    except Exception:
+        pass
 
     # Snapshot values needed inside the background task
     _session_id = request.session_id
@@ -1180,6 +1202,7 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
             provider_enum = AgentLLMProvider(_provider_name)
             agent = TestCaseGeneratorAgent(provider=provider_enum)
 
+            _tok_before = _get_stats()
             test_suite = await _asyncio.to_thread(
                 agent.generate,
                 page_structure=page_structure,
@@ -1189,6 +1212,8 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
                 test_email=_test_email,
                 test_password=_test_password,
                 browser_already_on_page=_browser_alive,
+                history=history,
+                form_data=_classifier_form_data,
             )
 
             # Re-sequence TC IDs using the session-level global counter so IDs
@@ -1199,6 +1224,12 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
             set_max_tc_id(_session_id, _max_num + len(test_suite.get("test_cases", [])))
 
             confirm_msg = await _asyncio.to_thread(agent.generate_confirm, test_suite, compact)
+            _tok_after = _get_stats()
+            _msg_tokens = _tok_after["total_tokens"] - _tok_before["total_tokens"]
+            _msg_cost = round(_tok_after["total_cost_usd"] - _tok_before["total_cost_usd"], 8)
+            add_session_tokens(_session_id, _msg_tokens, _msg_cost)
+            _sess_tok = get_session_tokens(_session_id)
+
             if _new_creds:
                 parts = []
                 if _new_creds.get("email"):
@@ -1212,12 +1243,16 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
             set_last_test_suite(_session_id, test_suite)
 
             tc_count = len(test_suite.get("test_cases", []))
-            print(f"[chat-generate] Generated {tc_count} test case(s) for session {_session_id[:8]}")
+            print(f"[chat-generate] Generated {tc_count} test case(s) for session {_session_id[:8]} | tokens={_msg_tokens} cost=${_msg_cost:.5f}")
 
             await sse_manager.broadcast(_session_id, {
                 "type": "chat_test_suite",
                 "message": confirm_msg,
                 "test_suite": test_suite,
+                "tokens_used": _msg_tokens,
+                "cost_usd": _msg_cost,
+                "session_total_tokens": _sess_tok["total_tokens"],
+                "session_total_cost": _sess_tok["cost_usd"],
             })
         except Exception as e:
             import traceback
@@ -1413,9 +1448,10 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     from app.core.chat_sessions import (
         get_session, append_message, get_last_test_suite, set_last_test_suite,
         get_messages, get_credentials, set_credentials,
-        get_max_tc_id, set_max_tc_id,
+        get_max_tc_id, set_max_tc_id, add_session_tokens, get_session_tokens,
     )
     from app.core.sse_manager import sse_manager
+    from app.utils.logger import get_stats as _get_stats
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
     validate_api_key(provider_name)
@@ -1449,11 +1485,14 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     _pending_row_choice = _get_row_choice(request.session_id)
 
     _YES_RE = _intent_re.compile(
-        r'^(yes|yeah|yep|yup|sure|ok|okay|confirm|add it|go ahead|do it|proceed)\b',
+        r'^(yes|yeah|yep|yup|sure|ok|okay|confirm|add it|go ahead|do it|proceed|'
+        r'fine|sounds good|let\'s go|perfect|great|absolutely|of course|please|'
+        r'approved?|that\'s right|correct|affirmative|roger|done|submit)\b',
         _intent_re.IGNORECASE,
     )
     _NO_RE = _intent_re.compile(
-        r'^(no|nope|nah|cancel|skip|don\'t|dont|stop)\b',
+        r'^(no|nope|nah|cancel|skip|don\'t|dont|stop|never mind|nevermind|'
+        r'forget it|discard|reject|not now|leave it|ignore)\b',
         _intent_re.IGNORECASE,
     )
     # Row-choice responses: "split/individual/separate" vs "combined/one row/same row"
@@ -1597,6 +1636,12 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     intent = classification.get("intent", "generate")
     metadata = classification.get("metadata", {})
     print(f"[chat-message] intent={intent} confidence={classification.get('confidence')} reason={classification.get('reasoning', '')[:80]}")
+
+    # Safety override: cannot edit without existing test cases → redirect to generate
+    if intent == "edit" and not last_suite:
+        print(f"[chat-message] edit intent with no test suite — redirecting to generate")
+        intent = "generate"
+
     # ────────────────────────────────────────────────────────────────────────
 
     _session_id = request.session_id
@@ -2059,12 +2104,22 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
         async def _info():
             try:
                 await sse_manager.broadcast(_session_id, {"type": "chat_thinking", "message": "Thinking…"})
+                _tok_before = _get_stats()
                 answer = await _asyncio.to_thread(agent.answer_question, compact, _user_message, history)
+                _tok_after = _get_stats()
+                _msg_tokens = _tok_after["total_tokens"] - _tok_before["total_tokens"]
+                _msg_cost = round(_tok_after["total_cost_usd"] - _tok_before["total_cost_usd"], 8)
+                add_session_tokens(_session_id, _msg_tokens, _msg_cost)
+                _sess_tok = get_session_tokens(_session_id)
                 append_message(_session_id, "assistant", answer)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_response",
                     "message": answer,
                     "intent": "informational",
+                    "tokens_used": _msg_tokens,
+                    "cost_usd": _msg_cost,
+                    "session_total_tokens": _sess_tok["total_tokens"],
+                    "session_total_cost": _sess_tok["cost_usd"],
                 })
             except Exception as e:
                 import traceback
@@ -2100,15 +2155,25 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
         async def _edit():
             try:
                 await sse_manager.broadcast(_session_id, {"type": "chat_thinking", "message": "Applying edits…"})
+                _tok_before = _get_stats()
                 updated = await _asyncio.to_thread(agent.generate_edit, last_suite, _user_message, history)
                 set_last_test_suite(_session_id, updated)
                 edit_msg = await _asyncio.to_thread(agent.generate_confirm, updated, compact)
+                _tok_after = _get_stats()
+                _msg_tokens = _tok_after["total_tokens"] - _tok_before["total_tokens"]
+                _msg_cost = round(_tok_after["total_cost_usd"] - _tok_before["total_cost_usd"], 8)
+                add_session_tokens(_session_id, _msg_tokens, _msg_cost)
+                _sess_tok = get_session_tokens(_session_id)
                 append_message(_session_id, "assistant", edit_msg)
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_test_suite",
                     "message": edit_msg,
                     "test_suite": updated,
                     "intent": "edit",
+                    "tokens_used": _msg_tokens,
+                    "cost_usd": _msg_cost,
+                    "session_total_tokens": _sess_tok["total_tokens"],
+                    "session_total_cost": _sess_tok["cost_usd"],
                 })
             except Exception as e:
                 import traceback
@@ -2157,26 +2222,9 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
         compact = session["compact"]
         session_creds = get_credentials(_session_id)
 
-        if last_suite:
-            prior_tc_names = ", ".join(
-                f"{tc.get('id', '')}: {tc.get('name', '')}"
-                for tc in last_suite.get("test_cases", [])
-            )
-            effective_intent = (
-                f"Previously generated test cases: {prior_tc_names}\n\n"
-                f"User's follow-up instruction: {request.user_message}\n\n"
-                "Apply the follow-up instruction to refine or replace the test cases as requested."
-            )
-        else:
-            effective_intent = request.user_message
-
-        recent_user_lines = [m["content"][:300] for m in history if m["role"] == "user"][-3:]
-        if recent_user_lines:
-            effective_intent = (
-                "Recent conversation context:\n"
-                + "\n".join(f"- {l}" for l in recent_user_lines)
-                + "\n\n" + effective_intent
-            )
+        # Clean intent — just the raw user message.
+        # History + form_data are passed to agent.generate() as separate args.
+        effective_intent = request.user_message
 
         append_message(_session_id, "user", request.user_message)
         _test_email = session_creds.get("email") or "test@example.com"
@@ -2190,6 +2238,7 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                 from app.services.executor_session_manager import executor_session_manager as _esm_gen
                 _browser_alive = _esm_gen.get_session(_session_id) is not None
 
+                _tok_before = _get_stats()
                 test_suite = await _asyncio.to_thread(
                     agent.generate,
                     page_structure=page_structure,
@@ -2199,6 +2248,8 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                     test_email=_test_email,
                     test_password=_test_password,
                     browser_already_on_page=_browser_alive,
+                    history=history,
+                    form_data=metadata.get("form_data") or {},
                 )
 
                 # Re-sequence TC IDs using the session-level global counter so IDs
@@ -2209,6 +2260,12 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                 set_max_tc_id(_session_id, _max_num + len(test_suite.get("test_cases", [])))
 
                 confirm_msg = await _asyncio.to_thread(agent.generate_confirm, test_suite, compact)
+                _tok_after = _get_stats()
+                _msg_tokens = _tok_after["total_tokens"] - _tok_before["total_tokens"]
+                _msg_cost = round(_tok_after["total_cost_usd"] - _tok_before["total_cost_usd"], 8)
+                add_session_tokens(_session_id, _msg_tokens, _msg_cost)
+                _sess_tok = get_session_tokens(_session_id)
+
                 if _new_creds:
                     parts = []
                     if _new_creds.get("email"):
@@ -2222,12 +2279,16 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                 set_last_test_suite(_session_id, test_suite)
 
                 tc_count = len(test_suite.get("test_cases", []))
-                print(f"[chat-message/generate] Generated {tc_count} test case(s) for session {_session_id[:8]}")
+                print(f"[chat-message/generate] Generated {tc_count} test case(s) for session {_session_id[:8]} | tokens={_msg_tokens} cost=${_msg_cost:.5f}")
 
                 await sse_manager.broadcast(_session_id, {
                     "type": "chat_test_suite",
                     "message": confirm_msg,
                     "test_suite": test_suite,
+                    "tokens_used": _msg_tokens,
+                    "cost_usd": _msg_cost,
+                    "session_total_tokens": _sess_tok["total_tokens"],
+                    "session_total_cost": _sess_tok["cost_usd"],
                 })
             except Exception as e:
                 import traceback
@@ -2287,8 +2348,12 @@ async def chat_informational(request: ChatInfoRequest, background_tasks: Backgro
     import asyncio as _asyncio
     from app.agents.test_case_generator import TestCaseGeneratorAgent
     from app.agents.base_agent import LLMProvider as AgentLLMProvider
-    from app.core.chat_sessions import get_session, append_message, get_messages
+    from app.core.chat_sessions import (
+        get_session, append_message, get_messages,
+        add_session_tokens, get_session_tokens,
+    )
     from app.core.sse_manager import sse_manager
+    from app.utils.logger import get_stats as _get_stats
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
     validate_api_key(provider_name)
@@ -2314,15 +2379,25 @@ async def chat_informational(request: ChatInfoRequest, background_tasks: Backgro
 
             provider_enum = AgentLLMProvider(_provider_name)
             agent = TestCaseGeneratorAgent(provider=provider_enum)
+            _tok_before = _get_stats()
             answer = await _asyncio.to_thread(
                 agent.answer_question, compact, _user_message, history
             )
+            _tok_after = _get_stats()
+            _msg_tokens = _tok_after["total_tokens"] - _tok_before["total_tokens"]
+            _msg_cost = round(_tok_after["total_cost_usd"] - _tok_before["total_cost_usd"], 8)
+            add_session_tokens(_session_id, _msg_tokens, _msg_cost)
+            _sess_tok = get_session_tokens(_session_id)
             append_message(_session_id, "assistant", answer)
 
             await sse_manager.broadcast(_session_id, {
                 "type": "chat_response",
                 "message": answer,
                 "intent": "informational",
+                "tokens_used": _msg_tokens,
+                "cost_usd": _msg_cost,
+                "session_total_tokens": _sess_tok["total_tokens"],
+                "session_total_cost": _sess_tok["cost_usd"],
             })
         except Exception as e:
             import traceback
@@ -2841,8 +2916,10 @@ async def chat_edit(request: ChatEditRequest, background_tasks: BackgroundTasks)
     from app.agents.base_agent import LLMProvider as AgentLLMProvider
     from app.core.chat_sessions import (
         get_session, append_message, get_last_test_suite, set_last_test_suite, get_messages,
+        add_session_tokens, get_session_tokens,
     )
     from app.core.sse_manager import sse_manager
+    from app.utils.logger import get_stats as _get_stats
 
     provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
     validate_api_key(provider_name)
@@ -2872,6 +2949,7 @@ async def chat_edit(request: ChatEditRequest, background_tasks: BackgroundTasks)
 
             provider_enum = AgentLLMProvider(_provider_name)
             agent = TestCaseGeneratorAgent(provider=provider_enum)
+            _tok_before = _get_stats()
             updated_suite = await _asyncio.to_thread(
                 agent.generate_edit, last_suite, _user_message, history
             )
@@ -2880,15 +2958,24 @@ async def chat_edit(request: ChatEditRequest, background_tasks: BackgroundTasks)
             tc_count = len(updated_suite.get("test_cases", []))
             confirm_msg = await _asyncio.to_thread(agent.generate_confirm, updated_suite, compact)
             edit_msg = f"Done! I've updated the test suite. {confirm_msg}"
+            _tok_after = _get_stats()
+            _msg_tokens = _tok_after["total_tokens"] - _tok_before["total_tokens"]
+            _msg_cost = round(_tok_after["total_cost_usd"] - _tok_before["total_cost_usd"], 8)
+            add_session_tokens(_session_id, _msg_tokens, _msg_cost)
+            _sess_tok = get_session_tokens(_session_id)
             append_message(_session_id, "assistant", edit_msg)
 
-            print(f"[chat-edit] session={_session_id[:8]} updated {tc_count} test case(s)")
+            print(f"[chat-edit] session={_session_id[:8]} updated {tc_count} test case(s) | tokens={_msg_tokens} cost=${_msg_cost:.5f}")
 
             await sse_manager.broadcast(_session_id, {
                 "type": "chat_test_suite",
                 "message": edit_msg,
                 "test_suite": updated_suite,
                 "intent": "edit",
+                "tokens_used": _msg_tokens,
+                "cost_usd": _msg_cost,
+                "session_total_tokens": _sess_tok["total_tokens"],
+                "session_total_cost": _sess_tok["cost_usd"],
             })
         except Exception as e:
             import traceback

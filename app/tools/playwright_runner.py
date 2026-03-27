@@ -166,15 +166,46 @@ def extract_selectors(url: str, headless: bool = True, timeout: int = 30000, sto
                     return '';
                 }
 
-                return elements;
+                // Pass 2: Detect custom div-based dropdowns
+                // Pattern: <label>X</label> followed by a sibling <div> with cursor:pointer or svg chevron
+                const customDropdowns = [];
+                document.querySelectorAll('label').forEach(label => {
+                    const labelText = label.innerText ? label.innerText.trim() : '';
+                    if (!labelText) return;
+                    let sibling = label.nextElementSibling;
+                    for (let i = 0; i < 3 && sibling; i++) {
+                        const tag = sibling.tagName.toLowerCase();
+                        if (['input','button','select','textarea'].includes(tag)) break;
+                        const cs = window.getComputedStyle(sibling);
+                        const hasCursorPointer = cs.cursor === 'pointer';
+                        const hasDropdownIndicator = sibling.querySelector('svg') !== null
+                            || /select|dropdown|combo|picker|chevron|arrow/i.test(sibling.className || '');
+                        if (hasCursorPointer || hasDropdownIndicator) {
+                            const innerText = sibling.innerText ? sibling.innerText.trim() : '';
+                            customDropdowns.push({
+                                label: labelText,
+                                currentValue: innerText.substring(0, 80),
+                                tag: tag,
+                                id: sibling.id || null,
+                            });
+                            break;
+                        }
+                        sibling = sibling.nextElementSibling;
+                    }
+                });
+
+                return { elements, customDropdowns };
             }
             """
 
-            all_elements = page.evaluate(extraction_script)
+            js_result = page.evaluate(extraction_script)
+            all_elements = js_result["elements"]
+            custom_dropdowns = js_result.get("customDropdowns", [])
             title = page.title()
 
             # Categorize elements
             result = categorize_elements(all_elements)
+            result["custom_dropdowns"] = custom_dropdowns
             result["url"] = url
             result["title"] = title
 

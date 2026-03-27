@@ -31,3 +31,37 @@ def call_llm(provider: str, model: str, prompt: str,
                "total_tokens": tokens["total_tokens"], "cost_usd": cost})
 
     return {"text": text, "tokens": tokens["total_tokens"], "cost": cost}
+
+
+def call_llm_chat(provider: str, model: str, system: str, messages: list,
+                  client, max_tokens: int, agent_name: str = "unknown") -> dict:
+    """
+    Multi-turn chat call — ALL chat conversations flow through here for token tracking.
+    Returns {"text": str, "tokens": int, "cost": float}
+    """
+    if provider == "anthropic":
+        response = client.messages.create(
+            model=model, max_tokens=max_tokens, temperature=0,
+            system=system, messages=messages,
+        )
+        text  = response.content[0].text.strip()
+        usage = response.usage
+    else:  # openai, groq, waymore
+        full_messages = [{"role": "system", "content": system}] + messages
+        response = client.chat.completions.create(
+            model=model, max_tokens=max_tokens, messages=full_messages,
+        )
+        text  = response.choices[0].message.content.strip()
+        usage = response.usage
+
+    # Use system + all message content as the "prompt" for token estimation
+    combined_prompt = system + "\n" + "\n".join(m["content"] for m in messages)
+    tokens = extract_tokens(provider, usage, prompt=combined_prompt, output=text)
+    cost   = calculate_cost(model, tokens["input_tokens"], tokens["output_tokens"])
+
+    log_async({"timestamp": datetime.now().isoformat(), "agent": agent_name,
+               "provider": provider, "model": model,
+               "input_tokens": tokens["input_tokens"], "output_tokens": tokens["output_tokens"],
+               "total_tokens": tokens["total_tokens"], "cost_usd": cost})
+
+    return {"text": text, "tokens": tokens["total_tokens"], "cost": cost}

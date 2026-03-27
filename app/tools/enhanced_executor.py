@@ -755,6 +755,24 @@ def _execute_single_test_sync(
                             f"Page title: {title or 'N/A'}\n"
                             f"Available elements: {btns} button(s), {inp} form field(s), {links} link(s)."
                         )
+                        # Wait for page to fully render before screenshotting.
+                        # Step 1: "load" waits for the JS bundle — safe for React SPAs,
+                        # and unlike "networkidle" it is not blocked by persistent WS/SSE.
+                        try:
+                            page.wait_for_load_state("load", timeout=5000)
+                        except Exception:
+                            pass
+                        # Step 2: Wait for any loading overlay/spinner to disappear.
+                        # Returns immediately if no spinner exists — zero penalty.
+                        try:
+                            page.wait_for_function(
+                                "() => !document.querySelector("
+                                "'[role=\"progressbar\"], [class*=\"spinner\"], "
+                                "[class*=\"loading\"], [class*=\"skeleton\"]')",
+                                timeout=2000,
+                            )
+                        except Exception:
+                            pass
                         nav_screenshot = page.screenshot(type="png")
                         nav_screenshot_b64 = _b64.b64encode(nav_screenshot).decode("utf-8")
                     except Exception:
@@ -816,6 +834,43 @@ def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = N
     element_name = selector_hints.get("element_name")
     element_type = selector_hints.get("element_type", "")
 
+    # Instruction-based dropdown detection (mirrors recorder_agent.py Fallback 0).
+    # Runs for ALL click actions when instruction mentions "dropdown"/"filter"/"combobox"
+    # — catches cases where the generator output wrong element_type or selector.
+    if action_type in ("click", "select") and instruction:
+        _instr_lc = instruction.lower()
+        if any(kw in _instr_lc for kw in ("dropdown", "filter", "combobox")):
+            import re as _re
+            _lbl_match = _re.search(
+                r'(?:click|open|select|press|tap)\s+(?:the\s+)?(.+?)\s+(?:dropdown|filter|combobox)',
+                _instr_lc
+            )
+            _sw = {"click","press","tap","open","close","the","a","an","on","button","link",
+                   "element","icon","menu","dropdown","filter","combobox","select","in","to"}
+            _lbl = _lbl_match.group(1).strip() if _lbl_match else " ".join(
+                w.strip("'\".,") for w in _instr_lc.split()
+                if w.strip("'\".,") not in _sw and len(w) > 2
+            )
+            if _lbl:
+                _lbl_candidates = [_lbl]
+                _cleaned = _lbl.replace("dropdown", "").replace("select", "").strip()
+                if _cleaned and _cleaned != _lbl:
+                    _lbl_candidates.append(_cleaned)
+                for _lbl_text in _lbl_candidates:
+                    for _lbl_sel in [
+                        f'label:has-text("{_lbl_text}") ~ div button',
+                        f'label:has-text("{_lbl_text}") + div button',
+                        f'label:has-text("{_lbl_text}") ~ button',
+                        f'label:has-text("{_lbl_text}") + button',
+                    ]:
+                        try:
+                            _loc = page.locator(_lbl_sel)
+                            if _loc.count() > 0:
+                                print(f"    [dropdown instr-fallback] Found via: {_lbl_sel}")
+                                return f'locator::{_lbl_sel}'
+                        except Exception:
+                            pass
+
     # For dropdown/select elements, try label-adjacent button patterns FIRST
     # This catches custom dropdown widgets like <label>Select Project</label><div><button>…</button></div>
     # before the LLM's suggested selectors (which may target the wrong element).
@@ -827,6 +882,8 @@ def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = N
 
         for label_text in label_candidates:
             for lbl_sel in [
+                f'label:has-text("{label_text}") ~ div',        # plain div trigger (custom dropdown)
+                f'label:has-text("{label_text}") + div',        # immediate next sibling div
                 f'label:has-text("{label_text}") ~ div button',
                 f'label:has-text("{label_text}") + div button',
                 f'label:has-text("{label_text}") ~ button',
