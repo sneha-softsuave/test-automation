@@ -2591,9 +2591,14 @@ def _execute_action_sync(
                 value = live_value
                 print(f"    [fill] Using captured context value '{live_value}' (key='{context_key}')")
 
-        # Prefer suite_test_data (user-provided session values) over step-level LLM placeholders.
-        # Fully dynamic: for every key the step expects, if the session has a real string
-        # value for that key, use it — works for any field (email, phone, employee_id, etc.)
+        # ── Suite lookup Phase 1: exact key match with format validation ─────────
+        # For every key the step declares, look up the same key in suite/session data.
+        # Works for any field where the LLM chose the same key name the user provided.
+        # Format validation: if the step placeholder has a distinctive format (email, url,
+        # phone, date, number) and the retrieved value has a DIFFERENT format, skip it so
+        # Phase 2 can find the correctly-formatted value. This prevents e.g. a password
+        # like "Sneha@Softsuave2003" (text format) from landing in an email field whose
+        # placeholder is "test@example.com" (email format).
         if not value:
             _skip = {"source", "column_name"}
             for key in step_test_data:
@@ -2601,11 +2606,46 @@ def _execute_action_sync(
                     continue
                 suite_val = suite_test_data.get(key)
                 if suite_val and isinstance(suite_val, str):
+                    _placeholder = step_test_data[key]
+                    if isinstance(_placeholder, str):
+                        _ph_fmt = _infer_value_format(_placeholder)
+                        if _ph_fmt != "text":
+                            _sv_fmt = _infer_value_format(suite_val)
+                            if _sv_fmt != _ph_fmt:
+                                print(f"    [fill] Phase 1 skipping '{key}': placeholder format '{_ph_fmt}' != value format '{_sv_fmt}'")
+                                continue  # Let Phase 2 find the right value
                     value = suite_val
                     print(f"    [fill] Using suite/session value for '{key}'")
                     break
 
-        # If no suite value matched, fall back to step-level test_data
+        # ── Suite lookup Phase 2: format-based matching (distinctive types only) ──
+        # Compare the structural format of each step placeholder against session values.
+        # ONLY activates for unambiguous formats (email, phone, url, date, number).
+        # Plain "text" values (usernames like "test123", passwords, names) are excluded —
+        # they are indistinguishable by format. Those must be handled at extraction time
+        # by _extract_credentials_contextual, which stores them under the correct key names
+        # so that Phase 1 (exact match) succeeds.
+        if not value and suite_test_data:
+            _skip2 = {"source", "column_name"}
+            for _step_key, _step_placeholder in step_test_data.items():
+                if _step_key in _skip2 or not isinstance(_step_placeholder, str):
+                    continue
+                _fmt = _infer_value_format(_step_placeholder)
+                if _fmt == "text":
+                    continue  # Ambiguous — cannot match safely; rely on Phase 1 correct keys
+                for _sk, _sv in suite_test_data.items():
+                    if not (isinstance(_sv, str) and _sv):
+                        continue
+                    if _infer_value_format(_sv) == _fmt:
+                        value = _sv
+                        print(f"    [fill] Format match ({_fmt}): suite '{_sk}' used for step key '{_step_key}'")
+                        break
+                if value:
+                    break
+
+        # ── Phase 3: fall back to step-level test_data (LLM-generated placeholders) ──
+        # Only reached when the session/suite has no matching value — use the
+        # LLM's placeholder as a last-chance guess.
         if not value:
             for key in ["email", "password", "text", "value", "username", "input", "content", "data", "message"]:
                 if key in step_test_data:
@@ -2630,23 +2670,31 @@ def _execute_action_sync(
             if extracted_value:
                 value = extracted_value
 
-        # Last resort: match element name against any key in suite_test_data (dynamic, no hardcoding)
-        if not value:
-            element_name = (selector_hints.get("element_name") or "").lower()
-            if element_name:
-                for key, val in suite_test_data.items():
-                    if isinstance(val, str) and val and key in element_name:
+        # Fallback to legacy default_credentials if still nothing found
+        if not value and suite_test_data.get("default_credentials"):
+            _elem_fb = (selector_hints.get("element_name") or "").lower()
+            creds = suite_test_data["default_credentials"]
+            if _elem_fb:
+                for key, val in creds.items():
+                    if isinstance(val, str) and val and key in _elem_fb:
                         value = val
-                        print(f"    [fill] Matched element name '{element_name}' to suite key '{key}'")
                         break
-            # Fallback to legacy default_credentials if still nothing found
-            if not value and suite_test_data.get("default_credentials"):
-                creds = suite_test_data["default_credentials"]
-                if element_name:
-                    for key, val in creds.items():
-                        if isinstance(val, str) and val and key in element_name:
-                            value = val
-                            break
+
+        # ── Credential placeholder guard ──────────────────────────────────────
+        # Hard contract: if a credential field still holds an LLM-generated placeholder
+        # (e.g. test@example.com, password123), refuse to fill it and fail the step.
+        # The pre-flight gate (validate_test_suite_data) should have caught this; this
+        # is a final safety net so placeholders never reach the browser silently.
+        if value:
+            from app.api.routes.test_cases import _is_placeholder, _field_needs_credential
+            _elem_guard = (selector_hints.get("element_name") or "").lower()
+            _is_cred_field, _ = _field_needs_credential(_elem_guard, step_test_data)
+            if _is_cred_field and _is_placeholder(value):
+                raise ValueError(
+                    f"Credential field '{selector_hints.get('element_name', 'unknown')}' "
+                    f"has not been provided by the user. "
+                    f"Please supply real credentials before running this test."
+                )
 
         # Try to get best selector
         selector = _get_best_selector_sync(page, selector_hints, step_test_data, action_type="fill", instruction=instruction, failed_selectors=failed_selectors)
@@ -4321,6 +4369,38 @@ _FALLBACK_ERROR_KEYWORDS = (
     "incorrect", "credentials", "credential", "bad", "not found",
     "forbidden", "rejected", "expired", "locked", "blocked",
 )
+
+
+def _infer_value_format(val: str) -> str:
+    """
+    Classify a string value by its structural/data format.
+    Returns one of: 'email', 'url', 'phone', 'date', 'number', 'text'.
+
+    'text' is intentionally a catch-all for plain-text values (usernames, passwords,
+    names, etc.) that cannot be distinguished by format alone. Callers should NOT
+    use format matching when the result is 'text' — they must rely on correct key
+    naming at extraction time instead.
+
+    Used by:
+    - Fill Phase 2: format-based session value lookup (email/phone/url/date only)
+    - validate_test_suite_data: credential satisfaction check
+    - push_credentials: full-switch detection
+    """
+    import re as _r
+    v = (val or "").strip()
+    if not v:
+        return "text"
+    if _r.match(r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', v):
+        return "email"
+    if _r.match(r'^https?://', v):
+        return "url"
+    if _r.match(r'^\+?\d[\d\s\-().]{6,}$', v):
+        return "phone"
+    if _r.match(r'^\d{4}[-/]\d{2}[-/]\d{2}', v) or _r.match(r'^\d{2}[-/]\d{2}[-/]\d{4}', v):
+        return "date"
+    if _r.match(r'^\d+(\.\d+)?$', v):
+        return "number"
+    return "text"
 
 
 def _check_console_fallback(page, expected_value: str) -> bool:

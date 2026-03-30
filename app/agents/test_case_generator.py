@@ -1397,14 +1397,9 @@ class TestCaseGeneratorAgent(BaseAgent):
         raw = re.sub(r"\s*```\s*$", "", raw)
         raw = raw.strip()
 
-        if not raw:
-            raise ValueError("LLM returned empty response after stripping code fences")
-
         # Find the outermost JSON object by tracking brace depth
         # This correctly handles trailing text after the closing }
         start = raw.find("{")
-        if start == -1:
-            raise ValueError(f"LLM returned no JSON object. Raw (first 200): {raw[:200]}")
         if start != -1:
             depth = 0
             end = start

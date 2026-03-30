@@ -5,7 +5,7 @@ import {
   Play, FileSpreadsheet, AlertCircle, Check,
   Eye, EyeOff, RotateCcw, Video, MonitorPlay, Monitor,
   Circle, CheckCircle2, XCircle, Loader2, Camera, X, Send,
-  Zap, Save, FileJson, Pencil, Copy, PanelRightOpen, Maximize2
+  Zap, Save, FileJson, Pencil, Copy, PanelRightOpen, Maximize2, StopCircle
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { SaveToProjectModal } from './SaveToProjectModal';
@@ -276,6 +276,9 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   // ── Save to Project state ─────────────────────────────────────────────────
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [suiteToSave, setSuiteToSave] = useState<GeneratedSuite | null>(null);
+
+  // ── Export Excel confirm dialog ───────────────────────────────────────────
+  const [showExportConfirm, setShowExportConfirm] = useState(false);
 
   const sessionIdRef = useRef<string>(makeSessionId());
   const sseRef = useRef<EventSource | null>(null);
@@ -940,7 +943,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   };
 
   // ── Chat execute handler ──────────────────────────────────────────────────
-  const handleChatExecute = async (userMessage: string, inputData?: Record<string, string>) => {
+  const handleChatExecute = async (userMessage: string, inputData?: Record<string, string>, rawInputText?: string) => {
     if (!chatSessionId) return;
     setChatPhase('executing');
     execStepMsgIdRef.current = null; // reset for fresh run
@@ -966,6 +969,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         timeout: 30000,
       };
       if (inputData) body.input_data = inputData;
+      if (rawInputText) body.input_text = rawInputText;
 
       const res = await fetch(`${API_BASE}/api/v1/chat-execute`, {
         method: 'POST',
@@ -1045,7 +1049,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         const k = m[1].toLowerCase();
         if (!inputData[k]) inputData[k] = m[2];
       }
-      await handleChatExecute(pendingExecuteMsg, inputData);
+      await handleChatExecute(pendingExecuteMsg, inputData, text);
       return;
     }
 
@@ -1098,6 +1102,41 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     }
     // ────────────────────────────────────────────────────────────────────────
   };
+
+  const handleStop = useCallback(() => {
+    const wasExecuting = chatPhase === 'executing';
+
+    // Close both SSE connections immediately
+    sseRef.current?.close();
+    sseRef.current = null;
+    execSseRef.current?.close();
+    execSseRef.current = null;
+
+    // Clear the thinking bubble ("Interpreting...", "Thinking...") from chat messages
+    const thinkingId = chatThinkingIdRef.current;
+    chatThinkingIdRef.current = null;
+    if (thinkingId) {
+      setChatMessages(prev => prev.filter(m => m.id !== thinkingId));
+    }
+
+    // Clear typing animation and browser loading spinner
+    setTypingMsg(null);
+    setBrowserPreviewLoading(false);
+
+    // Reset UI to idle
+    setChatPhase('chatting');
+
+    // Tell backend to cancel if execution was running (it's long-running)
+    if (wasExecuting && chatSessionId) {
+      fetch(`${API_BASE}/api/v1/chat-stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: chatSessionId }),
+      }).catch(() => {});
+    }
+
+    appendChatMsg({ id: `stop_${Date.now()}`, role: 'assistant', content: '_User Interrupted_' });
+  }, [chatPhase, chatSessionId]);
 
   const handleChatUseInAgent = (suite: GeneratedSuite) => {
     setTestSuite(suite as any);
@@ -1574,6 +1613,17 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             <span className={styles.recExcelBadge}>{confirmedExecResults.length}</span>
           )}
         </button>
+        {/* Export Excel — pinned to the far right of the tab bar */}
+        <button
+          className={styles.genExecExportBtn}
+          onClick={() => setShowExportConfirm(true)}
+          disabled={confirmedExecResults.length === 0}
+          title={confirmedExecResults.length === 0 ? 'No results added to Excel view yet' : 'Export confirmed results to Excel'}
+          style={{ marginLeft: 'auto' }}
+        >
+          <FileSpreadsheet size={13} />
+          Export Excel
+        </button>
       </div>
       {/* Browser view */}
       {execPanelView === 'browser' && (
@@ -2016,17 +2066,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                     <Monitor size={14} />
                     View Live Browser
                   </button>
-                  <button
-                    className={styles.viewBrowserBtn}
-                    onClick={handleExportConfirmedExcel}
-                    title={confirmedExecResults.length > 0 ? `Export ${confirmedExecResults.length} confirmed result(s) to Excel` : 'No confirmed results yet'}
-                  >
-                    <FileSpreadsheet size={14} />
-                    Export Excel
-                    {confirmedExecResults.length > 0 && (
-                      <span className={styles.recExcelBadge}>{confirmedExecResults.length}</span>
-                    )}
-                  </button>
                 </div>
               )}
               <div className={styles.chatInputBox}>
@@ -2060,17 +2099,24 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                   disabled={chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing'}
                   autoFocus={chatPhase === 'url_input'}
                 />
-                <button
-                  className={styles.chatSendBtn}
-                  onClick={handleChatSend}
-                  disabled={chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing' || !chatTextInput.trim()}
-                  title="Send (Enter)"
-                >
-                  {(chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing')
-                    ? <Loader2 size={16} className={styles.spin} />
-                    : <Send size={16} />
-                  }
-                </button>
+                {(chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing') ? (
+                  <button
+                    className={styles.chatStopBtn}
+                    onClick={handleStop}
+                    title="Stop"
+                  >
+                    <StopCircle size={16} />
+                  </button>
+                ) : (
+                  <button
+                    className={styles.chatSendBtn}
+                    onClick={handleChatSend}
+                    disabled={!chatTextInput.trim()}
+                    title="Send (Enter)"
+                  >
+                    <Send size={16} />
+                  </button>
+                )}
               </div>
               <div className={styles.chatInputHint}>
                 {chatPhase === 'url_input' && <span>Paste a URL and press Enter to analyze</span>}
@@ -2941,6 +2987,28 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             addNotification('success', `Saved to project "${projectName}"`);
           }}
         />
+      )}
+
+      {/* ── Export Excel confirmation dialog ── */}
+      {showExportConfirm && (
+        <div className={styles.exportConfirmOverlay} onClick={() => setShowExportConfirm(false)}>
+          <div className={styles.exportConfirmDialog} onClick={e => e.stopPropagation()}>
+            <FileSpreadsheet size={28} style={{ color: '#6366f1' }} />
+            <h3 className={styles.exportConfirmTitle}>Export to Excel?</h3>
+            <p className={styles.exportConfirmDesc}>All confirmed test results will be exported to an Excel file.</p>
+            <div className={styles.exportConfirmActions}>
+              <button className={styles.exportConfirmCancel} onClick={() => setShowExportConfirm(false)}>
+                Cancel
+              </button>
+              <button
+                className={styles.exportConfirmOk}
+                onClick={() => { setShowExportConfirm(false); handleExportConfirmedExcel(); }}
+              >
+                Export
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── Browser overlay ── */}

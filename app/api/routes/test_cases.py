@@ -1,7 +1,8 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query, BackgroundTasks
-from typing import Optional, List
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, BackgroundTasks, Request
+from typing import Optional, List, Dict
 import re
 import uuid
+import threading as _threading_stop
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 from app.core.config import settings
@@ -20,6 +21,9 @@ from app.tools.enhanced_script_generator import (
 from app.tools.enhanced_executor import execute_enhanced
 
 router = APIRouter()
+
+# Stop events for in-flight chat-execute calls: session_id → threading.Event
+_chat_stop_events: Dict[str, _threading_stop.Event] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +76,64 @@ def _extract_credentials_semantic(text: str, agent) -> dict:
         }
     except Exception:
         return _extract_credentials(text)
+
+
+def _extract_credentials_contextual(text: str, required_fields: list, agent) -> dict:
+    """
+    Extract test values from the user message, keyed by the EXACT field names
+    the test suite expects (e.g. ["username", "password"]).
+
+    The LLM is given both the user's message AND the required field names, so it
+    returns values labelled with the keys the executor will look up — eliminating
+    the key-mismatch problem entirely regardless of how the user phrased their input.
+
+    Falls back to _extract_credentials_semantic → _extract_credentials on error.
+    """
+    import json as _j
+    if not required_fields or not text.strip():
+        return _extract_credentials_semantic(text, agent)
+    fields_str = ", ".join(f'"{f}"' for f in required_fields)
+    prompt = (
+        f"A test form requires values for these fields: [{fields_str}].\n"
+        "Extract the appropriate value for each field from the user message below.\n"
+        "Return ONLY a valid JSON object with exactly those keys.\n"
+        "Use null for any field you cannot determine a value for.\n"
+        "Do not add extra keys or explanation.\n\n"
+        "IMPORTANT rules:\n"
+        "- An EMAIL address looks like 'name@domain.tld' where domain contains a dot (e.g. gmail.com, yahoo.com). Assign it to an email or username field.\n"
+        "- A PASSWORD is a secret string — it may contain letters, numbers, and symbols including '@', but it is NOT a valid email address. Assign it to a password or secret field.\n"
+        "- If the message contains both an email-format value and a non-email value with '@' (e.g. 'Sneha@Softsuave2003'), the email-format one is the email and the other is the password.\n"
+        "- Assign values positionally/contextually when no labels are given.\n\n"
+        f"User message: \"{text[:600]}\"\n\nJSON:"
+    )
+    try:
+        raw = agent.call_llm(prompt, markdown=False).strip()
+        raw = _cred_re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=_cred_re.MULTILINE).strip()
+        result = _j.loads(raw)
+        return {
+            k: str(v)
+            for k, v in result.items()
+            if v and str(v).lower() not in ('null', 'none', '')
+        }
+    except Exception:
+        return _extract_credentials_semantic(text, agent)
+
+
+def _collect_required_fields(suite: dict) -> list:
+    """
+    Scan all fill/select steps in the suite and return a deduplicated list of
+    test_data key names (excluding structural keys like source/column_name).
+    These are the field names the executor will look for in suite_test_data.
+    """
+    seen: list = []
+    _skip = {"source", "column_name"}
+    for tc in suite.get("test_cases", []):
+        for step in tc.get("steps", []):
+            if (step.get("action") or {}).get("type") in ("fill", "select"):
+                for k in (step.get("test_data") or {}):
+                    if k not in _skip and k not in seen:
+                        seen.append(k)
+    return seen
 
 
 def _extract_form_data_semantic(text: str, agent) -> dict:
@@ -1143,7 +1205,7 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
     from app.agents.base_agent import LLMProvider as AgentLLMProvider
     from app.core.chat_sessions import (
         get_session, append_message, set_last_test_suite, get_last_test_suite,
-        get_messages, get_credentials, set_credentials,
+        get_messages, get_credentials, push_credentials,
         get_max_tc_id, set_max_tc_id, add_session_tokens, get_session_tokens,
     )
     from app.core.sse_manager import sse_manager
@@ -1165,8 +1227,9 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
     new_creds = _extract_credentials(request.user_message)
     session_creds = get_credentials(request.session_id)
     if new_creds:
-        session_creds = {**session_creds, **new_creds}
-        set_credentials(request.session_id, session_creds)
+        from app.tools.enhanced_executor import _infer_value_format as _ivf_gen
+        push_credentials(request.session_id, new_creds, _infer_fmt_fn=_ivf_gen)
+        session_creds = get_credentials(request.session_id)
 
     last_suite = get_last_test_suite(request.session_id)
 
@@ -1514,7 +1577,7 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     from app.agents.base_agent import LLMProvider as AgentLLMProvider
     from app.core.chat_sessions import (
         get_session, append_message, get_last_test_suite, set_last_test_suite,
-        get_messages, get_credentials, set_credentials,
+        get_messages, get_credentials, push_credentials,
         get_max_tc_id, set_max_tc_id, add_session_tokens, get_session_tokens,
     )
     from app.core.sse_manager import sse_manager
@@ -1538,8 +1601,8 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     # Semantically extract credentials — handles any natural language format
     new_creds = await _asyncio.to_thread(_extract_credentials_semantic, request.user_message, agent)
     if new_creds:
-        existing = get_credentials(request.session_id)
-        set_credentials(request.session_id, {**existing, **new_creds})
+        from app.tools.enhanced_executor import _infer_value_format as _ivf_msg
+        push_credentials(request.session_id, new_creds, _infer_fmt_fn=_ivf_msg)
 
     # ── Fast pre-classification — bypass LLM for unambiguous patterns ─────────
     import re as _intent_re
@@ -2161,6 +2224,19 @@ _NON_CRED_FILL_KEYS = {"text", "value", "input", "content", "data", "message", "
 _EMAIL_FIELD_HINTS = ("email", "e-mail", "e mail", "user name", "username", "login name")
 _PASSWORD_FIELD_HINTS = ("password", "passwd", "pass ")
 
+# LLM-generated default placeholder values — never treat these as real credentials
+_KNOWN_PLACEHOLDERS = frozenset({
+    "test@example.com", "user@example.com", "admin@example.com",
+    "example@example.com", "email@example.com",
+    "password123", "password", "pass123", "secret", "12345678",
+    "testpassword", "test1234", "abc123", "qwerty", "letmein",
+})
+
+
+def _is_placeholder(val: str) -> bool:
+    """True if the value looks like an LLM-generated default credential placeholder."""
+    return bool(val) and val.lower().strip() in _KNOWN_PLACEHOLDERS
+
 
 def _field_needs_credential(element_name: str, step_td: dict) -> tuple:
     """
@@ -2225,13 +2301,36 @@ def validate_test_suite_data(suite: dict, credentials: dict) -> dict:
             is_cred, cred_key = _field_needs_credential(element_name, step_td)
 
             if is_cred:
-                # For credential fields, only real session credentials count.
-                # Reject LLM-generated placeholders entirely.
-                if credentials.get(cred_key):
-                    continue  # user already supplied this credential → OK
-                # Also accept "username" in credentials for an email field
-                if cred_key == "email" and credentials.get("username"):
+                # For credential fields, only real (non-placeholder) session credentials count.
+                # Check 1: exact key match — value must be present AND not a known placeholder
+                _cred_val = credentials.get(cred_key, "")
+                if _cred_val and not _is_placeholder(_cred_val):
+                    continue  # user supplied a real value for this key → OK
+
+                # Check 2: format-based match — any credential value whose format type
+                # matches the step's placeholder format qualifies.
+                # This handles key-name mismatches (e.g. step uses "username", session has "email").
+                _satisfied = False
+                _step_placeholder = next(
+                    (v for k, v in step_td.items()
+                     if k not in {"source", "column_name"} and isinstance(v, str) and v),
+                    None,
+                )
+                if _step_placeholder and credentials:
+                    try:
+                        from app.tools.enhanced_executor import _infer_value_format as _ivf
+                        _ph_fmt = _ivf(_step_placeholder)
+                        _satisfied = any(
+                            isinstance(cv, str) and cv
+                            and not _is_placeholder(cv)
+                            and _ivf(cv) == _ph_fmt
+                            for cv in credentials.values()
+                        )
+                    except Exception:
+                        pass
+                if _satisfied:
                     continue
+
                 if cred_key in already_reported:
                     continue  # already asking for this — don't duplicate
                 already_reported.add(cred_key)
@@ -2270,7 +2369,8 @@ class ChatExecuteRequest(PydanticBaseModel):
     headless: bool = True
     timeout: int = 30000
     max_retries: int = 1
-    input_data: Optional[dict] = None  # user-supplied values after a needs_input prompt
+    input_data: Optional[dict] = None   # frontend-parsed key-value pairs (fast path)
+    input_text: Optional[str] = None    # raw user message for LLM contextual re-extraction
 
 
 class ChatExecuteResponse(PydanticBaseModel):
@@ -2322,21 +2422,47 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
     partial_suite = {**last_suite, "test_cases": selected}
 
     # Inject session credentials into test_data so executor uses them
-    from app.core.chat_sessions import get_credentials, set_credentials
+    from app.core.chat_sessions import get_credentials, push_credentials
+    from app.tools.enhanced_executor import _infer_value_format as _ivf
+    import asyncio as _asyncio_cred
     session_creds = get_credentials(request.session_id)
 
-    # If the user just provided input_data (after a needs_input prompt), persist and merge it
-    if request.input_data:
-        session_creds = {**session_creds, **request.input_data}
-        set_credentials(request.session_id, session_creds)
+    # If the user just provided credentials (after a needs_input prompt), extract and persist
+    if request.input_data or request.input_text:
+        _new_creds: dict = {}
+
+        # Fast path: frontend-parsed key-value pairs
+        if request.input_data:
+            _new_creds.update(request.input_data)
+
+        # Context-aware LLM re-extraction using the test's actual field names
+        # This handles any format the user typed (unlabeled, natural language, plain username, etc.)
+        _raw_text = request.input_text or request.user_message
+        _required_fields = _collect_required_fields(partial_suite)
+        if _required_fields and _raw_text:
+            try:
+                from app.agents.test_case_generator import TestCaseGeneratorAgent
+                from app.agents.base_agent import LLMProvider as _AgentProvider
+                _agent = TestCaseGeneratorAgent(provider=_AgentProvider(provider_name))
+                _ctx_creds = await _asyncio_cred.to_thread(
+                    _extract_credentials_contextual, _raw_text, _required_fields, _agent
+                )
+                # Contextual extraction wins over frontend-parsed values (more accurate)
+                _new_creds.update(_ctx_creds)
+            except Exception:
+                pass  # Contextual extraction is best-effort; fall back to frontend-parsed
+
+        if _new_creds:
+            push_credentials(request.session_id, _new_creds, _infer_fmt_fn=_ivf)
+            session_creds = get_credentials(request.session_id)
 
     if session_creds:
         merged_data = {**partial_suite.get("test_data", {}), **session_creds}
         partial_suite = {**partial_suite, "test_data": merged_data}
 
     # Pre-flight check: ask user for missing test data before starting execution.
-    # Skip when input_data was already supplied (user just answered the prompt).
-    if not request.input_data:
+    # Skip when credentials were just supplied (user just answered the prompt).
+    if not (request.input_data or request.input_text):
         validation = validate_test_suite_data(partial_suite, session_creds)
         if not validation["valid"]:
             fields_text = "\n".join(
@@ -2362,6 +2488,10 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
             }
 
     chat_session_id = request.session_id
+
+    # Create and register a stop event so /chat-stop can interrupt execution
+    _stop_ev = _threading_stop.Event()
+    _chat_stop_events[request.session_id] = _stop_ev
 
     async def _run_and_notify():
         import queue as _queue
@@ -2535,15 +2665,42 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
             _timeout = request.timeout or _DEFAULT_TIMEOUT
 
             # Run ALL selected test cases on the persistent browser thread.
-            # asyncio.to_thread keeps the event loop free so SSE screenshots
-            # can flow while the executor is running.
-            full_result = await _asyncio.to_thread(
-                _exec_session.run_test_suite,
-                partial_suite,
-                update_queue,
-                _timeout,
-                None,  # signal_file — not used in chat-execute
+            # Wrapped in a cancellable Task so /chat-stop can interrupt it.
+            _suite_task = _asyncio.create_task(
+                _asyncio.to_thread(
+                    _exec_session.run_test_suite,
+                    partial_suite,
+                    update_queue,
+                    _timeout,
+                    None,  # signal_file — not used in chat-execute
+                )
             )
+
+            # Watcher: polls the stop event every 0.5 s and cancels the task when set
+            async def _stop_watcher():
+                while not _stop_ev.is_set():
+                    await _asyncio.sleep(0.5)
+                _suite_task.cancel()
+
+            _watcher_task = _asyncio.create_task(_stop_watcher())
+
+            try:
+                full_result = await _suite_task
+                _watcher_task.cancel()
+            except _asyncio.CancelledError:
+                _watcher_task.cancel()
+                _fwd_state["running"] = False
+                await _asyncio.sleep(0.3)
+                fwd_task.cancel()
+                await sse_manager.broadcast(exec_session_id, {
+                    "type": "chat_execution_done",
+                    "chat_session_id": chat_session_id,
+                    "message": "Execution stopped by user.",
+                    "summary": {"total": count, "passed": 0, "failed": 0, "stopped": True},
+                    "tc_results": [],
+                })
+                await sse_manager.broadcast(exec_session_id, {"type": "exec_session_complete"})
+                return
 
             all_results = full_result.get("results", [])
             total_passed = full_result.get("passed", 0)
@@ -2642,6 +2799,7 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                         pass
             _rescrape_done.discard(exec_session_id)
             await sse_manager.broadcast(exec_session_id, {"type": "exec_session_complete"})
+            _chat_stop_events.pop(chat_session_id, None)
 
     background_tasks.add_task(_run_and_notify)
 
@@ -2656,6 +2814,21 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
         "message": start_msg,
         "selected_tests": selected_ids,
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /chat-stop — cancel an in-flight chat-execute
+# ---------------------------------------------------------------------------
+
+@router.post("/chat-stop")
+async def chat_stop(req: Request):
+    """Signal the running _run_and_notify task to stop."""
+    body = await req.json()
+    session_id = body.get("session_id", "")
+    event = _chat_stop_events.get(session_id)
+    if event:
+        event.set()
+    return {"status": "stop_requested", "session_id": session_id}
 
 
 # ---------------------------------------------------------------------------

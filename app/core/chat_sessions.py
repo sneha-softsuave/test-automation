@@ -27,6 +27,7 @@ def create_session(page_structure: Dict[str, Any], compact: Dict[str, Any]) -> s
         "last_execution_result": None,
         "execution_session_id": None,
         "credentials": {},
+        "credential_history": [],   # Previous credential sets (for user switching)
         "max_tc_id": 0,
         "session_tokens": {"total_tokens": 0, "cost_usd": 0.0},
     }
@@ -47,6 +48,7 @@ def create_pending_session() -> str:
         "last_execution_result": None,
         "execution_session_id": None,
         "credentials": {},
+        "credential_history": [],   # Previous credential sets (for user switching)
         "max_tc_id": 0,
         "session_tokens": {"total_tokens": 0, "cost_usd": 0.0},
     }
@@ -169,10 +171,48 @@ def get_confirmed_ids(session_id: str) -> set:
 
 
 def set_credentials(session_id: str, creds: Dict[str, Any]) -> None:
-    """Store extracted credentials in the session."""
+    """Store extracted credentials in the session (simple overwrite)."""
     session = _sessions.get(session_id)
     if session is not None:
         session["credentials"] = creds
+
+
+def push_credentials(session_id: str, new_creds: Dict[str, Any], _infer_fmt_fn=None) -> None:
+    """
+    Store credentials intelligently with history tracking.
+
+    - Full switch: when new_creds contains values of at least 2 distinct format types
+      (e.g. email + plain-text password), the old credential set is archived to
+      credential_history and new_creds replace the current set entirely.
+    - Partial update: single-format credentials (e.g. only a new password) are merged
+      into the existing set; old values for unaffected keys are preserved.
+
+    _infer_fmt_fn: optional callable (val: str) -> str for format classification.
+    Pass app.tools.enhanced_executor._infer_value_format at call sites to avoid
+    a circular import in this module.
+    """
+    from datetime import datetime as _dt
+    session = _sessions.get(session_id)
+    if session is None:
+        return
+    existing = session.get("credentials", {})
+
+    _is_full_switch = False
+    if _infer_fmt_fn and existing and new_creds:
+        fmt_types = {
+            _infer_fmt_fn(v)
+            for v in new_creds.values()
+            if isinstance(v, str) and v
+        }
+        # Two or more distinct format types → likely a complete credential set
+        _is_full_switch = len(fmt_types) >= 2
+
+    if _is_full_switch:
+        history = session.setdefault("credential_history", [])
+        history.append({"values": dict(existing), "timestamp": _dt.now().isoformat()})
+        session["credentials"] = dict(new_creds)
+    else:
+        session["credentials"] = {**existing, **new_creds}
 
 
 def get_credentials(session_id: str) -> Dict[str, Any]:
@@ -181,6 +221,14 @@ def get_credentials(session_id: str) -> Dict[str, Any]:
     if session is not None:
         return session.get("credentials", {})
     return {}
+
+
+def get_credential_history(session_id: str) -> List[Dict[str, Any]]:
+    """Return list of previous credential sets (most recent last)."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        return session.get("credential_history", [])
+    return []
 
 
 def set_pending_row_choice(session_id: str, data: Dict[str, Any]) -> None:
