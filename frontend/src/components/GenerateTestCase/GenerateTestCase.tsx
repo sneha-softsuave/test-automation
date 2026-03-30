@@ -1988,11 +1988,25 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                   {lastTestSuite && (
                     <button
                       className={styles.chatActionBtn}
-                      onClick={() => { setSuiteToSave(lastTestSuite); setShowSaveModal(true); }}
-                      title="Save to Project"
+                      onClick={async () => {
+                        const _genSuite = { ...lastTestSuite, source: 'generate' };
+                        if (projectName) {
+                          try {
+                            await saveTestToProject(projectName, _genSuite);
+                            setProjectActiveSuite(projectName, _genSuite as unknown as TestSuite);
+                            addNotification('success', `Saved to ${projectName}`);
+                          } catch (e) {
+                            addNotification('error', e instanceof Error ? e.message : 'Save failed');
+                          }
+                        } else {
+                          setSuiteToSave(_genSuite);
+                          setShowSaveModal(true);
+                        }
+                      }}
+                      title={projectName ? 'Save to History' : 'Save to Project'}
                     >
                       <Save size={14} />
-                      <span>Save to Project</span>
+                      <span>{projectName ? 'Save to History' : 'Save to Project'}</span>
                     </button>
                   )}
                   <button
@@ -2751,9 +2765,10 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                       <button
                         className={styles.btnSecondary}
                         onClick={async () => {
+                          const _recSuite = { ...recResult.test_suite, source: 'record' };
                           try {
-                            await saveTestToProject(projectName, recResult.test_suite);
-                            setProjectActiveSuite(projectName, recResult.test_suite as unknown as TestSuite);
+                            await saveTestToProject(projectName, _recSuite);
+                            setProjectActiveSuite(projectName, _recSuite as unknown as TestSuite);
                             addNotification('success', `Saved to ${projectName}`);
                           } catch (e) {
                             addNotification('error', e instanceof Error ? e.message : 'Save failed');
@@ -2766,7 +2781,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                     ) : (
                       <button
                         className={styles.btnSecondary}
-                        onClick={() => { setSuiteToSave(recResult.test_suite); setShowSaveModal(true); }}
+                        onClick={() => { setSuiteToSave({ ...recResult.test_suite, source: 'record' }); setShowSaveModal(true); }}
                       >
                         <Save size={14} />
                         Save to Project

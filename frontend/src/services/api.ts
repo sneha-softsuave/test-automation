@@ -508,6 +508,7 @@ export interface SavedTestMeta {
   saved_at: string;
   base_url: string;
   test_case_count: number;
+  source?: string;
 }
 
 export async function listProjects(): Promise<ProjectSummary[]> {

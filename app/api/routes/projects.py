@@ -69,9 +69,11 @@ async def list_project_tests(name: str):
             data = json.loads(f.read_text())
             base_url = data.get("base_url", "")
             test_case_count = len(data.get("test_cases", []))
+            source = data.get("source", "")
         except Exception:
             base_url = ""
             test_case_count = 0
+            source = ""
         # Extract timestamp from filename: {name}_{YYYY-MM-DD}_{HH-MM-SS}.json
         stem = f.stem
         prefix = f"{name}_"
@@ -81,6 +83,7 @@ async def list_project_tests(name: str):
             "saved_at": saved_at,
             "base_url": base_url,
             "test_case_count": test_case_count,
+            "source": source,
         })
     return tests
 

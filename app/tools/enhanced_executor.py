@@ -354,6 +354,34 @@ def _execute_single_test_sync(
             return
         try:
             import base64
+            # Wait for DOM to settle before capturing so we don't show
+            # mid-transition states or loading spinners in the live view.
+            try:
+                page.wait_for_load_state("load", timeout=3000)
+            except Exception:
+                pass
+            # Brief pause so React/Vue can mount any loading overlay before
+            # the spinner-disappear check below runs.
+            try:
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
+            # Wait for common loading indicators to disappear.
+            try:
+                page.wait_for_function(
+                    "() => !document.querySelector("
+                    "'[role=\"progressbar\"], "
+                    "[class*=\"spinner\"], [class*=\"Spinner\"], "
+                    "[class*=\"loading\"], [class*=\"Loading\"], "
+                    "[class*=\"skeleton\"], [class*=\"Skeleton\"], "
+                    "[class*=\"circular\"], [class*=\"Circular\"], "
+                    "[class*=\"progress\"], [class*=\"Progress\"], "
+                    "[class*=\"overlay\"], [class*=\"Overlay\"], "
+                    "[class*=\"backdrop\"], [class*=\"Backdrop\"]')",
+                    timeout=3000,
+                )
+            except Exception:
+                pass
             # Capture screenshot as bytes
             screenshot_bytes = page.screenshot(type="png")
             screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')

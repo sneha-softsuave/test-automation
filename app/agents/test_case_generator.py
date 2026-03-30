@@ -471,8 +471,8 @@ INFORMATIONAL
 
 APPROVE
 - User wants to save/export results to Excel
-- Modes: individual | group | multi_group | list_unadded
-- Examples: "approve step 1", "add steps 1 to 5 in one row", "export all results"
+- Examples: "add to excel", "export all results", "save test 1 and 3", "add all individually"
+- Also matches: "yes", "go ahead", "do it", "add them" WHEN history shows a pending approval question
 ⚠ "click approve button" = EXECUTE
 
 GENERATE
@@ -505,9 +505,30 @@ OUTPUT — return ONLY this JSON, no extra text:
     "approve_mode": null,
     "approve_range": null,
     "approve_ranges": null,
-    "form_data": {{}}
+    "form_data": {{}},
+    "parameters": {{
+      "targets": null,
+      "mode": null,
+      "confirm": false
+    }}
   }}
 }}
+
+For intent=approve, populate metadata.parameters:
+  targets : "all" | ["TS_001","TS_003"] | null
+  mode    : "individual" | "combined" | null
+  confirm : true | false
+
+  Rules for parameters:
+  - "all", "everything", "all passed", "all test cases" → targets="all"
+  - "test 1", "TC_001", "1 and 3", "TS_003" → targets=["TS_001","TS_003"]
+  - "individually", "separate", "each", "one per row" → mode="individual"
+  - "combined", "one row", "together", "merge" → mode="combined"
+  - "yes", "go ahead", "do it", "proceed", "add them", "add these", "add all",
+    "add to excel" WHEN last assistant message was a pending approval question → confirm=true
+    AND infer targets/mode from that last assistant message if not in current message
+  - If message alone is fully clear (e.g. "add all individually") → confirm=true
+  - If mode is ambiguous with multiple results → mode=null
 
 form_data: extract any specific field values the user wants to fill (dates, names, descriptions,
 locations, IDs). Leave as {{}} if no specific data values are present.

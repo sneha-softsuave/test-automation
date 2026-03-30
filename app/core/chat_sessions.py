@@ -235,3 +235,18 @@ def get_session_tokens(session_id: str) -> Dict[str, Any]:
     if session is not None:
         return dict(session.get("session_tokens", {"total_tokens": 0, "cost_usd": 0.0}))
     return {"total_tokens": 0, "cost_usd": 0.0}
+
+
+def set_approval_context(session_id: str, ctx: Dict[str, Any]) -> None:
+    """Store structured approval context for multi-turn inference (targets, mode)."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        session["last_approval_context"] = ctx
+
+
+def get_approval_context(session_id: str) -> Dict[str, Any]:
+    """Return the last stored approval context, or empty dict."""
+    session = _sessions.get(session_id)
+    if session is not None:
+        return session.get("last_approval_context", {})
+    return {}

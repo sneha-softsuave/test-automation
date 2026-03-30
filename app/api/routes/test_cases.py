@@ -1543,162 +1543,50 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
 
     # ── Fast pre-classification — bypass LLM for unambiguous patterns ─────────
     import re as _intent_re
-    from app.core.chat_sessions import (
-        get_pending_approval as _get_pending,
-        get_pending_row_choice as _get_row_choice,
-    )
     _msg = request.user_message.strip()
-    _pending_results = _get_pending(request.session_id)
-    _pending_row_choice = _get_row_choice(request.session_id)
 
-    _YES_RE = _intent_re.compile(
-        r'^(yes|yeah|yep|yup|sure|ok|okay|confirm|add it|go ahead|do it|proceed|'
-        r'fine|sounds good|let\'s go|perfect|great|absolutely|of course|please|'
-        r'approved?|that\'s right|correct|affirmative|roger|done|submit)\b',
+    _EXEC_RE = _intent_re.compile(
+        r'^(execute|run|play|start|launch)\s*(?:test\s*case\s*|test\s*|tc\s*)?(\d+(?:\s*[,\s]\s*\d+)*|all)\b',
         _intent_re.IGNORECASE,
     )
-    _NO_RE = _intent_re.compile(
-        r'^(no|nope|nah|cancel|skip|don\'t|dont|stop|never mind|nevermind|'
-        r'forget it|discard|reject|not now|leave it|ignore)\b',
-        _intent_re.IGNORECASE,
-    )
-    # Row-choice responses: "split/individual/separate" vs "combined/one row/same row"
-    _ROW_SPLIT_RE = _intent_re.compile(
-        r'\b(split|individual|separate|each|one\s+per|per\s+row)\b',
-        _intent_re.IGNORECASE,
-    )
-    _ROW_COMBINED_RE = _intent_re.compile(
-        r'\b(combined?|one\s+row|same\s+row|single\s+row|together|merge|all\s+in\s+one)\b',
-        _intent_re.IGNORECASE,
-    )
+    _exec_m = _EXEC_RE.match(_msg)
 
-    if _pending_results is not None and _YES_RE.match(_msg):
+    if _exec_m:
+        _raw_targets = _exec_m.group(2).strip().lower()
+        _exec_targets: object = "all" if _raw_targets == "all" else [
+            int(n) for n in _intent_re.findall(r'\d+', _raw_targets)
+        ]
         classification: dict = {
-            "intent": "approve",
+            "intent": "execute",
             "confidence": 1.0,
-            "reasoning": "pre-classified: confirming pending approval",
-            "metadata": {"approve_targets": "__pending_confirm__"},
-        }
-    elif _pending_results is not None and _NO_RE.match(_msg):
-        classification = {
-            "intent": "approve",
-            "confidence": 1.0,
-            "reasoning": "pre-classified: cancelling pending approval",
-            "metadata": {"approve_targets": "__pending_cancel__"},
-        }
-    elif _pending_row_choice is not None and _ROW_SPLIT_RE.search(_msg):
-        classification = {
-            "intent": "approve",
-            "confidence": 1.0,
-            "reasoning": "pre-classified: row-choice → individual",
-            "metadata": {"approve_targets": "__row_choice_individual__"},
-        }
-    elif _pending_row_choice is not None and _ROW_COMBINED_RE.search(_msg):
-        classification = {
-            "intent": "approve",
-            "confidence": 1.0,
-            "reasoning": "pre-classified: row-choice → combined",
-            "metadata": {"approve_targets": "__row_choice_combined__"},
-        }
-    elif _pending_row_choice is not None and _NO_RE.match(_msg):
-        classification = {
-            "intent": "approve",
-            "confidence": 1.0,
-            "reasoning": "pre-classified: row-choice → cancelled",
-            "metadata": {"approve_targets": "__row_choice_cancel__"},
+            "reasoning": "pre-classified: execute keyword + test reference",
+            "metadata": {"execute_targets": _exec_targets},
         }
     else:
-        _EXEC_RE = _intent_re.compile(
-            r'^(execute|run|play|start|launch)\s*(?:test\s*case\s*|test\s*|tc\s*)?(\d+(?:\s*[,\s]\s*\d+)*|all)\b',
-            _intent_re.IGNORECASE,
-        )
-        _exec_m = _EXEC_RE.match(_msg)
-
-        # Multi-range grouping: "add 1 to 5 in one row and 6 to 10 in another"
-        # Requires 2+ "X to Y" pairs and an approve-like keyword anywhere in message
-        _ANY_RANGE_RE = _intent_re.compile(r'(\d+)\s+to\s+(\d+)', _intent_re.IGNORECASE)
-        _all_ranges = _ANY_RANGE_RE.findall(_msg)
-        _has_approve_kw = bool(_intent_re.search(
-            r'\b(add|append|save|approve|export|put|place)\b', _msg, _intent_re.IGNORECASE
-        ))
-        _is_multi_range = len(_all_ranges) >= 2 and _has_approve_kw
-
-        # Single-range grouping: "add test steps from 1 to 10"
-        _RANGE_RE = _intent_re.compile(
-            r'(?:add|append|export|save|approve)\s+(?:test\s*)?steps?\s+(?:from\s+)?(\d+)\s+to\s+(\d+)',
-            _intent_re.IGNORECASE,
-        )
-        _range_m = _RANGE_RE.search(_msg)
-
-        # List unadded / export all: "export to excel", "export all", "list unadded steps"
-        _EXPORT_RE = _intent_re.compile(
-            r'\b(export\s+(?:to\s+)?excel|export\s+all|list\s+unadded\s+(?:steps?|tests?)|'
-            r'what\s+steps?\s+haven\'?t\s+been\s+added)\b',
-            _intent_re.IGNORECASE,
+        # ── Classify intent via LLM ───────────────────────────────────────────
+        classification = await _asyncio.to_thread(
+            agent.classify_intent,
+            request.user_message,
+            test_cases,
+            page_url,
+            history[-6:],
         )
 
-        if _exec_m:
-            _raw_targets = _exec_m.group(2).strip().lower()
-            _exec_targets: object = "all" if _raw_targets == "all" else [
-                int(n) for n in _intent_re.findall(r'\d+', _raw_targets)
-            ]
-            classification = {
-                "intent": "execute",
-                "confidence": 1.0,
-                "reasoning": "pre-classified: execute keyword + test reference",
-                "metadata": {"execute_targets": _exec_targets},
-            }
-        elif _is_multi_range:
-            classification = {
-                "intent": "approve",
-                "confidence": 1.0,
-                "reasoning": "pre-classified: multi-range group pattern",
-                "metadata": {
-                    "approve_targets": None,
-                    "approve_mode": "multi_group",
-                    "approve_ranges": [{"from": int(f), "to": int(t)} for f, t in _all_ranges],
-                },
-            }
-        elif _range_m:
-            _r_from, _r_to = int(_range_m.group(1)), int(_range_m.group(2))
-            classification = {
-                "intent": "approve",
-                "confidence": 1.0,
-                "reasoning": "pre-classified: range group pattern",
-                "metadata": {
-                    "approve_targets": list(range(_r_from, _r_to + 1)),
-                    "approve_mode": "group",
-                    "approve_range": {"from": _r_from, "to": _r_to},
-                },
-            }
-        elif _EXPORT_RE.search(_msg):
-            classification = {
-                "intent": "approve",
-                "confidence": 1.0,
-                "reasoning": "pre-classified: export/list-unadded pattern",
-                "metadata": {"approve_targets": "all", "approve_mode": "list_unadded"},
-            }
-        elif _has_approve_kw and _intent_re.search(r'\b\d+\b', _msg):
-            # Generic specific-list: "add TC001 and TC006", "add only 6 7 10",
-            # "add test case 1 and 6", "approve TS003, TS007" — extract all numbers
-            _approve_list_nums = list(dict.fromkeys(
-                int(n) for n in _intent_re.findall(r'\b(\d+)\b', _msg)
-            ))
-            classification = {
-                "intent": "approve",
-                "confidence": 1.0,
-                "reasoning": "pre-classified: approve keyword + specific number list",
-                "metadata": {"approve_targets": _approve_list_nums},
-            }
-        else:
-            # ── Classify intent via LLM (non-blocking) ───────────────────────
-            classification = await _asyncio.to_thread(
-                agent.classify_intent,
-                request.user_message,
-                test_cases,
-                page_url,
-                history[-6:],
-            )
+        # Validate approve params — fall back to classify if low confidence or empty params
+        if classification.get("intent") == "approve":
+            _ap = (classification.get("metadata") or {}).get("parameters") or {}
+            _ap_valid = bool(_ap.get("targets") or _ap.get("confirm"))
+            if not _ap_valid or classification.get("confidence", 1.0) < 0.7:
+                # Re-classify with classify_intent (already done) — just reset to generate
+                # if it keeps returning approve with no params, the LLM needs context
+                if not _ap_valid:
+                    classification = await _asyncio.to_thread(
+                        agent.classify_intent,
+                        request.user_message,
+                        test_cases,
+                        page_url,
+                        history[-4:],
+                    )
 
     intent = classification.get("intent", "generate")
     metadata = classification.get("metadata", {})
@@ -1746,432 +1634,212 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
     # ── Approve ──────────────────────────────────────────────────────────────
     elif intent == "approve":
         from app.core.chat_sessions import (
-            get_execution_result, get_pending_approval,
-            set_pending_approval, clear_pending_approval,
-            add_confirmed_ids, get_confirmed_ids,
-            get_pending_row_choice, set_pending_row_choice, clear_pending_row_choice,
+            get_execution_result, add_confirmed_ids, get_confirmed_ids,
+            get_approval_context, set_approval_context,
         )
-        targets = metadata.get("approve_targets")
-        approve_mode = metadata.get("approve_mode", "individual")
         append_message(_session_id, "user", request.user_message)
 
-        def _result_lines(results: list) -> list[str]:
-            lines = []
-            for r in results:
-                icon = "✅" if r.get("status") == "passed" else "❌"
-                desc = (r.get("expected_results") or [None])[0] or f"{len(r.get('steps', []))} steps"
-                lines.append(f"- **{r['name']}** {icon} {r.get('status', '').capitalize()} — {desc}")
-            return lines
-
-        # ── User confirmed a pending approval ────────────────────────────────
-        if targets == "__pending_confirm__":
-            confirmed = get_pending_approval(request.session_id) or []
-            clear_pending_approval(request.session_id)
-            if confirmed:
-                # Mark all TS IDs (including grouped sub-IDs) as confirmed
-                _all_confirmed_ids = []
-                for _r in confirmed:
-                    _all_confirmed_ids.append(_r.get("id", ""))
-                    _all_confirmed_ids.extend(_r.get("grouped_ids", []))
-                add_confirmed_ids(request.session_id, [i for i in _all_confirmed_ids if i])
-            _confirm_user_msg = request.user_message
-            _confirm_results = confirmed
-
-            async def _do_confirm():
-                if _confirm_results:
-                    _ctx = {"confirmed": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in _confirm_results]}
-                    success_msg = await _asyncio.to_thread(
-                        agent.narrate, "approve_success", _confirm_user_msg, page_url, _ctx
-                    )
-                else:
-                    success_msg = await _asyncio.to_thread(
-                        agent.narrate, "approve_nothing_to_add", _confirm_user_msg, page_url, {}
-                    )
-                append_message(_session_id, "assistant", success_msg)
-                await sse_manager.broadcast(_session_id, {
-                    "type": "chat_approve",
-                    "results": _confirm_results,
-                    "message": success_msg,
-                })
-
-            background_tasks.add_task(_do_confirm)
-            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
-
-        # ── User cancelled a pending approval ────────────────────────────────
-        if targets == "__pending_cancel__":
-            clear_pending_approval(request.session_id)
-            _cancel_user_msg = request.user_message
-
-            async def _do_cancel():
-                cancel_msg = await _asyncio.to_thread(
-                    agent.narrate, "approve_cancel", _cancel_user_msg, page_url, {}
+        # ── Helper: resolve target IDs from exec_results ──────────────────────
+        def _resolve_targets(exec_res: list, tgts, confirmed: set):
+            """Returns (matched_list, error_msg_or_None)."""
+            import re as _rr
+            if not tgts or tgts == "all":
+                return (
+                    [r for r in exec_res if r.get("id") not in confirmed
+                     and all(gid not in confirmed for gid in (r.get("grouped_ids") or []))],
+                    None,
                 )
-                append_message(_session_id, "assistant", cancel_msg)
-                await sse_manager.broadcast(_session_id, {
-                    "type": "chat_response",
-                    "message": cancel_msg,
-                    "intent": "approve",
-                })
+            if isinstance(tgts, list):
+                # Try ID match first (TS_001 / TC_001), then positional
+                _tset = {str(t).upper() for t in tgts}
+                _matched = [r for r in exec_res if r.get("id", "").upper() in _tset]
+                if not _matched:
+                    _nums = [int(_rr.sub(r'\D', '', str(t))) for t in tgts if _rr.search(r'\d', str(t))]
+                    _valid = [n for n in _nums if 0 < n <= len(exec_res)]
+                    _bad   = [n for n in _nums if n < 1 or n > len(exec_res)]
+                    if _bad:
+                        return [], f"Test case number(s) {_bad} not found (only {len(exec_res)} available)."
+                    _matched = [exec_res[n - 1] for n in _valid]
+                return _matched, None
+            return [], "Could not determine which test cases to add."
 
+        # ── Helper: convert unexecuted suite → synthetic results ──────────────
+        def _suite_to_results(suite: dict) -> list:
+            return [
+                {
+                    "id": tc.get("id", f"TC_{i+1:03d}"),
+                    "name": tc.get("name", f"Test {i+1}"),
+                    "status": "not_executed",
+                    "steps": tc.get("steps", []),
+                    "expected_results": tc.get("expected_results", []),
+                    "test_data": suite.get("test_data", {}),
+                    "error": None,
+                }
+                for i, tc in enumerate(suite.get("test_cases", []))
+            ]
+
+        # ── Helper: infer missing params from session hint ────────────────────
+        def _infer_params(params: dict, ctx: dict) -> dict:
+            result = dict(params)
+            if result.get("confirm") and not result.get("targets"):
+                result["targets"] = ctx.get("targets") or "all"
+            if not result.get("mode") and ctx.get("mode"):
+                result["mode"] = ctx["mode"]
+            return result
+
+        # ── Fetch exec results; fall back to unexecuted test suite ────────────
+        _raw_results = get_execution_result(request.session_id)
+        exec_results = _raw_results if isinstance(_raw_results, list) else []
+        if not exec_results:
+            _fb_suite = get_last_test_suite(_session_id)
+            if _fb_suite and _fb_suite.get("test_cases"):
+                exec_results = _suite_to_results(_fb_suite)
+
+        # ── Merge LLM params with session hint ────────────────────────────────
+        _ap_params  = _infer_params(
+            (metadata or {}).get("parameters") or {},
+            get_approval_context(_session_id),
+        )
+        _ap_targets = _ap_params.get("targets")
+        _ap_mode    = _ap_params.get("mode")
+        _ap_confirm = _ap_params.get("confirm", False)
+
+        # Cancel / no
+        _NO_AP_RE = _intent_re.compile(
+            r'^(no|nope|nah|cancel|skip|don\'t|dont|stop|never mind|nevermind|'
+            r'forget it|discard|reject|not now|leave it|ignore)\b',
+            _intent_re.IGNORECASE,
+        )
+        if _NO_AP_RE.match(_msg):
+            set_approval_context(_session_id, {})
+            _c_msg = request.user_message
+            async def _do_cancel():
+                _cm = await _asyncio.to_thread(agent.narrate, "approve_cancel", _c_msg, page_url, {})
+                append_message(_session_id, "assistant", _cm)
+                await sse_manager.broadcast(_session_id, {"type": "chat_response", "message": _cm, "intent": "approve"})
             background_tasks.add_task(_do_cancel)
             return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
 
-        # ── Row-choice: user answered individual vs combined question ─────────
-        if targets in ("__row_choice_individual__", "__row_choice_combined__", "__row_choice_cancel__"):
-            _choice_data = get_pending_row_choice(request.session_id) or {}
-            clear_pending_row_choice(request.session_id)
-            _choice_matched = _choice_data.get("results", [])
+        # ── Resolve targets ───────────────────────────────────────────────────
+        _confirmed_ids = get_confirmed_ids(request.session_id)
+        matched, _err = _resolve_targets(exec_results, _ap_targets, _confirmed_ids)
 
-            if targets == "__row_choice_cancel__" or not _choice_matched:
-                _rc_user_msg = request.user_message
+        # Invalid selection
+        if _err:
+            _emsg = _err
+            async def _invalid():
+                append_message(_session_id, "assistant", _emsg)
+                await sse_manager.broadcast(_session_id, {"type": "chat_response", "message": _emsg, "intent": "approve"})
+            background_tasks.add_task(_invalid)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
 
-                async def _row_cancel():
-                    _cancel_row_msg = await _asyncio.to_thread(
-                        agent.narrate, "approve_row_cancel", _rc_user_msg, page_url, {}
-                    )
-                    append_message(_session_id, "assistant", _cancel_row_msg)
-                    await sse_manager.broadcast(_session_id, {
-                        "type": "chat_response",
-                        "message": _cancel_row_msg,
-                        "intent": "approve",
-                    })
+        # Nothing to add
+        if not matched:
+            _situation = "approve_all_added" if exec_results else "approve_no_results"
+            _nm_msg = request.user_message
+            async def _no_match():
+                _m = await _asyncio.to_thread(agent.narrate, _situation, _nm_msg, page_url, {})
+                append_message(_session_id, "assistant", _m)
+                await sse_manager.broadcast(_session_id, {"type": "chat_response", "message": _m, "intent": "approve"})
+            background_tasks.add_task(_no_match)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
 
-                background_tasks.add_task(_row_cancel)
-                return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+        # Single result → mode irrelevant (don't override explicit choice)
+        if len(matched) == 1 and not _ap_mode:
+            _ap_mode = "individual"
 
-            if targets == "__row_choice_individual__":
-                # Add each as a separate row
-                set_pending_approval(_session_id, _choice_matched)
-                _ri_matched = _choice_matched
-                _ri_user_msg = request.user_message
-
-                async def _row_individual():
-                    _choice_confirm = await _asyncio.to_thread(
-                        agent.narrate, "approve_confirm_individual", _ri_user_msg, page_url,
-                        {"matched": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in _ri_matched]}
-                    )
-                    append_message(_session_id, "assistant", _choice_confirm)
-                    await sse_manager.broadcast(_session_id, {
-                        "type": "chat_response",
-                        "message": _choice_confirm,
-                        "intent": "approve",
-                    })
-
-                background_tasks.add_task(_row_individual)
-                return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
-
-            if targets == "__row_choice_combined__":
-                # Merge all into one row with LLM summary
-                _all_steps = [s for _r in _choice_matched for s in _r.get("steps", [])]
-                _all_expected = [e for _r in _choice_matched for e in _r.get("expected_results", [])]
-                _merged_data: dict = {}
-                for _r in _choice_matched:
-                    _merged_data.update(_r.get("test_data", {}))
-                _failed = next((_r for _r in _choice_matched if _r.get("status") == "failed"), None)
-                _ids = [_r["id"] for _r in _choice_matched]
-                _summary_prompt = (
-                    f"Summarize what these {len(_choice_matched)} test steps collectively verify "
-                    f"in one short phrase (max 10 words, no quotes, no punctuation at end):\n"
-                    + "\n".join(f"- {_r['name']}" for _r in _choice_matched)
+        # Mode unknown with multiple results → ask ONCE, store hint
+        if len(matched) > 1 and not _ap_mode:
+            _ask_msg = (
+                f"I found **{len(matched)}** test case(s) to add:\n"
+                + "\n".join(
+                    f"- **{r.get('id')}**: {r.get('name')} "
+                    f"({'✅' if r.get('status') == 'passed' else '❌' if r.get('status') == 'failed' else '⏳'} {r.get('status', '')})"
+                    for r in matched
                 )
-                _group_name = await _asyncio.to_thread(agent.call_llm, _summary_prompt)
-                _group_name = re.sub(r'\*+', '', _group_name).strip().lstrip('-').strip().strip('"').strip("'").rstrip(".")
-                _grouped = {
+                + "\n\nAdd as **individual rows** or **combined into one row**?"
+            )
+            set_approval_context(_session_id, {"targets": [r.get("id") for r in matched], "mode": None})
+            append_message(_session_id, "assistant", _ask_msg)
+            async def _ask_mode():
+                await sse_manager.broadcast(_session_id, {"type": "chat_response", "message": _ask_msg, "intent": "approve"})
+            background_tasks.add_task(_ask_mode)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+        # Safety gate: large bulk add without explicit "all" or confirm
+        _explicitly_bulk = (str(_ap_targets).lower() == "all" or _ap_confirm)
+        if len(matched) > 5 and not _explicitly_bulk:
+            _bulk_msg = (
+                f"You're about to add **{len(matched)} test cases** to Excel. Shall I go ahead? *(yes / no)*"
+            )
+            set_approval_context(_session_id, {"targets": [r.get("id") for r in matched], "mode": _ap_mode or "individual"})
+            append_message(_session_id, "assistant", _bulk_msg)
+            async def _bulk_gate():
+                await sse_manager.broadcast(_session_id, {"type": "chat_response", "message": _bulk_msg, "intent": "approve"})
+            background_tasks.add_task(_bulk_gate)
+            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
+
+        # ── Log decision for observability ────────────────────────────────────
+        import logging as _log_ap
+        _log_ap.getLogger(__name__).info(
+            "[approve] params=%s matched_ids=%s mode=%s confidence=%.2f",
+            _ap_params,
+            [r.get("id") for r in matched],
+            _ap_mode or "individual",
+            classification.get("confidence", 1.0),
+        )
+
+        # ── Write directly ────────────────────────────────────────────────────
+        _final_mode    = _ap_mode or "individual"
+        _write_matched = matched
+        _write_msg     = request.user_message
+
+        async def _do_write():
+            results = list(_write_matched)
+            if _final_mode == "combined" and len(results) > 1:
+                _ids    = [r["id"] for r in results]
+                _failed = next((r for r in results if r.get("status") == "failed"), None)
+                try:
+                    _sp = (
+                        f"Summarize what these {len(results)} test steps collectively verify "
+                        f"in one short phrase (max 10 words, no quotes):\n"
+                        + "\n".join(f"- {r['name']}" for r in results)
+                    )
+                    _name = await _asyncio.to_thread(agent.call_llm, _sp)
+                    _name = re.sub(r'\*+', '', _name).strip().strip('"').rstrip(".")
+                    if not _name or len(_name) > 80:
+                        raise ValueError("bad summary")
+                except Exception:
+                    _name = f"Combined {len(results)} Test Cases"
+                results = [{
                     "id": f"GROUP_{_ids[0]}_{_ids[-1]}",
-                    "name": _group_name,
+                    "name": _name,
                     "status": "failed" if _failed else "passed",
-                    "steps": _all_steps,
-                    "expected_results": _all_expected,
-                    "test_data": _merged_data,
+                    "steps": [s for r in _write_matched for s in r.get("steps", [])],
+                    "expected_results": [e for r in _write_matched for e in r.get("expected_results", [])],
+                    "test_data": {k: v for r in _write_matched for k, v in (r.get("test_data") or {}).items()},
                     "error": _failed.get("error") if _failed else None,
                     "grouped_ids": _ids,
-                }
-                set_pending_approval(_session_id, [_grouped])
-                _rcomb_group_name = _group_name
-                _rcomb_ids = _ids
-                _rcomb_count = len(_choice_matched)
-                _rcomb_user_msg = request.user_message
+                }]
 
-                async def _row_combined():
-                    _combined_confirm = await _asyncio.to_thread(
-                        agent.narrate, "approve_confirm_group", _rcomb_user_msg, page_url,
-                        {"name": _rcomb_group_name, "id_range": f"{_rcomb_ids[0]}–{_rcomb_ids[-1]}", "count": _rcomb_count}
-                    )
-                    append_message(_session_id, "assistant", _combined_confirm)
-                    await sse_manager.broadcast(_session_id, {
-                        "type": "chat_response",
-                        "message": _combined_confirm,
-                        "intent": "approve",
-                    })
+            # Mark confirmed IDs and clear session hint
+            _all_ids = []
+            for r in results:
+                _all_ids.append(r.get("id", ""))
+                _all_ids.extend(r.get("grouped_ids") or [])
+            add_confirmed_ids(_session_id, [i for i in _all_ids if i])
+            set_approval_context(_session_id, {})
 
-                background_tasks.add_task(_row_combined)
-                return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
-
-        # ── New approval request ──────────────────────────────────────────────
-        _raw_results = get_execution_result(request.session_id)
-        exec_results = _raw_results if isinstance(_raw_results, list) else []
-
-        # ── Mode: list_unadded — list all executed steps not yet in Excel ─────
-        if approve_mode == "list_unadded":
-            _confirmed_ids = get_confirmed_ids(request.session_id)
-            _unconfirmed = [r for r in exec_results if r.get("id") not in _confirmed_ids]
-
-            _lu_user_msg = request.user_message
-            if not _unconfirmed:
-                _lu_situation = "approve_no_results" if not exec_results else "approve_all_added"
-                _lu_ctx: dict = {}
-            else:
-                _lu_situation = "approve_list_unadded"
-                _lu_ctx = {"unadded": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in _unconfirmed]}
-                set_pending_approval(_session_id, _unconfirmed)
-
-            async def _list_unadded_respond():
-                response_msg = await _asyncio.to_thread(
-                    agent.narrate, _lu_situation, _lu_user_msg, page_url, _lu_ctx
-                )
-                append_message(_session_id, "assistant", response_msg)
-                await sse_manager.broadcast(_session_id, {
-                    "type": "chat_response",
-                    "message": response_msg,
-                    "intent": "approve",
-                })
-
-            background_tasks.add_task(_list_unadded_respond)
-            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
-
-        # ── Mode: multi_group — each specified range becomes its own Excel row ─
-        if approve_mode == "multi_group":
-            _approve_ranges = metadata.get("approve_ranges") or []
-            _confirmed_ids = get_confirmed_ids(request.session_id)
-
-            def _resolve_range_results(range_from: int, range_to: int) -> list:
-                """Return exec_results whose numeric ID falls within [range_from, range_to]."""
-                import re as _rr
-                result = []
-                for _r in exec_results:
-                    _m = _rr.search(r'\d+', str(_r.get("id", "")))
-                    if _m and range_from <= int(_m.group(0)) <= range_to:
-                        result.append(_r)
-                if not result:
-                    # Fallback: positional (1-indexed)
-                    result = [exec_results[i - 1] for i in range(range_from, range_to + 1) if 0 < i <= len(exec_results)]
-                return result
-
-            _grouped_rows = []
-            _preview_lines = []
-            for _rng in _approve_ranges:
-                # LLM may return ranges as dicts {"from":1,"to":2} or as lists [1,2]
-                if isinstance(_rng, (list, tuple)):
-                    _rng_from = int(_rng[0]) if len(_rng) > 0 else 1
-                    _rng_to = int(_rng[1]) if len(_rng) > 1 else _rng_from
-                else:
-                    _rng_from = _rng.get("from", 1)
-                    _rng_to = _rng.get("to", 1)
-                _rng_results = _resolve_range_results(_rng_from, _rng_to)
-                if not _rng_results:
-                    continue
-                _rng_steps = [s for _r in _rng_results for s in _r.get("steps", [])]
-                _rng_expected = [e for _r in _rng_results for e in _r.get("expected_results", [])]
-                _rng_data: dict = {}
-                for _r in _rng_results:
-                    _rng_data.update(_r.get("test_data", {}))
-                _rng_failed = next((_r for _r in _rng_results if _r.get("status") == "failed"), None)
-                _rng_ids = [_r["id"] for _r in _rng_results]
-                _rng_summary_prompt = (
-                    f"Summarize what these {len(_rng_results)} test steps collectively verify "
-                    f"in one short phrase (max 10 words, no quotes, no punctuation at end):\n"
-                    + "\n".join(f"- {_r['name']}" for _r in _rng_results)
-                )
-                _rng_name = await _asyncio.to_thread(agent.call_llm, _rng_summary_prompt)
-                _rng_name = re.sub(r'\*+', '', _rng_name).strip().lstrip('-').strip().strip('"').strip("'").rstrip(".")
-                _grouped_rows.append({
-                    "id": f"GROUP_{_rng_ids[0]}_{_rng_ids[-1]}",
-                    "name": _rng_name,
-                    "status": "failed" if _rng_failed else "passed",
-                    "steps": _rng_steps,
-                    "expected_results": _rng_expected,
-                    "test_data": _rng_data,
-                    "error": _rng_failed.get("error") if _rng_failed else None,
-                    "grouped_ids": _rng_ids,
-                })
-                _icon = "❌" if _rng_failed else "✅"
-                _preview_lines.append(
-                    f"- **Row {len(_preview_lines) + 1}**: {_rng_name} {_icon} "
-                    f"({_rng_ids[0]}–{_rng_ids[-1]}, {len(_rng_results)} steps)"
-                )
-
-            _mg_user_msg = request.user_message
-            if not _grouped_rows:
-                async def _mg_none():
-                    _no_mg_msg = await _asyncio.to_thread(
-                        agent.narrate, "approve_multi_group_no_results", _mg_user_msg, page_url, {}
-                    )
-                    append_message(_session_id, "assistant", _no_mg_msg)
-                    await sse_manager.broadcast(_session_id, {
-                        "type": "chat_response",
-                        "message": _no_mg_msg,
-                        "intent": "approve",
-                    })
-
-                background_tasks.add_task(_mg_none)
-                return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
-
-            set_pending_approval(_session_id, _grouped_rows)
-            _mg_rows_ctx = [
-                {"name": r.get("name"), "id_range": f"{r['grouped_ids'][0]}–{r['grouped_ids'][-1]}" if r.get("grouped_ids") else r.get("id", ""), "status": r.get("status")}
-                for r in _grouped_rows
-            ]
-
-            async def _multi_group_ask():
-                _mg_confirm = await _asyncio.to_thread(
-                    agent.narrate, "approve_confirm_multi_group", _mg_user_msg, page_url,
-                    {"rows": _mg_rows_ctx}
-                )
-                append_message(_session_id, "assistant", _mg_confirm)
-                await sse_manager.broadcast(_session_id, {
-                    "type": "chat_response",
-                    "message": _mg_confirm,
-                    "intent": "approve",
-                })
-
-            background_tasks.add_task(_multi_group_ask)
-            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
-
-        # ── Resolve target IDs → matched results ──────────────────────────────
-        _confirmed_ids = get_confirmed_ids(request.session_id)
-
-        if not exec_results:
-            matched: list = []
-        elif targets is None or targets == "all":
-            # Filter out already-confirmed results
-            matched = [
-                r for r in exec_results
-                if r.get("id") not in _confirmed_ids
-                and all(gid not in _confirmed_ids for gid in (r.get("grouped_ids") or []))
-            ]
-        elif isinstance(targets, list) and targets and isinstance(targets[0], int):
-            # Look up by TS ID (e.g. 1 → "TS_001") so "approve test step 1" always
-            # means TS_001 regardless of execution order
-            _target_ids = {f"TS_{n:03d}" for n in targets}
-            matched = [r for r in exec_results if r.get("id", "").upper() in _target_ids]
-            if not matched:
-                # fallback: position-based (1-indexed) for sessions where IDs differ
-                matched = [exec_results[n - 1] for n in targets if 0 < n <= len(exec_results)]
-        else:
-            matched = [
-                r for r in exec_results
-                if any(str(t).lower() in r.get("name", "").lower() for t in (targets or []))
-            ]
-
-        if not matched:
-            _an_user_msg = request.user_message
-            _an_situation = "approve_all_added" if (exec_results and (targets is None or targets == "all")) else "approve_no_results"
-
-            async def _approve_none():
-                response_msg = await _asyncio.to_thread(
-                    agent.narrate, _an_situation, _an_user_msg, page_url, {}
-                )
-                append_message(_session_id, "assistant", response_msg)
-                await sse_manager.broadcast(_session_id, {
-                    "type": "chat_response",
-                    "message": response_msg,
-                    "intent": "approve",
-                })
-
-            background_tasks.add_task(_approve_none)
-            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
-
-        # ── Mode: group — merge matched steps into a single Excel row ─────────
-        if approve_mode == "group":
-            _all_steps = [s for _r in matched for s in _r.get("steps", [])]
-            _all_expected = [e for _r in matched for e in _r.get("expected_results", [])]
-            _merged_data = {}
-            for _r in matched:
-                _merged_data.update(_r.get("test_data", {}))
-            _failed = next((_r for _r in matched if _r.get("status") == "failed"), None)
-            _ids = [_r["id"] for _r in matched]
-
-            # LLM-generated summary for the "Test Case" column
-            _summary_prompt = (
-                f"Summarize what these {len(matched)} test steps collectively verify "
-                f"in one short phrase (max 10 words, no quotes, no punctuation at end):\n"
-                + "\n".join(f"- {_r['name']}" for _r in matched)
-            )
-            _group_name = await _asyncio.to_thread(agent.call_llm, _summary_prompt)
-            _group_name = re.sub(r'\*+', '', _group_name).strip().lstrip('-').strip().strip('"').strip("'").rstrip(".")
-
-            _grouped = {
-                "id": f"GROUP_{_ids[0]}_{_ids[-1]}",
-                "name": _group_name,
-                "status": "failed" if _failed else "passed",
-                "steps": _all_steps,
-                "expected_results": _all_expected,
-                "test_data": _merged_data,
-                "error": _failed.get("error") if _failed else None,
-                "grouped_ids": _ids,
-            }
-            set_pending_approval(_session_id, [_grouped])
-            _ga_group_name = _group_name
-            _ga_ids = _ids
-            _ga_count = len(matched)
-            _ga_user_msg = request.user_message
-
-            async def _group_ask():
-                _confirm_ask = await _asyncio.to_thread(
-                    agent.narrate, "approve_confirm_group", _ga_user_msg, page_url,
-                    {"name": _ga_group_name, "id_range": f"{_ga_ids[0]}–{_ga_ids[-1]}", "count": _ga_count}
-                )
-                append_message(_session_id, "assistant", _confirm_ask)
-                await sse_manager.broadcast(_session_id, {
-                    "type": "chat_response",
-                    "message": _confirm_ask,
-                    "intent": "approve",
-                })
-
-            background_tasks.add_task(_group_ask)
-            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
-
-        # ── Mode: individual (default) — one row per matched result ───────────
-        # When "approve all" targets 2+ results without specifying row structure,
-        # ask the user first whether they want separate rows or a combined row.
-        if (targets is None or targets == "all") and len(matched) >= 2:
-            set_pending_row_choice(_session_id, {"results": matched})
-            _rs_matched = matched
-            _rs_user_msg = request.user_message
-
-            async def _row_structure_ask():
-                _row_q = await _asyncio.to_thread(
-                    agent.narrate, "approve_row_structure", _rs_user_msg, page_url,
-                    {"results": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in _rs_matched]}
-                )
-                append_message(_session_id, "assistant", _row_q)
-                await sse_manager.broadcast(_session_id, {
-                    "type": "chat_response",
-                    "message": _row_q,
-                    "intent": "approve",
-                })
-
-            background_tasks.add_task(_row_structure_ask)
-            return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
-
-        # Single result or specific target — add directly without row-structure question
-        set_pending_approval(_session_id, matched)
-        _ai_matched = matched
-        _ai_user_msg = request.user_message
-
-        async def _approve_ask():
-            confirm_ask = await _asyncio.to_thread(
-                agent.narrate, "approve_confirm_individual", _ai_user_msg, page_url,
-                {"matched": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in _ai_matched]}
-            )
-            append_message(_session_id, "assistant", confirm_ask)
+            _ctx = {"confirmed": [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status")} for r in results]}
+            msg = await _asyncio.to_thread(agent.narrate, "approve_success", _write_msg, page_url, _ctx)
+            append_message(_session_id, "assistant", msg)
             await sse_manager.broadcast(_session_id, {
-                "type": "chat_response",
-                "message": confirm_ask,
-                "intent": "approve",
+                "type": "chat_approve",
+                "results": results,
+                "message": msg,
             })
 
-        background_tasks.add_task(_approve_ask)
+        background_tasks.add_task(_do_write)
         return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
 
     # ── Informational ─────────────────────────────────────────────────────────

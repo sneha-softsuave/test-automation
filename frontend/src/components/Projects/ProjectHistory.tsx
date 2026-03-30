@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Clock, Download, Trash2, Loader2, FolderOpen } from 'lucide-react';
+import { Clock, Download, Trash2, Loader2, FolderOpen, Sparkles, Video } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { listProjectTests, loadTestFromProject, deleteProjectTest, type SavedTestMeta } from '../../services/api';
 import type { TestSuite } from '../../store/useStore';
@@ -97,9 +97,23 @@ export const ProjectHistory = ({ projectName }: Props) => {
             <div className={styles.testCardBody}>
               <div className={styles.testCardDate}>{formatSavedAt(t.saved_at)}</div>
               <div className={styles.testCardUrl}>{t.base_url || '—'}</div>
-              <span className={styles.testCaseBadge}>
-                {t.test_case_count} test case{t.test_case_count !== 1 ? 's' : ''}
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span className={styles.testCaseBadge}>
+                  {t.test_case_count} test case{t.test_case_count !== 1 ? 's' : ''}
+                </span>
+                {t.source === 'generate' && (
+                  <span className={styles.sourceBadgeGenerate}>
+                    <Sparkles size={10} />
+                    Generate AI
+                  </span>
+                )}
+                {t.source === 'record' && (
+                  <span className={styles.sourceBadgeRecord}>
+                    <Video size={10} />
+                    Record AI
+                  </span>
+                )}
+              </div>
             </div>
             <div className={styles.testCardActions}>
               <button
