@@ -72,6 +72,7 @@ class ChatRequest(BaseModel):
     parsed_suite: Optional[Dict[str, Any]] = None
     llm_provider: str = "groq"
     model: Optional[str] = None
+    chat_history: Optional[List[Dict[str, str]]] = None  # [{role: 'user'|'assistant', content: str}]
 
 
 class ChatResponse(BaseModel):
@@ -85,6 +86,9 @@ STRUCTURED_CHAT_PROMPT = """You are a Test Automation Assistant. Analyze the use
 
 AVAILABLE TEST CASES:
 {test_context}
+
+CONVERSATION HISTORY (last few turns for context):
+{conversation_history}
 
 USER MESSAGE: {user_message}
 
@@ -130,6 +134,13 @@ INTENT RULES:
   Examples: "view results", "show results", "view suite"
 
 - "unknown": Does not fit any category. Ask the user to clarify.
+
+CONTINUATION RULE: If the user's message is a short confirmation ("go ahead", "yes", "sure", "ok",
+"do it", "proceed", "yep", "yeah", "sounds good", "please do") AND the CONVERSATION HISTORY shows
+the assistant previously asked a clarifying question or offered to do something specific, resolve
+the intent from that prior context. For example, if the assistant asked "Do you want me to write a
+test case for the login page?" and the user says "go ahead", treat it as the user confirming that
+action — infer the correct intent (execute/question/etc.) from the history.
 
 DECISION RULE — when in doubt between "execute" and "question":
   If the message does NOT contain an explicit run/execute/start verb → use "question".
@@ -481,10 +492,22 @@ async def chat_with_agent(request: ChatRequest):
     # ------------------------------------------------------------------ #
     # 4. PRIMARY PATH — single structured LLM call                        #
     # ------------------------------------------------------------------ #
+
+    # Build conversation history block (last 3 turns = up to 6 messages)
+    history_block = "None"
+    if request.chat_history:
+        lines = []
+        for turn in request.chat_history[-6:]:
+            role = "User" if turn.get("role") == "user" else "Assistant"
+            lines.append(f"{role}: {turn.get('content', '').strip()}")
+        if lines:
+            history_block = "\n".join(lines)
+
     parsed = None
     try:
         prompt = STRUCTURED_CHAT_PROMPT.format(
             test_context=test_context,
+            conversation_history=history_block,
             user_message=message,
         )
         raw_response = llm.call_llm(prompt)

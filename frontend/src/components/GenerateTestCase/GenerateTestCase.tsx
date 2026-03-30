@@ -69,6 +69,18 @@ interface ExecSummary {
   failed: number;
 }
 
+interface FailedStep {
+  step: number;
+  action: string;
+  instruction: string;
+  error?: string;
+}
+
+interface NetworkError {
+  url: string;
+  status: number;
+}
+
 interface ExecTestResult {
   id: string;
   name: string;
@@ -78,6 +90,9 @@ interface ExecTestResult {
   test_data: Record<string, unknown>;
   error?: string;
   grouped_ids?: string[];  // TS IDs merged into this row when using group mode
+  failed_steps?: FailedStep[];
+  console_errors?: string[];
+  network_errors?: NetworkError[];
 }
 
 interface ChatMsg {
@@ -996,7 +1011,18 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         await handleAnalyzeUrl(url);
       } else {
         appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: text });
-        appendChatMsg({ id: `ca_${Date.now()}`, role: 'assistant', content: 'Please share a URL (starting with https://) so I can analyze the page.' });
+        _showThinking('Thinking…');
+        try {
+          const res = await fetch(`${API_BASE}/api/v1/chat-freeform`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_message: text, llm_provider: selectedProvider, context: 'url_input' }),
+          });
+          const data = await res.json();
+          _resolveThinking({ id: `ca_${Date.now()}`, role: 'assistant', content: data.message });
+        } catch {
+          _resolveThinking({ id: `ca_${Date.now()}`, role: 'assistant', content: 'Could you share the URL of the page you\'d like to test?' });
+        }
       }
       return;
     }
@@ -1790,13 +1816,55 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                           {msg.execTestCases && msg.execTestCases.length > 0 && (
                             <div className={styles.genExecTcList}>
                               {msg.execTestCases.map(tc => (
-                                <div key={tc.id} className={`${styles.genExecTcRow} ${tc.status === 'passed' ? styles.genExecTcPassed : styles.genExecTcFailed}`}>
-                                  {tc.status === 'passed'
-                                    ? <CheckCircle2 size={13} style={{ color: '#16a34a', flexShrink: 0 }} />
-                                    : <XCircle size={13} style={{ color: '#dc2626', flexShrink: 0 }} />}
-                                  <span className={styles.genExecTcName}>{tc.name}</span>
-                                  {confirmedTcIds.has(tc.id) && (
-                                    <span className={styles.genExecTcConfirmed}><Check size={11} /> In Excel</span>
+                                <div key={tc.id} className={styles.genExecTcBlock}>
+                                  <div className={`${styles.genExecTcRow} ${tc.status === 'passed' ? styles.genExecTcPassed : styles.genExecTcFailed}`}>
+                                    {tc.status === 'passed'
+                                      ? <CheckCircle2 size={13} style={{ color: '#16a34a', flexShrink: 0 }} />
+                                      : <XCircle size={13} style={{ color: '#dc2626', flexShrink: 0 }} />}
+                                    <span className={styles.genExecTcName}>{tc.name}</span>
+                                    {confirmedTcIds.has(tc.id) && (
+                                      <span className={styles.genExecTcConfirmed}><Check size={11} /> In Excel</span>
+                                    )}
+                                  </div>
+                                  {tc.status === 'failed' && (
+                                    <div className={styles.genExecTcDetail}>
+                                      {tc.error && (
+                                        <div className={styles.genExecFailReason}>
+                                          <span className={styles.genExecDetailLabel}>Error:</span> {tc.error}
+                                        </div>
+                                      )}
+                                      {tc.failed_steps && tc.failed_steps.length > 0 && (
+                                        <div className={styles.genExecFailedSteps}>
+                                          <div className={styles.genExecDetailLabel}>Failed Steps:</div>
+                                          {tc.failed_steps.map(s => (
+                                            <div key={s.step} className={styles.genExecFailedStep}>
+                                              <span className={styles.genExecStepNum}>Step {s.step}</span>
+                                              <span className={styles.genExecStepInstr}>{s.instruction}</span>
+                                              {s.error && <span className={styles.genExecStepErr}>{s.error}</span>}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {tc.network_errors && tc.network_errors.length > 0 && (
+                                        <div className={styles.genExecNetErrors}>
+                                          <div className={styles.genExecDetailLabel}>Network Errors:</div>
+                                          {tc.network_errors.map((e, i) => (
+                                            <div key={i} className={styles.genExecNetError}>
+                                              <span className={`${styles.genExecStatusBadge} ${e.status >= 500 ? styles.genExecStatus5xx : styles.genExecStatus4xx}`}>{e.status}</span>
+                                              <span className={styles.genExecNetUrl}>{e.url}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {tc.console_errors && tc.console_errors.length > 0 && (
+                                        <div className={styles.genExecConsoleErrors}>
+                                          <div className={styles.genExecDetailLabel}>Console:</div>
+                                          {tc.console_errors.slice(0, 5).map((m, i) => (
+                                            <div key={i} className={styles.genExecConsoleMsg}>{m}</div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
                                   )}
                                 </div>
                               ))}

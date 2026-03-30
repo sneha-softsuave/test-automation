@@ -304,7 +304,8 @@ export const chatWithAgent = async (
   testCases?: TestCaseRaw[],
   parsedSuite?: TestSuite,
   llmProvider: string = 'groq',
-  model?: string
+  model?: string,
+  chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>
 ): Promise<AgentChatResponse> => {
   const response = await api.post<AgentChatResponse>(
     '/agent/chat',
@@ -314,6 +315,7 @@ export const chatWithAgent = async (
       parsed_suite: parsedSuite,
       llm_provider: llmProvider,
       model,
+      chat_history: chatHistory,
     },
     { timeout: 60000 } // 1 minute timeout for LLM responses
   );

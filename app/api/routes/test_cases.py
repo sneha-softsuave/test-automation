@@ -1423,6 +1423,73 @@ def _classify_intent(message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# POST /chat-freeform — lightweight pre-session conversational LLM call
+# ---------------------------------------------------------------------------
+
+class ChatFreeformRequest(PydanticBaseModel):
+    user_message: str
+    llm_provider: Optional[str] = None
+    context: Optional[str] = None  # optional caller hint (e.g. "url_input")
+
+
+@router.post("/chat-freeform")
+async def chat_freeform(request: ChatFreeformRequest):
+    """
+    Stateless conversational LLM call — no session required.
+    Used by the frontend before a test session exists (e.g. url_input phase)
+    to give dynamic, contextual responses instead of hardcoded strings.
+    """
+    from app.agents.test_case_generator import TestCaseGeneratorAgent
+    from app.agents.base_agent import LLMProvider as AgentLLMProvider
+
+    provider_name = validate_llm_provider(request.llm_provider or settings.DEFAULT_LLM_PROVIDER)
+    validate_api_key(provider_name)
+
+    model_map = {
+        "openai": settings.OPENAI_MODEL,
+        "anthropic": settings.ANTHROPIC_MODEL,
+        "groq": settings.GROQ_MODEL,
+        "waymore": settings.WAYMORE_MODEL,
+    }
+    model = model_map.get(provider_name, settings.GROQ_MODEL)
+
+    agent = TestCaseGeneratorAgent(
+        provider=AgentLLMProvider(provider_name),
+        model=model,
+    )
+
+    ctx = request.context or "url_input"
+
+    if ctx == "url_input":
+        system_prompt = (
+            "You are a friendly test automation assistant helping someone set up automated browser tests.\n"
+            "The user needs to share the URL of the web page they want to test — but they haven't yet.\n\n"
+            "Based on what they said, respond in 1-2 short, conversational sentences.\n"
+            "Your only goal is to naturally guide them to share the URL.\n\n"
+            "Rules:\n"
+            "- If they describe a feature or page (e.g. 'login page', 'dashboard') → ask for its URL warmly.\n"
+            "- If they seem confused about what to provide → briefly explain you need the page URL (e.g. https://app.example.com/login).\n"
+            "- If they typed something that looks like a partial URL (missing https, has spaces) → gently ask them to share the full URL.\n"
+            "- Never give long explanations. Be warm, concise, and human.\n"
+            "- Do NOT repeat or echo what they said back to them verbatim.\n"
+        )
+    else:
+        system_prompt = (
+            "You are a friendly test automation assistant. Respond helpfully and concisely (1-3 sentences)."
+        )
+
+    prompt = f"{system_prompt}\n\nUser message: \"{request.user_message}\"\n\nYour response:"
+
+    try:
+        response_text = agent.call_llm(prompt).strip()
+    except Exception as e:
+        print(f"[chat-freeform] LLM call failed: {e}")
+        response_text = "Could you share the URL of the page you'd like to test? (e.g. https://yourapp.com/login)"
+
+    return {"message": response_text}
+
+
+# ---------------------------------------------------------------------------
 # POST /chat-message — unified LLM-classified intent entry point
 # ---------------------------------------------------------------------------
 
@@ -2828,6 +2895,15 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                     "expected_results": tc.get("expected_results", []),
                     "test_data": partial_suite.get("test_data", {}),
                     "error": r.get("error"),
+                    # Failure diagnostics — only meaningful when status is failed
+                    "failed_steps": [
+                        s for s in r.get("steps", []) if s.get("status") == "FAILED"
+                    ] if r.get("status") != "PASSED" else [],
+                    "console_errors": [
+                        m for m in r.get("console_log", [])
+                        if any(kw in m.lower() for kw in ("error", "warning", "failed", "uncaught", "401", "403", "404", "500"))
+                    ] if r.get("status") != "PASSED" else [],
+                    "network_errors": r.get("network_errors", []) if r.get("status") != "PASSED" else [],
                 }
                 for tc, r in zip(selected, all_results)
             ]

@@ -2350,6 +2350,125 @@
   flex-shrink: 0;
 }
 
+/* Wrapper block for each test case row + its failure detail panel */
+.genExecTcBlock {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Failure detail panel shown below a failed test case row */
+.genExecTcDetail {
+  background: #fff8f8;
+  border-top: 1px solid #fecaca;
+  border-bottom: 1px solid #fecaca;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.75rem;
+}
+
+.genExecDetailLabel {
+  font-weight: 600;
+  color: #991b1b;
+  margin-bottom: 2px;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+}
+
+.genExecFailReason {
+  color: #7f1d1d;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.genExecFailedSteps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.genExecFailedStep {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: #fef2f2;
+  border-left: 3px solid #f87171;
+  padding: 4px 8px;
+  border-radius: 0 4px 4px 0;
+}
+
+.genExecStepNum {
+  font-weight: 600;
+  color: #dc2626;
+  font-size: 0.7rem;
+}
+
+.genExecStepInstr {
+  color: #374151;
+  line-height: 1.4;
+}
+
+.genExecStepErr {
+  color: #9f1239;
+  font-style: italic;
+  word-break: break-all;
+}
+
+.genExecNetErrors {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.genExecNetError {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.genExecStatusBadge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.genExecStatus4xx {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.genExecStatus5xx {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.genExecNetUrl {
+  color: #4b5563;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.genExecConsoleErrors {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.genExecConsoleMsg {
+  font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', monospace;
+  font-size: 0.7rem;
+  color: #7f1d1d;
+  background: #fff1f2;
+  padding: 2px 6px;
+  border-radius: 3px;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
 /* URL input row shown in url_input phase */
 .genUrlInputRow {
   display: flex;

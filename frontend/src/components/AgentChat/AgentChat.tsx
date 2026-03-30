@@ -959,6 +959,15 @@ export const AgentChat = () => {
       return;
     }
 
+    // Capture history BEFORE adding the current user message (state update is async)
+    const chatHistory = messages
+      .filter(m => m.type === 'user' || m.type === 'agent')
+      .slice(-6)
+      .map(m => ({
+        role: (m.type === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: m.content,
+      }));
+
     // Add user message
     addMessage('user', command);
 
@@ -973,7 +982,8 @@ export const AgentChat = () => {
         rawData || undefined,
         useStore.getState().testSuite || undefined,
         llmProvider,
-        llmOptions[llmProvider].model
+        llmOptions[llmProvider].model,
+        chatHistory
       );
 
       clearAgentState();

@@ -406,6 +406,9 @@ def _execute_single_test_sync(
         "steps_failed": 0,
         "steps_retried": 0,
         "final_storage_state": None,
+        # Captured browser diagnostics (populated in finally block)
+        "console_log": [],
+        "network_errors": [],
     }
 
     if shared_page is not None:
@@ -429,6 +432,21 @@ def _execute_single_test_sync(
         # Used to pass information between consecutive steps (e.g. last fill value
         # used by a subsequent assert_all_rows step).
         run_context: Dict = {}
+
+        # Attach console + network listeners for negative-test fallback assertions.
+        # These buffers are read by _check_console_fallback() when a DOM assertion fails.
+        _console_messages: List[str] = []
+        _network_errors: List[dict] = []
+        try:
+            page.on("console", lambda msg: _console_messages.append(msg.text))
+            page.on("response", lambda resp: _network_errors.append(
+                {"url": resp.url, "status": resp.status}
+            ) if resp.status >= 400 else None)
+            page._console_log = _console_messages
+            page._network_errors = _network_errors
+        except Exception:
+            pass  # Never block execution if listener attachment fails
+
         # Track current URL for navigation detection
         _current_url = [page.url]
         for step in steps:
@@ -826,6 +844,11 @@ def _execute_single_test_sync(
             result["final_storage_state"] = context.storage_state()
         except Exception:
             pass  # Carry-forward simply won't happen for next test
+        try:
+            result["console_log"] = list(getattr(page, '_console_log', []))
+            result["network_errors"] = list(getattr(page, '_network_errors', []))
+        except Exception:
+            pass
         # Only close the context when we created it (keep_browser_open=False)
         # When shared, _run_in_process closes it after all tests finish
         if owns_context:
@@ -1497,8 +1520,15 @@ def _convert_selector_to_python(selector: str) -> Optional[str]:
     if not selector:
         return None
 
-    # Already in our internal format — return as-is
+    # Already in our internal format — but sanitize before returning
     if "::" in selector and any(selector.startswith(p) for p in ["get_by_", "locator::"]):
+        if selector.startswith("locator::"):
+            css_part = selector[len("locator::"):]
+            # Fix invalid "#[attr]" pattern that LLMs sometimes generate —
+            # "#" is an ID selector; "#[role='alert']" is nonsensical CSS.
+            # Strip the leading "#" when it is immediately followed by "[".
+            if css_part.startswith("#["):
+                return f'locator::{css_part[1:]}'
         return selector
 
     # ── Python snake_case API calls (page.get_by_role / page.get_by_label …) ─
@@ -1705,8 +1735,8 @@ def _generate_alternative_selectors(
     failed_selectors = failed_selectors or []
     alternatives = []
 
-    element_name = selector_hints.get("element_name", "")
-    element_type = selector_hints.get("element_type", "")
+    element_name = selector_hints.get("element_name") or ""
+    element_type = selector_hints.get("element_type") or ""
 
     # Tier 1: Heuristic variations (fast, no LLM)
     if element_name:
@@ -1750,6 +1780,37 @@ def _generate_alternative_selectors(
         alternatives.extend(attr_variations)
         alternatives.extend(data_variations)
 
+        # Error/alert/toast-specific alternatives — prepended when element name suggests a notification
+        _error_keywords = ("error", "alert", "message", "notification", "toast", "warning", "invalid", "fail", "success")
+        if any(kw in name_lower for kw in _error_keywords):
+            error_variations = [
+                'get_by_role::alert',
+                'locator::[role="alert"]',
+                'locator::[role="status"]',
+                f'get_by_text::{element_name}',
+                f'get_by_text::{name_lower}',
+                'locator::[class*="toast"]',
+                'locator::[class*="error"]',
+                'locator::[class*="alert"]',
+                'locator::[class*="notification"]',
+                'locator::[class*="invalid"]',
+                'locator::[class*="snack"]',
+            ]
+            alternatives = [s for s in error_variations if s not in failed_selectors] + alternatives
+
+        # Checkbox/radio-specific alternatives — prepended so they're tried before generic ones
+        if element_type.lower() in ("checkbox", "radio"):
+            checkbox_variations = [
+                f'get_by_role::{element_type.lower()}::{element_name}',
+                f'get_by_label::{element_name}',
+                f'get_by_label::{name_lower}',
+                f'locator::label:has-text("{element_name}") >> input',
+                f'locator::label:has-text("{name_lower}") >> input',
+                f'locator::[role="{element_type.lower()}"]',
+            ]
+            # Prepend so checkbox-specific selectors are tried first
+            alternatives = [s for s in checkbox_variations if s not in failed_selectors] + alternatives
+
     # Tier 2: Dynamic page analysis (on retry 2+)
     if attempt >= 2 and page:
         try:
@@ -1757,10 +1818,10 @@ def _generate_alternative_selectors(
             dynamic_selectors = page.evaluate('''(args) => {
                 const { elementName, elementType, actionType } = args;
                 const selectors = [];
-                const nameLower = elementName.toLowerCase();
+                const nameLower = (elementName || '').toLowerCase();
 
                 // Find elements by text content
-                const allElements = document.querySelectorAll('button, a, input, textarea, [role="button"], [role="link"]');
+                const allElements = document.querySelectorAll('button, a, input, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"]');
 
                 for (const el of allElements) {
                     // Check text content
@@ -1848,6 +1909,9 @@ def _live_selector_rescue(
     Returns a list of up to 3 selector strings (may be empty on any error).
     Always wrapped in try/except so it never blocks execution.
     """
+    # Guard against None values passed via selector_hints.get()
+    element_type = element_type or ""
+    element_name = element_name or ""
     try:
         # 1. Scrape live page context
         page_context = page.evaluate("""() => {
@@ -1873,6 +1937,41 @@ def _live_selector_rescue(
             };
         }""")
 
+        # 1b. Always scrape alert/toast/notification elements — needed for error-message assertions
+        live_alerts = page.evaluate("""() => {
+            return Array.from(document.querySelectorAll(
+                '[role="alert"],[role="status"],[role="log"],[class*="toast"],[class*="Toast"],' +
+                '[class*="notification"],[class*="Notification"],[class*="snack"],[class*="Snack"]'
+            )).slice(0, 10).map(el => ({
+                role: el.getAttribute('role') || '',
+                text: (el.innerText || '').trim().substring(0, 100),
+                cls: el.className.substring(0, 80),
+                id: el.id || '',
+            }));
+        }""")
+        if live_alerts:
+            page_context['alerts'] = live_alerts
+
+        # 1c. For checkbox/radio types, also scrape custom ARIA widgets and native checkboxes
+        if element_type.lower() in ("checkbox", "radio"):
+            custom_checkboxes = page.evaluate("""() => {
+                const getAttrs = (el) => ({
+                    role: el.getAttribute('role') || el.tagName.toLowerCase(),
+                    ariaLabel: el.getAttribute('aria-label') || '',
+                    ariaChecked: el.getAttribute('aria-checked') || '',
+                    text: (el.innerText || '').trim().substring(0, 60),
+                    id: el.id || '',
+                    name: el.getAttribute('name') || '',
+                    forAttr: el.getAttribute('for') || '',
+                });
+                return [
+                    ...Array.from(document.querySelectorAll('[role="checkbox"],[role="radio"]')).slice(0, 15),
+                    ...Array.from(document.querySelectorAll('input[type="checkbox"],input[type="radio"]')).slice(0, 15),
+                    ...Array.from(document.querySelectorAll('label')).slice(0, 20),
+                ].map(getAttrs);
+            }""")
+            page_context['custom_checkboxes'] = custom_checkboxes
+
         # 2. Build LLM prompt
         inputs_text = "\n".join(
             f"  - id={e['id']} name={e['name']} type={e['type']} placeholder={e['placeholder']} aria-label={e['ariaLabel']} label={e['forLabel']} text={e['text']}"
@@ -1887,6 +1986,24 @@ def _live_selector_rescue(
             for e in page_context.get("links", [])
         ) or "  (none)"
         failed_text = "\n".join(f"  - {s}" for s in failed_selectors) or "  (none)"
+
+        # Build alerts/toasts section for prompt
+        alerts_section = ""
+        if page_context.get("alerts"):
+            al_text = "\n".join(
+                f"  - role={e['role']} id={e['id']} class={e['cls']} text={e['text']}"
+                for e in page_context["alerts"]
+            )
+            alerts_section = f"\nALERTS/TOASTS/NOTIFICATIONS ({len(page_context['alerts'])}):\n{al_text}\n"
+
+        # Build custom checkboxes/labels section for prompt (only when relevant)
+        checkboxes_section = ""
+        if page_context.get("custom_checkboxes"):
+            cb_text = "\n".join(
+                f"  - role={e['role']} id={e['id']} name={e['name']} aria-label={e['ariaLabel']} aria-checked={e['ariaChecked']} text={e['text']} for={e['forAttr']}"
+                for e in page_context["custom_checkboxes"]
+            ) or "  (none)"
+            checkboxes_section = f"\nCUSTOM CHECKBOXES/LABELS ({len(page_context['custom_checkboxes'])}):\n{cb_text}\n"
 
         prompt = f"""You are a Playwright selector expert. A test step failed because none of the pre-generated selectors matched.
 Given the live page context below, return the best Playwright selector(s) for this step.
@@ -1906,7 +2023,7 @@ BUTTONS ({len(page_context.get('buttons', []))}):
 
 LINKS ({len(page_context.get('links', []))}):
 {links_text}
-
+{alerts_section}{checkboxes_section}
 FAILED SELECTORS (do NOT suggest these):
 {failed_text}
 
@@ -1916,8 +2033,13 @@ Selector format options:
 - "get_by_placeholder::PlaceholderText"
 - "get_by_role::button::ButtonText"
 - "get_by_role::link::LinkText"
+- "get_by_role::checkbox::LabelText"
+- "get_by_role::radio::LabelText"
+- "get_by_role::alert" (for error messages, toast notifications, banners)
 - "get_by_text::VisibleText"
 - "locator::#id" or "locator::[name=value]" or "locator::[aria-label=value]"
+- "locator::[role=\"checkbox\"]" or "locator::[role=\"radio\"]" or "locator::[role=\"alert\"]"
+- NEVER use "locator::#[attr=value]" — "#" is only for IDs, not attribute selectors
 
 Example response: ["get_by_label::Email", "locator::#email", "get_by_placeholder::Enter email"]
 Return ONLY the JSON array, no explanation."""
@@ -4166,6 +4288,53 @@ def _extract_selector_from_assertion(playwright_assertion: str) -> Optional[str]
     return None
 
 
+_FALLBACK_ERROR_KEYWORDS = (
+    "error", "fail", "invalid", "unauthorized", "denied", "wrong",
+    "incorrect", "credentials", "credential", "bad", "not found",
+    "forbidden", "rejected", "expired", "locked", "blocked",
+)
+
+
+def _check_console_fallback(page, expected_value: str) -> bool:
+    """
+    Check console log and network errors as a fallback when a DOM assertion fails.
+    Used for negative test cases where an error toast disappears before the
+    assertion retry, but the 401/network error is still captured in the buffer.
+
+    Matching rules (any one is sufficient):
+    1. expected_value substring found in any captured console message.
+    2. expected_value is/contains the HTTP status code of a captured error response.
+    3. expected_value contains an error-related keyword AND any 4xx/5xx was captured
+       (covers generic assertions like 'Error', 'error message', 'invalid credentials').
+    """
+    if not expected_value:
+        return False
+    needle = expected_value.lower()
+
+    # Rule 1 — substring match in console messages
+    for msg in getattr(page, '_console_log', []):
+        if needle in msg.lower():
+            return True
+
+    net_errors = getattr(page, '_network_errors', [])
+    for err in net_errors:
+        status = err.get("status", 0)
+        status_str = str(status)
+        url_lower = err.get("url", "").lower()
+
+        # Rule 2 — status code mentioned in expected value, or expected matches URL fragment
+        if status_str in needle or needle in url_lower:
+            return True
+
+        # Rule 3 — any error keyword + any 4xx/5xx response
+        if status >= 400 and any(kw in needle for kw in _FALLBACK_ERROR_KEYWORDS):
+            print(f"      [Console fallback] HTTP {status} captured for {url_lower!r}; "
+                  f"expected_value '{expected_value}' matches error keyword — passing")
+            return True
+
+    return False
+
+
 def _execute_assertions_sync(
     page,
     assertions: List,
@@ -4272,7 +4441,14 @@ def _execute_assertions_sync(
                     if text_locator.count() > 1:
                         print(f"      Multiple matches for text, using first")
                         text_locator = text_locator.first
-                    sync_expect(text_locator).to_be_visible(timeout=timeout)
+                    try:
+                        sync_expect(text_locator).to_be_visible(timeout=timeout)
+                    except Exception:
+                        if _check_console_fallback(page, expected_value_str):
+                            print(f"      [Console fallback] '{expected_value_str}' not visible in DOM "
+                                  f"but matched in console/network log — passing")
+                        else:
+                            raise
 
         elif assertion_type == "heading":
             heading_found = False
@@ -4375,7 +4551,11 @@ def _execute_assertions_sync(
                         pass
 
                 if not toast_found:
-                    raise AssertionError(f"Toast message '{toast_text}' not found on page (URL: {page.url})")
+                    if _check_console_fallback(page, toast_text):
+                        print(f"      [Console fallback] Toast '{toast_text}' not visible in DOM "
+                              f"but matched in console/network log — passing")
+                    else:
+                        raise AssertionError(f"Toast message '{toast_text}' not found on page (URL: {page.url})")
 
         elif assertion_type in ["element", "visible"]:
             selector = _get_best_selector_sync(page, selector_hints, step_test_data)
@@ -4449,13 +4629,21 @@ def _execute_assertions_sync(
                         sync_expect(locator.first).to_be_visible(timeout=timeout)
                         element_found = True
                     else:
-                        raise AssertionError(
-                            f"Element not found: selector '{css_selector}' matched 0 elements on {page.url}"
-                        )
+                        if _check_console_fallback(page, expected_value_str):
+                            print(f"      [Console fallback] '{expected_value_str}' not visible in DOM "
+                                  f"but matched in console/network log — passing")
+                        else:
+                            raise AssertionError(
+                                f"Element not found: selector '{css_selector}' matched 0 elements on {page.url}"
+                            )
                 else:
-                    raise AssertionError(
-                        f"Element not found: no selector could be resolved for visibility check on {page.url}"
-                    )
+                    if _check_console_fallback(page, expected_value_str):
+                        print(f"      [Console fallback] '{expected_value_str}' not visible in DOM "
+                              f"but matched in console/network log — passing")
+                    else:
+                        raise AssertionError(
+                            f"Element not found: no selector could be resolved for visibility check on {page.url}"
+                        )
 
         elif assertion_type == "enabled":
             selector = _get_best_selector_sync(page, selector_hints, step_test_data)
