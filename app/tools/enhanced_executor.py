@@ -495,13 +495,19 @@ def _execute_single_test_sync(
             print(f"\n  Step {step_num}: {instruction[:60]}...")
             print(f"    Action: {action_type}")
 
-            # Send step started update
+            # Send step started update (include current browser URL so frontend
+            # can store the exact URL before this step executes — used by Rerun)
+            try:
+                _step_start_url = page.url
+            except Exception:
+                _step_start_url = ""
             step_update("step_started", {
                 "message": f"Step {step_num}: {instruction[:60]}...",
                 "step_number": step_num,
                 "total_steps": total_steps,
                 "action": action_type,
-                "instruction": instruction
+                "instruction": instruction,
+                "current_url": _step_start_url,
             })
 
             # Capture screenshot at step start to show current browser state

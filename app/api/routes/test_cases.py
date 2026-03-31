@@ -2371,6 +2371,9 @@ class ChatExecuteRequest(PydanticBaseModel):
     max_retries: int = 1
     input_data: Optional[dict] = None   # frontend-parsed key-value pairs (fast path)
     input_text: Optional[str] = None    # raw user message for LLM contextual re-extraction
+    start_url: Optional[str] = None     # if set, navigate browser here before running (used by Rerun)
+    tc_ids: Optional[List[str]] = None  # if set, select TCs by ID directly (bypasses text parsing)
+    tc_definition: Optional[dict] = None  # full TC object {id, name, steps, ...} for Rerun (bypasses session lookup)
 
 
 class ChatExecuteResponse(PydanticBaseModel):
@@ -2401,15 +2404,34 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
 
     last_suite = get_last_test_suite(request.session_id)
     if not last_suite:
+        # Fallback: if the browser navigated to a new page after the last run,
+        # _do_page_scrape clears last_test_suite. Use the snapshot saved at
+        # execution start so Rerun still works.
+        last_suite = session.get("last_executed_test_suite")
+    if not last_suite:
         raise HTTPException(status_code=400, detail="No test cases available. Please generate test cases first.")
 
     all_tcs = last_suite.get("test_cases", [])
     if not all_tcs:
         raise HTTPException(status_code=400, detail="The test suite has no test cases to execute.")
 
-    selected = _parse_tc_selection(request.user_message, all_tcs)
-    if not selected:
-        selected = all_tcs
+    # Rerun path: frontend sends the full TC definition — use it directly so IDs
+    # never drift between frontend state and backend session.
+    if request.tc_definition:
+        selected = [request.tc_definition]
+        print(f"[chat-execute] Rerun via tc_definition: id={request.tc_definition.get('id')} name={request.tc_definition.get('name')}")
+    else:
+        # If tc_ids provided, select by ID directly (bypasses text parsing)
+        all_tc_ids = [tc.get("id") for tc in all_tcs]
+        print(f"[chat-execute] tc_ids={request.tc_ids} | all_tcs={all_tc_ids}")
+        if request.tc_ids:
+            selected = [tc for tc in all_tcs if tc.get("id") in request.tc_ids]
+            if not selected:
+                print(f"[chat-execute] WARNING: tc_ids={request.tc_ids} matched nothing in {all_tc_ids}")
+        else:
+            selected = _parse_tc_selection(request.user_message, all_tcs)
+        if not selected:
+            selected = all_tcs
 
     exec_session_id = str(uuid.uuid4())
     set_execution_session(request.session_id, exec_session_id)
@@ -2420,6 +2442,10 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
 
     # Build a partial suite with only the selected test cases
     partial_suite = {**last_suite, "test_cases": selected}
+
+    # Snapshot the full suite before execution so Rerun can still work even if
+    # _do_page_scrape clears last_test_suite after browser navigation.
+    session["last_executed_test_suite"] = last_suite
 
     # Inject session credentials into test_data so executor uses them
     from app.core.chat_sessions import get_credentials, push_credentials
@@ -2620,6 +2646,7 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                             "step_number": msg.get("step_number", 0),
                             "total_steps": msg.get("total_steps", 0),
                             "instruction": msg.get("instruction", ""),
+                            "current_url": msg.get("current_url", ""),
                         })
                         await sse_manager.broadcast(exec_session_id, {
                             "type": "step_update",
@@ -2664,6 +2691,20 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
             )
             _timeout = request.timeout or _DEFAULT_TIMEOUT
 
+            # For Rerun (tc_ids provided): use the captured start_url, or fall back
+            # to the suite's base_url so the browser always navigates to a known page.
+            _effective_start_url = request.start_url or (
+                last_suite.get("base_url", "") if request.tc_ids else ""
+            )
+
+            # Show navigation message in chatbot before steps begin
+            if _effective_start_url:
+                await sse_manager.broadcast(exec_session_id, {
+                    "type": "rerun_navigating",
+                    "url": _effective_start_url,
+                    "message": f"Navigating to {_effective_start_url}...",
+                })
+
             # Run ALL selected test cases on the persistent browser thread.
             # Wrapped in a cancellable Task so /chat-stop can interrupt it.
             _suite_task = _asyncio.create_task(
@@ -2673,6 +2714,7 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                     update_queue,
                     _timeout,
                     None,  # signal_file — not used in chat-execute
+                    _effective_start_url,  # navigate here before running (Rerun support)
                 )
             )
 

@@ -87,7 +87,7 @@ export interface ExecutionResult {
   executed_at: string;
 }
 
-type View = 'generate' | 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest' | 'loadtest-logs' | 'loadtest-reports' | 'loadtest-insights' | 'settings' | 'projects';
+export type View = 'generate' | 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest' | 'loadtest-logs' | 'loadtest-reports' | 'loadtest-insights' | 'settings' | 'projects' | 'project-workspace';
 
 export interface ProjectSummary { name: string; test_count: number; }
 
@@ -196,6 +196,12 @@ interface AppState {
   // Navigation
   currentView: View;
   setCurrentView: (view: View) => void;
+
+  // Navigation guard for unsaved Excel edits
+  hasUnsavedEditChanges: boolean;
+  setHasUnsavedEditChanges: (v: boolean) => void;
+  pendingNavigation: View | null;
+  setPendingNavigation: (view: View | null) => void;
 
   // Execution Mode
   executionMode: ExecutionMode;
@@ -518,6 +524,12 @@ export const useStore = create<AppState>()(
       currentView: 'upload',
       setCurrentView: (view) => set({ currentView: view }),
 
+      // Navigation guard for unsaved Excel edits
+      hasUnsavedEditChanges: false,
+      setHasUnsavedEditChanges: (v) => set({ hasUnsavedEditChanges: v }),
+      pendingNavigation: null,
+      setPendingNavigation: (view) => set({ pendingNavigation: view }),
+
       // Execution Mode (Multi-Agent only)
       executionMode: 'multi-agent',
       setExecutionMode: (mode) => set({ executionMode: mode }),
@@ -737,6 +749,8 @@ export const useStore = create<AppState>()(
           expandedSteps: new Set(),
           uploadProgress: 0,
           isUploading: false,
+          hasUnsavedEditChanges: false,
+          pendingNavigation: null,
         });
       },
     }),

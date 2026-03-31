@@ -93,6 +93,8 @@ interface ExecTestResult {
   failed_steps?: FailedStep[];
   console_errors?: string[];
   network_errors?: NetworkError[];
+  start_url?: string;    // URL the browser was on when step 1 of this TC started
+  step_urls?: string[];  // URL per step: [url_step1, url_step2, ...]
 }
 
 interface ChatMsg {
@@ -107,6 +109,16 @@ interface ChatMsg {
   cost_usd?: number;
   session_total_tokens?: number;
   session_total_cost?: number;
+  tsrId?: string; // TSR rerun badge label e.g. "TSR_001"
+}
+
+interface RerunResult {
+  tsrId: string;
+  testId: string;
+  testName: string;
+  timestamp: string;
+  status: 'running' | 'passed' | 'failed';
+  error?: string;
 }
 
 function upsertExecStep(prev: ExecStepMsg[], incoming: ExecStepMsg): ExecStepMsg[] {
@@ -195,7 +207,7 @@ interface GenerateTestCaseProps {
 }
 
 export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) => {
-  const { llmProvider, setTestSuite, setCurrentView, addNotification, imageAnalysisEnabled, setProjectActiveSuite } = useStore();
+  const { llmProvider, setTestSuite, setCurrentView, addNotification, imageAnalysisEnabled, setProjectActiveSuite, setHasUnsavedEditChanges, pendingNavigation, setPendingNavigation } = useStore();
 
   // ── Mode ─────────────────────────────────────────────────────────────────
   const [mode, setMode] = useState<Mode>('generate');
@@ -241,6 +253,25 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const [execPanelView, setExecPanelView] = useState<'browser' | 'excel'>('browser');
   const [confirmedExecResults, setConfirmedExecResults] = useState<ExecTestResult[]>([]);
   const [confirmedTcIds, setConfirmedTcIds] = useState<Set<string>>(new Set());
+
+  // ── Excel edit mode ───────────────────────────────────────────────────────
+  const [isExcelEditMode, setIsExcelEditMode] = useState(false);
+  const [editedExcelData, setEditedExcelData] = useState<ExecTestResult[]>([]);
+  const [editedRowIds, setEditedRowIds] = useState<Set<string>>(new Set());
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+
+  // ── Rerun tracking ────────────────────────────────────────────────────────
+  const [rerunCounter, setRerunCounter] = useState(0);
+  const [rerunResults, setRerunResults] = useState<RerunResult[]>([]);
+  const rerunSessionRef = useRef<{ tsrId: string; testId: string } | null>(null);
+
+  // ── Per-step URL tracking ─────────────────────────────────────────────────
+  // Sync shadow of execCurrentUrl — always current inside SSE callbacks
+  const currentUrlRef = useRef<string>('');
+  // Captures browser URL at the start of every step: { testId: urlPerStep[] }
+  const stepUrlMapRef = useRef<Record<string, string[]>>({});
+
   // Last generated test suite (for suggestion buttons)
   const [lastTestSuite, setLastTestSuite] = useState<GeneratedSuite | null>(null);
   // Stored execute message to replay after user provides missing input data
@@ -841,7 +872,44 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         const summary = data.summary as ExecSummary;
         setExecSummary(summary);
         setChatPhase('chatting');
-        const tcResults = (data.tc_results as ExecTestResult[] | undefined) ?? [];
+        const rawTcResults = (data.tc_results as ExecTestResult[] | undefined) ?? [];
+
+        // Enrich each result with per-step URLs captured during execution
+        const tcResults: ExecTestResult[] = rawTcResults.map(r => ({
+          ...r,
+          step_urls: stepUrlMapRef.current[r.id] ?? [],
+          start_url: stepUrlMapRef.current[r.id]?.[0] ?? '',
+        }));
+        stepUrlMapRef.current = {}; // clear for next run
+
+        // If this was a rerun, update only that row rather than clearing all results
+        const currentRerun = rerunSessionRef.current;
+        if (currentRerun) {
+          const matchedTc = tcResults.find(r => r.id === currentRerun.testId)
+            ?? tcResults.find(r => r.name && currentRerun.testId && r.name.toLowerCase().includes(currentRerun.testId.toLowerCase()));
+          const newStatus = matchedTc?.status ?? (summary.failed > 0 ? 'failed' : 'passed');
+          setRerunResults(prev => prev.map(r =>
+            r.tsrId === currentRerun.tsrId ? { ...r, status: newStatus, error: matchedTc?.error } : r
+          ));
+          if (matchedTc) {
+            setConfirmedExecResults(prev =>
+              prev.map(r => r.id === matchedTc.id ? { ...matchedTc } : r)
+            );
+          }
+          rerunSessionRef.current = null;
+          const rerunDoneMsg: ChatMsg = {
+            id: `ca_${Date.now()}`,
+            role: 'assistant',
+            content: String(data.message ?? 'Rerun complete.'),
+            execSummary: summary,
+            execTestCases: tcResults,
+            tsrId: currentRerun.tsrId,
+          };
+          appendChatMsg(rerunDoneMsg);
+          lastExecMsgRef.current = rerunDoneMsg;
+          break;
+        }
+
         const execDoneMsg: ChatMsg = {
           id: `ca_${Date.now()}`,
           role: 'assistant',
@@ -865,7 +933,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         const navThinkingId = `nav_thinking_${Date.now()}`;
         chatThinkingIdRef.current = navThinkingId;
         setChatMessages(prev => [...prev, { id: navThinkingId, role: 'assistant', content: String(data.message ?? 'Analyzing the new page…'), thinking: true }]);
-        if (data.url) setExecCurrentUrl(String(data.url));
+        if (data.url) { setExecCurrentUrl(String(data.url)); currentUrlRef.current = String(data.url); }
         break;
       }
       case 'page_analysis_done': {
@@ -877,7 +945,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         if (navMsg) {
           appendChatMsg({ id: `nav_done_${Date.now()}`, role: 'assistant', content: navMsg });
         }
-        if (data.url) { setExecCurrentUrl(String(data.url)); setChatUrlInput(String(data.url)); }
+        if (data.url) { setExecCurrentUrl(String(data.url)); currentUrlRef.current = String(data.url); setChatUrlInput(String(data.url)); }
         // New page is ready — unblock the chat input so user can interact immediately
         // even if the background test execution hasn't fully completed yet
         setChatPhase(prev => prev === 'executing' ? 'chatting' : prev);
@@ -885,13 +953,13 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       }
       case 'exec_screenshot': {
         if (data.image_b64) setExecScreenshot(String(data.image_b64));
-        if (data.url) setExecCurrentUrl(String(data.url));
+        if (data.url) { setExecCurrentUrl(String(data.url)); currentUrlRef.current = String(data.url); }
         break;
       }
       case 'page_navigated': {
         const navUrl = String(data.url ?? '');
         const elemSummary = String(data.elements_summary ?? `Browser navigated to: ${navUrl}`);
-        if (navUrl) setExecCurrentUrl(navUrl);
+        if (navUrl) { setExecCurrentUrl(navUrl); currentUrlRef.current = navUrl; }
         if (data.image_b64) setExecScreenshot(String(data.image_b64));
         appendChatMsg({
           id: `nav_${Date.now()}`,
@@ -920,6 +988,25 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             m.id === msgId ? { ...m, content: stepContent } : m
           ));
         }
+        // Capture browser URL at the start of this step (irrespective of navigation).
+        // Prefer the URL sent directly from the backend (page.url before step executes).
+        if (stepNum > 0 && data.test_id) {
+          const stId = String(data.test_id);
+          const stepUrl = String(data.current_url || currentUrlRef.current || '');
+          const existing = stepUrlMapRef.current[stId] ?? [];
+          existing[stepNum - 1] = stepUrl;
+          stepUrlMapRef.current[stId] = existing;
+        }
+        break;
+      }
+      case 'rerun_navigating': {
+        // Browser is navigating to start_url before executing steps
+        const navTarget = String(data.url ?? data.message ?? '');
+        appendChatMsg({
+          id: `rerun_nav_${Date.now()}`,
+          role: 'assistant',
+          content: `Navigating to ${navTarget} before running test...`,
+        });
         break;
       }
       case 'agent_phase':
@@ -951,6 +1038,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     setExecSummary(null);
     setExecScreenshot(null);
     setExecCurrentUrl('');
+    currentUrlRef.current = '';
+    stepUrlMapRef.current = {};
     setExecPanelView('browser');
     setConfirmedExecResults([]);
     setConfirmedTcIds(new Set());
@@ -1002,6 +1091,178 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       addNotification('error', `Execute failed: ${msg}`);
     }
   };
+
+  // ── Excel edit handlers ───────────────────────────────────────────────────
+
+  const handleExcelCellEdit = (id: string, field: 'name' | 'expected_results', value: string) => {
+    setEditedExcelData(prev => prev.map(r => {
+      if (r.id !== id) return r;
+      return field === 'expected_results'
+        ? { ...r, expected_results: value.split(';').map(s => s.trim()).filter(Boolean) }
+        : { ...r, [field]: value };
+    }));
+    setEditedRowIds(prev => new Set([...prev, id]));
+    setHasUnsavedChanges(true);
+    setHasUnsavedEditChanges(true);
+  };
+
+  const handleExcelStepsEdit = (id: string, value: string) => {
+    const lines = value.split('\n').filter(l => l.trim());
+    setEditedExcelData(prev => prev.map(r => {
+      if (r.id !== id) return r;
+      const newSteps = lines.map((line, i) => {
+        const existing = r.steps[i];
+        const instruction = line.replace(/^\d+\.\s*/, '').trim();
+        return existing
+          ? { ...existing, instruction }
+          : { ...r.steps[0], step_number: i + 1, instruction };
+      });
+      return { ...r, steps: newSteps };
+    }));
+    setEditedRowIds(prev => new Set([...prev, id]));
+    setHasUnsavedChanges(true);
+    setHasUnsavedEditChanges(true);
+  };
+
+  const handleExcelInputDataEdit = (id: string, value: string) => {
+    const testData: Record<string, string> = {};
+    value.split('\n').filter(l => l.includes(':')).forEach(line => {
+      const colonIdx = line.indexOf(':');
+      if (colonIdx > 0) {
+        const k = line.slice(0, colonIdx).trim();
+        const v = line.slice(colonIdx + 1).trim();
+        if (k && v) testData[k] = v;
+      }
+    });
+    setEditedExcelData(prev => prev.map(r =>
+      r.id === id ? { ...r, test_data: testData } : r
+    ));
+    setEditedRowIds(prev => new Set([...prev, id]));
+    setHasUnsavedChanges(true);
+    setHasUnsavedEditChanges(true);
+  };
+
+  const handleExcelEditSave = () => {
+    setConfirmedExecResults([...editedExcelData]);
+    setHasUnsavedChanges(false);
+    setHasUnsavedEditChanges(false);
+    setIsExcelEditMode(false);
+    setShowDiscardConfirm(false);
+  };
+
+  const handleExcelEditCancel = () => {
+    if (hasUnsavedChanges) {
+      setShowDiscardConfirm(true);
+    } else {
+      setIsExcelEditMode(false);
+      setShowDiscardConfirm(false);
+    }
+  };
+
+  const handleExcelEditDiscard = () => {
+    setIsExcelEditMode(false);
+    setHasUnsavedChanges(false);
+    setHasUnsavedEditChanges(false);
+    setShowDiscardConfirm(false);
+    setEditedExcelData([]);
+    setEditedRowIds(new Set());
+  };
+
+  // ── Rerun handler ─────────────────────────────────────────────────────────
+
+  const handleExcelRerun = async (tc: ExecTestResult) => {
+    if (!chatSessionId) return;
+
+    const newCounter = rerunCounter + 1;
+    setRerunCounter(newCounter);
+    const tsrId = `TSR_${String(newCounter).padStart(3, '0')}`;
+
+    const rerunEntry: RerunResult = {
+      tsrId,
+      testId: tc.id,
+      testName: tc.name,
+      timestamp: new Date().toISOString(),
+      status: 'running',
+    };
+    setRerunResults(prev => [...prev, rerunEntry]);
+
+    // Reset exec display state but preserve confirmedExecResults
+    execStepMsgIdRef.current = null;
+    setExecSteps([]);
+    setExecSummary(null);
+    setExecScreenshot(null);
+    setExecCurrentUrl('');
+    currentUrlRef.current = '';
+    stepUrlMapRef.current = {};
+    setExecPanelView('browser');
+    setChatPhase('executing');
+
+    // Tag so SSE handler knows this is a rerun
+    rerunSessionRef.current = { tsrId, testId: tc.id };
+
+    // Add TSR badge message to chat
+    appendChatMsg({
+      id: `tsr_${Date.now()}`,
+      role: 'assistant',
+      content: `Rerunning: _${tc.name.replace(/\*+/g, '').trim()}_`,
+      tsrId,
+    });
+
+    try {
+      const body: Record<string, unknown> = {
+        session_id: chatSessionId,
+        user_message: `execute "${tc.name.replace(/\*+/g, '').trim()}"`,
+        llm_provider: selectedProvider,
+        headless: true,
+        timeout: 30000,
+        start_url: tc.start_url ?? '',  // navigate here before running the test case
+        tc_ids: [tc.id],                // fallback: ID-based selection
+        // Send the full TC definition so backend never needs to look it up by ID —
+        // this prevents drift when session IDs don't match frontend state.
+        tc_definition: {
+          id: tc.id,
+          name: tc.name.replace(/\*+/g, '').trim(),
+          steps: tc.steps ?? [],
+          expected_results: tc.expected_results ?? [],
+        },
+      };
+
+      const res = await fetch(`${API_BASE}/api/v1/chat-execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || 'Server error');
+      }
+      const data = await res.json();
+      setExecSessionId(data.exec_session_id);
+      connectExecutionSSE(data.exec_session_id);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setRerunResults(prev => prev.map(r =>
+        r.tsrId === tsrId ? { ...r, status: 'failed', error: msg } : r
+      ));
+      rerunSessionRef.current = null;
+      setChatPhase('chatting');
+      addNotification('error', `Rerun failed: ${msg}`);
+    }
+  };
+
+  // ── Navigation guard ──────────────────────────────────────────────────────
+
+  const handleLeaveAnyway = () => {
+    const dest = pendingNavigation;
+    setHasUnsavedChanges(false);
+    setHasUnsavedEditChanges(false);
+    setIsExcelEditMode(false);
+    setShowDiscardConfirm(false);
+    setPendingNavigation(null);
+    if (dest) setCurrentView(dest);
+  };
+
+  // ── Chat send ─────────────────────────────────────────────────────────────
 
   const handleChatSend = async () => {
     const text = chatTextInput.trim();
@@ -1613,17 +1874,45 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             <span className={styles.recExcelBadge}>{confirmedExecResults.length}</span>
           )}
         </button>
-        {/* Export Excel — pinned to the far right of the tab bar */}
-        <button
-          className={styles.genExecExportBtn}
-          onClick={() => setShowExportConfirm(true)}
-          disabled={confirmedExecResults.length === 0}
-          title={confirmedExecResults.length === 0 ? 'No results added to Excel view yet' : 'Export confirmed results to Excel'}
-          style={{ marginLeft: 'auto' }}
-        >
-          <FileSpreadsheet size={13} />
-          Export Excel
-        </button>
+        {/* Right-side action buttons */}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+          {execPanelView === 'excel' && !isExcelEditMode && (
+            <button
+              className={styles.genExecEditBtn}
+              onClick={() => {
+                setEditedExcelData([...confirmedExecResults]);
+                setEditedRowIds(new Set());
+                setHasUnsavedChanges(false);
+                setShowDiscardConfirm(false);
+                setIsExcelEditMode(true);
+              }}
+              disabled={confirmedExecResults.length === 0}
+              title={confirmedExecResults.length === 0 ? 'No results to edit' : 'Edit test cases'}
+            >
+              <Pencil size={13} />
+              Edit
+            </button>
+          )}
+          {execPanelView === 'excel' && isExcelEditMode && (
+            <>
+              <button className={styles.excelEditSaveBtn} onClick={handleExcelEditSave}>
+                <Save size={13} /> Save
+              </button>
+              <button className={styles.excelEditCancelBtn} onClick={handleExcelEditCancel}>
+                Cancel
+              </button>
+            </>
+          )}
+          <button
+            className={styles.genExecExportBtn}
+            onClick={() => setShowExportConfirm(true)}
+            disabled={confirmedExecResults.length === 0}
+            title={confirmedExecResults.length === 0 ? 'No results added to Excel view yet' : 'Export confirmed results to Excel'}
+          >
+            <FileSpreadsheet size={13} />
+            Export Excel
+          </button>
+        </div>
       </div>
       {/* Browser view */}
       {execPanelView === 'browser' && (
@@ -1677,39 +1966,91 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           ) : (
             <div className={styles.genExcelTable}>
               <div className={styles.recExcelCorner} />
-              {['A','B','C','D','E','F','G'].map(l => (
+              {['A','B','C','D','E','F','G','H'].map(l => (
                 <div key={l} className={styles.recExcelLetterCell}>{l}</div>
               ))}
               <div className={`${styles.recExcelCell} ${styles.recExcelRowNumHeader}`}>Row</div>
-              {['T.C.No','Test Case','Steps','Expected Result','Input Data','Status','Error'].map(h => (
+              {['T.C.No','Test Case','Steps','Expected Result','Input Data','Status','Error','Test Runs'].map(h => (
                 <div key={h} className={`${styles.recExcelCell} ${styles.recExcelHeaderCell}`}>{h}</div>
               ))}
-              {confirmedExecResults.map((r, idx) => {
+              {(isExcelEditMode ? editedExcelData : confirmedExecResults).map((r, idx) => {
                 const rowCls = r.status === 'passed' ? styles.recExcelRowPassed : styles.recExcelRowFailed;
+                const isEdited = isExcelEditMode && editedRowIds.has(r.id);
                 return (
                   <React.Fragment key={r.id}>
                     <div className={`${styles.recExcelCell} ${styles.recExcelRowNumCell} ${rowCls}`}>{idx + 1}</div>
+                    {/* T.C.No — read-only */}
                     <div className={`${styles.recExcelCell} ${rowCls}`}>{idx + 1}</div>
-                    <div className={`${styles.recExcelCell} ${rowCls}`}>{r.name.replace(/\*+/g, '').replace(/^[-\s]+/, '').trim()}</div>
-                    <div className={`${styles.recExcelCell} ${styles.recExcelStepsCell} ${rowCls}`}>
-                      {r.steps.map((s, i) => (
-                        <span key={i}>{i + 1}. {s.instruction}{i < r.steps.length - 1 ? '\n' : ''}</span>
-                      ))}
+                    {/* Test Case — editable in edit mode */}
+                    <div className={`${styles.recExcelCell} ${rowCls} ${isEdited ? styles.recExcelCellEdited : ''}`}>
+                      {isExcelEditMode ? (
+                        <textarea
+                          className={styles.excelEditTextarea}
+                          value={r.name.replace(/\*+/g, '').replace(/^[-\s]+/, '').trim()}
+                          onChange={e => handleExcelCellEdit(r.id, 'name', e.target.value)}
+                        />
+                      ) : (
+                        r.name.replace(/\*+/g, '').replace(/^[-\s]+/, '').trim()
+                      )}
                     </div>
+                    {/* Steps — editable in edit mode */}
+                    <div className={`${styles.recExcelCell} ${styles.recExcelStepsCell} ${rowCls} ${isEdited ? styles.recExcelCellEdited : ''}`}>
+                      {isExcelEditMode ? (
+                        <textarea
+                          className={styles.excelEditTextarea}
+                          value={r.steps.map((s, i) => `${i + 1}. ${s.instruction}`).join('\n')}
+                          onChange={e => handleExcelStepsEdit(r.id, e.target.value)}
+                          rows={Math.max(3, r.steps.length)}
+                        />
+                      ) : (
+                        r.steps.map((s, i) => (
+                          <span key={i}>{i + 1}. {s.instruction}{i < r.steps.length - 1 ? '\n' : ''}</span>
+                        ))
+                      )}
+                    </div>
+                    {/* Expected Result — read-only */}
                     <div className={`${styles.recExcelCell} ${rowCls}`}>{r.expected_results?.join('; ') || 'N/A'}</div>
-                    <div className={`${styles.recExcelCell} ${rowCls}`}>
-                      {Object.entries(r.test_data || {}).flatMap(([k, v]) =>
-                        v && typeof v === 'object'
-                          ? Object.entries(v as Record<string, unknown>).map(([ik, iv]) => `${ik}: ${iv}`)
-                          : [`${k}: ${v}`]
-                      ).join(' | ')}
+                    {/* Input Data — editable in edit mode */}
+                    <div className={`${styles.recExcelCell} ${rowCls} ${isEdited ? styles.recExcelCellEdited : ''}`}>
+                      {isExcelEditMode ? (
+                        <textarea
+                          className={styles.excelEditTextarea}
+                          value={Object.entries(r.test_data || {}).flatMap(([k, v]) =>
+                            v && typeof v === 'object'
+                              ? Object.entries(v as Record<string, unknown>).map(([ik, iv]) => `${ik}: ${iv}`)
+                              : [`${k}: ${v}`]
+                          ).join('\n')}
+                          onChange={e => handleExcelInputDataEdit(r.id, e.target.value)}
+                        />
+                      ) : (
+                        Object.entries(r.test_data || {}).flatMap(([k, v]) =>
+                          v && typeof v === 'object'
+                            ? Object.entries(v as Record<string, unknown>).map(([ik, iv]) => `${ik}: ${iv}`)
+                            : [`${k}: ${v}`]
+                        ).join(' | ')
+                      )}
                     </div>
+                    {/* Status — read-only */}
                     <div className={`${styles.recExcelCell} ${styles.recExcelStatusCell} ${rowCls}`}>
                       {r.status === 'passed'
                         ? <span className={styles.recExcelBadgePassed}>✓ PASSED</span>
                         : <span className={styles.recExcelBadgeFailed}>✗ FAILED</span>}
                     </div>
+                    {/* Error — read-only */}
                     <div className={`${styles.recExcelCell} ${styles.recExcelErrorCell} ${rowCls}`}>{r.error || ''}</div>
+                    {/* Test Runs — hidden during edit mode */}
+                    <div className={`${styles.recExcelCell} ${styles.recExcelTestRunsCell} ${rowCls}`}>
+                      {!isExcelEditMode && (
+                        <button
+                          className={styles.excelRerunBtn}
+                          disabled={chatPhase === 'executing'}
+                          onClick={() => handleExcelRerun(r)}
+                          title={`Rerun: ${r.name}`}
+                        >
+                          ↺ Rerun
+                        </button>
+                      )}
+                    </div>
                   </React.Fragment>
                 );
               })}
@@ -1814,6 +2155,12 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                   <div className={styles.chatBotMessage} style={{ marginBottom: 16 }}>
                     <div className={styles.chatBotAvatar}><Sparkles size={14} /></div>
                     <div className={styles.chatBotContent}>
+                      {/* TSR rerun badge — shown for rerun messages */}
+                      {msg.tsrId && (
+                        <div className={styles.tsrChatCard}>
+                          <RotateCcw size={11} /> {msg.tsrId}
+                        </div>
+                      )}
                       {(() => {
                         if (msg.thinking) {
                           return (
@@ -2987,6 +3334,52 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
             addNotification('success', `Saved to project "${projectName}"`);
           }}
         />
+      )}
+
+      {/* ── Discard edits confirmation dialog ── */}
+      {showDiscardConfirm && (
+        <div className={styles.exportConfirmOverlay}>
+          <div className={styles.exportConfirmDialog} onClick={e => e.stopPropagation()}>
+            <AlertCircle size={28} style={{ color: '#f59e0b' }} />
+            <h3 className={styles.exportConfirmTitle}>Discard Changes?</h3>
+            <p className={styles.exportConfirmDesc}>You have unsaved edits. Discard them and exit edit mode?</p>
+            <div className={styles.exportConfirmActions}>
+              <button className={styles.exportConfirmCancel} onClick={() => setShowDiscardConfirm(false)}>
+                Keep editing
+              </button>
+              <button
+                className={styles.exportConfirmOk}
+                style={{ background: '#ef4444' }}
+                onClick={handleExcelEditDiscard}
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Unsaved changes navigation warning ── */}
+      {pendingNavigation && hasUnsavedChanges && (
+        <div className={styles.exportConfirmOverlay}>
+          <div className={styles.exportConfirmDialog} onClick={e => e.stopPropagation()}>
+            <AlertCircle size={28} style={{ color: '#f59e0b' }} />
+            <h3 className={styles.exportConfirmTitle}>Unsaved Changes</h3>
+            <p className={styles.exportConfirmDesc}>You have unsaved edits. Your changes will be lost if you leave this page.</p>
+            <div className={styles.exportConfirmActions}>
+              <button className={styles.exportConfirmCancel} onClick={() => setPendingNavigation(null)}>
+                Stay
+              </button>
+              <button
+                className={styles.exportConfirmOk}
+                style={{ background: '#ef4444' }}
+                onClick={handleLeaveAnyway}
+              >
+                Leave anyway
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ── Export Excel confirmation dialog ── */}

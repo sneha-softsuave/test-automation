@@ -145,11 +145,13 @@ class ExecutorSession:
         update_queue,
         timeout: int,
         signal_file=None,
+        start_url: str = "",
     ) -> Dict:
         """
         Execute all test cases in the persistent browser.
         Call this via asyncio.to_thread() to avoid blocking the event loop.
         Returns the same result dict format as execute_enhanced.
+        If start_url is provided, the browser navigates there before running (used by Rerun).
         """
         def _run() -> Dict:
             from playwright.sync_api import expect as _sync_expect
@@ -169,6 +171,18 @@ class ExecutorSession:
                         update_queue.put({"type": update_type, **data})
                     except Exception:
                         pass
+
+            # Navigate to start_url before running (Rerun: go back to where the TC originally started)
+            if start_url and self._page:
+                try:
+                    self._page.goto(start_url, wait_until="domcontentloaded", timeout=30_000)
+                    try:
+                        self._page.wait_for_load_state("networkidle", timeout=10_000)
+                    except Exception:
+                        pass
+                    print(f"[run_test_suite] Navigated to start_url: {start_url}")
+                except Exception as _nav_err:
+                    print(f"[run_test_suite] Warning: could not navigate to start_url {start_url!r}: {_nav_err}")
 
             send_update("execution_started", {
                 "message": (

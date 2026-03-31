@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import { Bot, MessageSquare, FlaskConical, Play, FileCheck, Download, Menu, X, Zap, Wrench, ChevronDown, ChevronRight, BarChart3, Terminal, Brain, Settings, Sparkles, FolderOpen, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { useState, useEffect } from 'react';
-import { useStore } from '../../store/useStore';
+import { useStore, type View } from '../../store/useStore';
 import { listProjects, type ProjectSummary } from '../../services/api';
 import styles from './Layout.module.css';
 
@@ -28,7 +28,16 @@ const loadTestItems = [
 ] as const;
 
 export const Layout = ({ children }: LayoutProps) => {
-  const { currentView, setCurrentView, testSuite, executionResult, rawTestCases, selectedProjectName, setSelectedProjectName } = useStore();
+  const { currentView, setCurrentView, testSuite, executionResult, rawTestCases, selectedProjectName, setSelectedProjectName, hasUnsavedEditChanges, setPendingNavigation } = useStore();
+
+  // Nav guard: intercept navigation when there are unsaved Excel edits
+  const handleNavigate = (view: View) => {
+    if (hasUnsavedEditChanges) {
+      setPendingNavigation(view);
+      return;
+    }
+    setCurrentView(view);
+  };
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [functionalTestExpanded, setFunctionalTestExpanded] = useState(false);
@@ -82,10 +91,10 @@ export const Layout = ({ children }: LayoutProps) => {
     if (!functionalTestExpanded) {
       // If collapsed, expand and navigate to Agent
       setFunctionalTestExpanded(true);
-      setCurrentView('upload');
+      handleNavigate('upload');
     } else {
       // If expanded, navigate to Agent (first child)
-      setCurrentView('upload');
+      handleNavigate('upload');
     }
     setMobileMenuOpen(false);
   };
@@ -101,10 +110,10 @@ export const Layout = ({ children }: LayoutProps) => {
     if (!loadTestExpanded) {
       // If collapsed, expand and navigate to Agent
       setLoadTestExpanded(true);
-      setCurrentView('loadtest');
+      handleNavigate('loadtest');
     } else {
       // If expanded, navigate to Agent (first child)
-      setCurrentView('loadtest');
+      handleNavigate('loadtest');
     }
     setMobileMenuOpen(false);
   };
@@ -163,7 +172,7 @@ export const Layout = ({ children }: LayoutProps) => {
               title={sidebarCollapsed ? 'Projects' : undefined}
               onClick={() => {
                 if (!projectsExpanded) setProjectsExpanded(true);
-                setCurrentView('projects');
+                handleNavigate('projects');
                 setMobileMenuOpen(false);
               }}
             >
@@ -209,7 +218,7 @@ export const Layout = ({ children }: LayoutProps) => {
                         className={`${styles.navItem} ${styles.navChild} ${isProjectActive ? styles.active : ''}`}
                         onClick={() => {
                           setSelectedProjectName(p.name);
-                          setCurrentView('project-workspace');
+                          handleNavigate('project-workspace');
                           setMobileMenuOpen(false);
                         }}
                         initial={{ opacity: 0, x: -20 }}
@@ -284,7 +293,7 @@ export const Layout = ({ children }: LayoutProps) => {
                       className={`${styles.navItem} ${styles.navChild} ${isActive ? styles.active : ''} ${isDisabled ? styles.disabled : ''}`}
                       onClick={() => {
                         if (!isDisabled) {
-                          setCurrentView(item.id);
+                          handleNavigate(item.id as View);
                           setMobileMenuOpen(false);
                         }
                       }}
@@ -363,7 +372,7 @@ export const Layout = ({ children }: LayoutProps) => {
                       className={`${styles.navItem} ${styles.navChild} ${isActive ? styles.active : ''} ${isDisabled ? styles.disabled : ''}`}
                       onClick={() => {
                         if (!isDisabled) {
-                          setCurrentView(item.id);
+                          handleNavigate(item.id as View);
                           setMobileMenuOpen(false);
                         }
                       }}
@@ -401,7 +410,7 @@ export const Layout = ({ children }: LayoutProps) => {
               className={`${styles.navItem} ${currentView === 'settings' ? styles.active : ''}`}
               title={sidebarCollapsed ? 'Settings' : undefined}
               onClick={() => {
-                setCurrentView('settings');
+                handleNavigate('settings');
                 setMobileMenuOpen(false);
               }}
             >
