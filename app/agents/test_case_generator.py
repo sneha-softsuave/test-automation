@@ -551,7 +551,7 @@ USER QUESTION:
 
 Answer the question directly and helpfully. Be warm and conversational — like a knowledgeable
 colleague, not a technical manual. If relevant, reference specific elements visible on the page.
-Do NOT generate test cases. Do NOT output JSON.
+Do NOT generate test cases. Do NOT output JSON. Do NOT include any code blocks or code snippets.
 Use 1-2 suitable professional emojis where natural — keep it subtle and professional.
 Return ONLY the Markdown answer."""
 
@@ -599,7 +599,7 @@ Tell the user what YOU created in 1-3 sentences. Speak in first person ("I've cr
 Vary your opening — don't always start the same way. Reference the test names using **bold**.
 You may use a short bullet list if more than 3 cases.
 If context_block has credential or correction info, weave it in naturally.
-Use a professional emoji. Use Markdown. Return ONLY the message, no JSON."""
+Use a professional emoji. Use Markdown. Return ONLY the message, no JSON. Do NOT include any code blocks or code snippets."""
 
 
 NARRATOR_PROMPT = """\
@@ -636,7 +636,7 @@ Rules:
 - warm and natural
 - Include all relevant data from the context JSON in the response
 - Confirmation messages must end with a clear yes/no question
-- Use Markdown formatting. No JSON in output.\
+- Use Markdown formatting. No JSON in output. Do NOT include any code blocks or code snippets.\
 """
 
 
