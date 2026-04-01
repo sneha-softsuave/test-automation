@@ -1339,6 +1339,36 @@ class ReAnalyzeRequest(PydanticBaseModel):
     llm_provider: Optional[str] = None
 
 
+@router.get("/browser-screenshot/{session_id}")
+async def browser_screenshot(session_id: str):
+    """
+    Return the current page screenshot for a persistent executor session.
+    Used by the frontend to poll the live browser view every 10 seconds.
+    Does NOT navigate — just captures whatever the browser is currently showing.
+    """
+    import asyncio as _asyncio
+    import base64 as _b64
+    from app.services.executor_session_manager import executor_session_manager as _esm
+
+    session = _esm.get_session(session_id)
+    if session is None or not session._pw_thread.is_alive():
+        raise HTTPException(status_code=404, detail="No active browser session")
+
+    def _capture():
+        try:
+            ss = session._page.screenshot(type="png")
+            url = session._page.url
+            return {"image_b64": _b64.b64encode(ss).decode("utf-8"), "url": url}
+        except Exception as e:
+            raise RuntimeError(str(e))
+
+    try:
+        result = await _asyncio.to_thread(session.run_in_pw_thread, _capture)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/re-analyze-url")
 async def re_analyze_url(
     request: ReAnalyzeRequest,

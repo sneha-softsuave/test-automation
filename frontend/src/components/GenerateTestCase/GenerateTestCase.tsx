@@ -38,6 +38,7 @@ interface GeneratedSuite {
   }>;
   common_selectors: Record<string, unknown>;
   test_data: Record<string, unknown>;
+  source?: string;
 }
 
 interface ApiResult {
@@ -585,6 +586,26 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   }, []);
 
   useEffect(() => () => disconnectSSE(), [disconnectSSE]);
+
+  // ── Periodic live-browser screenshot (every 10 s) ─────────────────────────
+  // Polls the current page screenshot from the persistent executor session so
+  // the browser panel stays live even when no test is running (loaders, idle, etc.)
+  // Skipped while chatPhase === 'executing' — SSE already streams screenshots then.
+  useEffect(() => {
+    if (!chatSessionId) return;
+    const poll = async () => {
+      if (chatPhase === 'executing') return;
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/browser-screenshot/${chatSessionId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.image_b64) setExecScreenshot(data.image_b64);
+        if (data.url) { setExecCurrentUrl(data.url); currentUrlRef.current = data.url; }
+      } catch { /* ignore — session may not exist yet */ }
+    };
+    const id = setInterval(poll, 10000);
+    return () => clearInterval(id);
+  }, [chatSessionId, chatPhase]);
 
   // ── Computed flags ────────────────────────────────────────────────────────
   const canGenerate = url.trim().length > 0 && intent.trim().length > 0 && !loading;

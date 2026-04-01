@@ -811,6 +811,9 @@ Before returning JSON, ensure:
 - No unsupported USER INTENT scenarios are included.
 - All selectors are grounded in the provided page data (no invention).
 - Every `instruction` field quotes the exact element name in single quotes.
+- The LAST step of a test case must NEVER be action.type "assert". Do not add a
+  standalone verification/assert step at the end of a workflow. Exception: if the
+  user's entire intent is purely to verify something, an all-assert TC is acceptable.
 
 If any test case fails these checks, remove or fix it before output.
 
@@ -1443,7 +1446,27 @@ class TestCaseGeneratorAgent(BaseAgent):
             raw = raw[start:end]
 
         try:
-            return json.loads(raw)
+            return _strip_trailing_assert_step(json.loads(raw))
         except json.JSONDecodeError as e:
             logger.error(f"JSON parse error: {e}\nRaw (first 500): {raw[:500]}")
             raise ValueError(f"LLM returned invalid JSON: {e}")
+
+
+def _strip_trailing_assert_step(suite: dict) -> dict:
+    """
+    Drop the last step of any workflow TC if it is an assert step.
+    Test cases must never end with a standalone assert — it causes fragile failures.
+    Skipped when TC has ≤1 step or all steps are assert (pure-verification TC).
+    """
+    for tc in suite.get("test_cases", []):
+        steps = tc.get("steps", [])
+        if len(steps) < 2:
+            continue
+        if all(s.get("action", {}).get("type") == "assert" for s in steps):
+            continue  # pure-verification TC — leave untouched
+        if steps[-1].get("action", {}).get("type") == "assert":
+            tc["steps"] = steps[:-1]
+            for i, s in enumerate(tc["steps"], 1):
+                s["step_number"] = i
+    return suite
+

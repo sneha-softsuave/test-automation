@@ -1160,6 +1160,18 @@ class EnhancedJsonParserAgent(BaseAgent):
         # Fix incorrectly assigned action types (e.g., goto -> assert for verification steps)
         result = self._fix_action_types(result)
 
+        # Drop trailing assert step from workflow TCs (never end a TC with assert)
+        for _tc in result.get("test_cases", []):
+            _steps = _tc.get("steps", [])
+            if len(_steps) < 2:
+                continue
+            if all(_s.get("action", {}).get("type") == "assert" for _s in _steps):
+                continue  # pure-verification TC — leave untouched
+            if _steps[-1].get("action", {}).get("type") == "assert":
+                _tc["steps"] = _steps[:-1]
+                for _i, _s in enumerate(_tc["steps"], 1):
+                    _s["step_number"] = _i
+
         return result
 
     def get_statistics(self, result: Dict) -> Dict[str, Any]:

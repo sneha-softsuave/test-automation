@@ -2001,7 +2001,7 @@ def _live_selector_rescue(
                 return [
                     ...Array.from(document.querySelectorAll('[role="checkbox"],[role="radio"]')).slice(0, 15),
                     ...Array.from(document.querySelectorAll('input[type="checkbox"],input[type="radio"]')).slice(0, 15),
-                    ...Array.from(document.querySelectorAll('label')).slice(0, 20),
+                    ...Array.from(document.querySelectorAll('label')).slice(0, 10),
                 ].map(getAttrs);
             }""")
             page_context['custom_checkboxes'] = custom_checkboxes
@@ -2019,7 +2019,7 @@ def _live_selector_rescue(
             f"  - text={e['text']} href={e['href']}"
             for e in page_context.get("links", [])
         ) or "  (none)"
-        failed_text = "\n".join(f"  - {s}" for s in failed_selectors) or "  (none)"
+        failed_text = "\n".join(f"  - {s}" for s in failed_selectors[-10:]) or "  (none)"
 
         # Build alerts/toasts section for prompt
         alerts_section = ""
@@ -2039,7 +2039,25 @@ def _live_selector_rescue(
             ) or "  (none)"
             checkboxes_section = f"\nCUSTOM CHECKBOXES/LABELS ({len(page_context['custom_checkboxes'])}):\n{cb_text}\n"
 
-        prompt = f"""You are a Playwright selector expert. A test step failed because none of the pre-generated selectors matched.
+        # Checkbox/radio: compact prompt (buttons+links are noise, saves ~3000 tokens vs full prompt)
+        if element_type.lower() in ("checkbox", "radio"):
+            cb_entries = page_context.get("custom_checkboxes", [])[:15]
+            cb_compact = "\n".join(
+                f"  text={e['text'][:50]} | aria={e['ariaLabel'][:50]} | id={e['id'][:30]} | role={e['role']}"
+                for e in cb_entries
+            ) or "  (none)"
+            prompt = (
+                f"Find Playwright selector for: {instruction}\n"
+                f"Element: {element_name} ({element_type}) | URL: {page_context.get('url', '')}\n\n"
+                f"CHECKBOXES/LABELS ON PAGE:\n{cb_compact}\n\n"
+                f"Avoid these failed selectors: {', '.join(failed_selectors[-5:])}\n\n"
+                f'Return ONLY a JSON array of up to 3 selectors. Formats: '
+                f'"get_by_label::Text", "get_by_role::checkbox::Label", '
+                f'"locator::[aria-label=val]", "get_by_text::Text", "locator::#id"\n'
+                f'Example: ["get_by_label::Contact emergency hotline numbers"]'
+            )
+        else:
+            prompt = f"""You are a Playwright selector expert. A test step failed because none of the pre-generated selectors matched.
 Given the live page context below, return the best Playwright selector(s) for this step.
 
 STEP INSTRUCTION: {instruction}
@@ -2995,6 +3013,18 @@ def _execute_action_sync(
                         break
                     # Timeout — poll again after checking signal
                     print(f"    Click attempt {_cp + 1}/{click_polls} timed out, retrying...")
+            # Final fallback: dispatch JS click event directly.
+            # Custom checkboxes inside MUI Modals time out on pointer clicks because
+            # the backdrop/label intercepts, but they respond to JS-dispatched events.
+            if not click_done and click_error is not None:
+                try:
+                    locator.dispatch_event('click')
+                    click_done = True
+                    selector_used = selector
+                    click_error = None
+                    print(f"    dispatch_event('click') fallback succeeded")
+                except Exception as _de:
+                    click_error = _de
             if not click_done and click_error is not None:
                 raise click_error
 
