@@ -160,6 +160,10 @@ def compact_page_elements(page_structure: Dict[str, Any]) -> Dict[str, Any]:
             v = _clean(el.get(key))
             if v:
                 d[field] = v[:80]
+        # Include title attribute (shown on hover) if it adds information not already in text/label
+        tooltip = _clean(el.get("titleAttr"))
+        if tooltip and tooltip != d.get("text") and tooltip != d.get("label"):
+            d["tooltip"] = tooltip[:80]
         return d
 
     raw_inputs       = page_structure.get("inputs", [])
@@ -353,6 +357,29 @@ def compact_page_elements(page_structure: Dict[str, Any]) -> Dict[str, Any]:
     if custom_dropdowns:
         result["custom_dropdowns"] = custom_dropdowns
 
+    # ── SVG icons: icon-only buttons and named SVG elements ──────────────────
+    # Captured separately because SVGs have no offsetParent and never appear in
+    # the buttons/links lists even when they ARE the clickable element.
+    raw_svg_icons = page_structure.get("svg_icons", [])
+    if raw_svg_icons:
+        svg_icons_compact: List[Dict] = []
+        seen_icon_names: set = set()
+        for icon in raw_svg_icons[:20]:
+            name = (icon.get("name") or "").strip()
+            if not name or name.lower() in seen_icon_names:
+                continue
+            seen_icon_names.add(name.lower())
+            entry: Dict[str, Any] = {"name": name}
+            if icon.get("dataTestId"):
+                entry["testId"] = icon["dataTestId"]
+            parent_tag = icon.get("parentTag", "")
+            parent_role = icon.get("parentRole", "")
+            if parent_tag in ("button", "a") or parent_role == "button":
+                entry["context"] = parent_tag or parent_role
+            svg_icons_compact.append(entry)
+        if svg_icons_compact:
+            result["svg_icons"] = svg_icons_compact
+
     return result
 
 
@@ -475,6 +502,12 @@ APPROVE
 - Also matches: "yes", "go ahead", "do it", "add them" WHEN history shows a pending approval question
 ⚠ "click approve button" = EXECUTE
 
+SCRAPE
+- User wants to re-scan, re-analyse, refresh, or scrape the current page to see its latest elements
+- This is NOT about generating test cases — it is purely about page analysis
+- Examples: "rescrape", "scrape the current page", "refresh elements", "show me what's on this page",
+  "re-analyse the page", "what elements are on the page now", "update page structure", "scan the page again"
+
 GENERATE
 - User wants to create new test cases (including filling forms with specific data)
 - Examples: "generate a login test", "write a signup test", "test the form with name=John date=2025-01-01"
@@ -488,14 +521,15 @@ PRIORITY
 1. clear run action → EXECUTE
 2. approve/export → APPROVE
 3. question → INFORMATIONAL
-3.5. enter/fill/input/type + no existing tests → GENERATE
-4. modify existing → EDIT
-5. create/generate → GENERATE
-6. else → CLARIFY
+3.5. rescrape/re-analyse/refresh page elements → SCRAPE
+4. enter/fill/input/type + no existing tests → GENERATE
+5. modify existing → EDIT
+6. create/generate → GENERATE
+7. else → CLARIFY
 
 OUTPUT — return ONLY this JSON, no extra text:
 {{
-  "intent": "execute|edit|informational|approve|generate|clarify",
+  "intent": "execute|edit|informational|approve|generate|clarify|scrape",
   "confidence": 0.95,
   "reasoning": "one short sentence",
   "clarify_message": "warm, friendly ask — NEVER empty when intent=clarify",

@@ -282,6 +282,20 @@ class ExecutorSession:
     # Lifecycle                                                            #
     # ------------------------------------------------------------------ #
 
+    def capture_page_structure(self) -> dict:
+        """
+        Extract the current page's DOM structure using the live browser page.
+        Returns the same dict shape as SelectorExtractor — no new browser launched.
+        Uses extract_from_existing_page() from playwright_runner so the live,
+        authenticated, fully-rendered DOM is captured instead of a fresh headless scrape.
+        """
+        from app.tools.playwright_runner import extract_from_existing_page
+
+        def _extract():
+            return extract_from_existing_page(self._page)
+
+        return self.run_in_pw_thread(_extract)
+
     def close(self) -> None:
         """Stop the browser and playwright thread."""
         self._job_queue.put(_STOP_SENTINEL)

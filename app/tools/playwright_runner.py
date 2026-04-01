@@ -7,6 +7,213 @@ import json
 from playwright.sync_api import sync_playwright
 
 
+# ---------------------------------------------------------------------------
+# Shared DOM extraction script — used by both extract_selectors() (subprocess
+# path) and extract_from_existing_page() (live persistent-browser path).
+# Defined once here so both functions always run the exact same JS logic.
+# ---------------------------------------------------------------------------
+_EXTRACTION_SCRIPT = """
+() => {
+    const elements = [];
+    const allElements = document.querySelectorAll('*');
+
+    allElements.forEach((el, index) => {
+        if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE' || el.tagName === 'NOSCRIPT') {
+            return;
+        }
+
+        const ARIA_INTERACTIVE_ROLES = new Set([
+            'button','checkbox','radio','switch','combobox','listbox',
+            'option','menuitem','menuitemcheckbox','menuitemradio',
+            'tab','treeitem','slider','spinbutton','textbox',
+            'searchbox','link','gridcell','columnheader','rowheader'
+        ]);
+        const elRole = el.getAttribute('role') || '';
+
+        function resolveLabel(elem) {
+            // 1. aria-label attribute (highest priority explicit label)
+            const direct = elem.getAttribute('aria-label');
+            if (direct && direct.trim()) return direct.trim();
+
+            // 2. aria-labelledby — resolve referenced element(s) text
+            const labelledBy = elem.getAttribute('aria-labelledby');
+            if (labelledBy) {
+                const labelText = labelledBy.split(/\\s+/)
+                    .map(id => { const ref = document.getElementById(id); return ref ? ref.innerText.trim() : ''; })
+                    .filter(Boolean).join(' ');
+                if (labelText) return labelText;
+            }
+
+            // 3. title attribute — shown as tooltip on hover (e.g. title="Collapse")
+            const titleAttr = elem.getAttribute('title');
+            if (titleAttr && titleAttr.trim()) return titleAttr.trim();
+
+            // 4. innerText of the element itself (non-empty)
+            const ownText = elem.innerText ? elem.innerText.trim() : '';
+            if (ownText) return ownText.substring(0, 80);
+
+            // 5. For ARIA widgets — look at closest sibling or parent label text
+            const parent = elem.parentElement;
+            if (parent) {
+                // Try sibling text nodes / spans next to the widget
+                for (const sibling of parent.childNodes) {
+                    if (sibling === elem) continue;
+                    const sibText = sibling.innerText ? sibling.innerText.trim()
+                                  : (sibling.textContent ? sibling.textContent.trim() : '');
+                    if (sibText && sibText.length <= 80) return sibText;
+                }
+                // Try parent's own direct text (label wrapping pattern)
+                const parentLabel = parent.getAttribute('aria-label') || parent.getAttribute('title') || '';
+                if (parentLabel.trim()) return parentLabel.trim();
+            }
+            return null;
+        }
+
+        const resolvedLabel = resolveLabel(el);
+
+        const element = {
+            index: index,
+            tag: el.tagName.toLowerCase(),
+            id: el.id || null,
+            classes: el.className ? (typeof el.className === 'string' ? el.className.split(' ').filter(c => c.trim()) : []) : [],
+            name: el.getAttribute('name') || null,
+            type: el.getAttribute('type') || null,
+            placeholder: el.getAttribute('placeholder') || null,
+            text: el.innerText ? el.innerText.substring(0, 100).trim() : null,
+            value: el.value || null,
+            href: el.getAttribute('href') || null,
+            src: el.getAttribute('src') || null,
+            role: elRole || null,
+            ariaLabel: resolvedLabel,
+            ariaChecked: el.getAttribute('aria-checked'),
+            ariaExpanded: el.getAttribute('aria-expanded'),
+            ariaSelected: el.getAttribute('aria-selected'),
+            dataTestId: el.getAttribute('data-testid') || el.getAttribute('data-test-id') || null,
+            dataId: el.getAttribute('data-id') || null,
+            titleAttr: el.getAttribute('title') || null,
+            isVisible: el.offsetParent !== null,
+            isInteractive: ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)
+                            || ARIA_INTERACTIVE_ROLES.has(elRole),
+            rect: el.getBoundingClientRect ? {
+                x: Math.round(el.getBoundingClientRect().x),
+                y: Math.round(el.getBoundingClientRect().y),
+                width: Math.round(el.getBoundingClientRect().width),
+                height: Math.round(el.getBoundingClientRect().height)
+            } : null
+        };
+
+        const classSelector = element.classes.length > 0 ? '.' + element.classes.join('.') : null;
+
+        element.selectors = {
+            byId: el.id ? '#' + el.id : null,
+            byClass: classSelector,
+            byName: el.getAttribute('name') ? '[name="' + el.getAttribute('name') + '"]' : null,
+            byPlaceholder: el.getAttribute('placeholder') ? '[placeholder="' + el.getAttribute('placeholder') + '"]' : null,
+            byRole: el.getAttribute('role') ? '[role="' + el.getAttribute('role') + '"]' : null,
+            byTestId: element.dataTestId ? '[data-testid="' + element.dataTestId + '"]' : null,
+            byText: element.text && element.text.length < 50 ? 'text=' + element.text : null,
+            xpath: getXPath(el)
+        };
+
+        elements.push(element);
+    });
+
+    function getXPath(element) {
+        if (element.id) return '//*[@id="' + element.id + '"]';
+        if (element === document.body) return '/html/body';
+        let ix = 0;
+        const siblings = element.parentNode ? element.parentNode.childNodes : [];
+        for (let i = 0; i < siblings.length; i++) {
+            const sibling = siblings[i];
+            if (sibling === element) {
+                const parentPath = element.parentNode ? getXPath(element.parentNode) : '';
+                return parentPath + '/' + element.tagName.toLowerCase() + '[' + (ix + 1) + ']';
+            }
+            if (sibling.nodeType === 1 && sibling.tagName === element.tagName) ix++;
+        }
+        return '';
+    }
+
+    const customDropdowns = [];
+    document.querySelectorAll('label').forEach(label => {
+        const labelText = label.innerText ? label.innerText.trim() : '';
+        if (!labelText) return;
+        let sibling = label.nextElementSibling;
+        for (let i = 0; i < 3 && sibling; i++) {
+            const tag = sibling.tagName.toLowerCase();
+            if (['input','button','select','textarea'].includes(tag)) break;
+            const cs = window.getComputedStyle(sibling);
+            const hasCursorPointer = cs.cursor === 'pointer';
+            const hasDropdownIndicator = sibling.querySelector('svg') !== null
+                || /select|dropdown|combo|picker|chevron|arrow/i.test(sibling.className || '');
+            if (hasCursorPointer || hasDropdownIndicator) {
+                const innerText = sibling.innerText ? sibling.innerText.trim() : '';
+                customDropdowns.push({ label: labelText, currentValue: innerText.substring(0, 80), tag: tag, id: sibling.id || null });
+                break;
+            }
+            sibling = sibling.nextElementSibling;
+        }
+    });
+
+    // Pass 3: Extract SVG icons with their accessible names.
+    // offsetParent is always null for SVG elements, so visibility is checked via
+    // getBoundingClientRect instead. Only named, visible, non-decorative icons are kept.
+    const svgIcons = [];
+    const seenSvgNames = new Set();
+    document.querySelectorAll('svg').forEach(svg => {
+        // Skip decorative icons explicitly marked as presentation
+        if (svg.getAttribute('aria-hidden') === 'true') return;
+
+        // Resolve name: aria-label > <title> child > parent aria-label > parent text
+        let name = (svg.getAttribute('aria-label') || '').trim();
+        if (!name) {
+            const titleEl = svg.querySelector('title');
+            if (titleEl) name = (titleEl.textContent || '').trim();
+        }
+        // Also check title attribute on SVG itself
+        if (!name) name = (svg.getAttribute('title') || '').trim();
+        const parent = svg.parentElement;
+        if (!name && parent) {
+            name = (parent.getAttribute('aria-label') || parent.getAttribute('title') || '').trim();
+            if (!name && (parent.tagName === 'BUTTON' || parent.tagName === 'A')) {
+                let parentText = '';
+                parent.childNodes.forEach(function(node) {
+                    if (node.nodeType === 3) {
+                        parentText += node.textContent.trim() + ' ';
+                    } else if (node.tagName && node.tagName !== 'SVG') {
+                        parentText += ((node.innerText || node.textContent) || '').trim() + ' ';
+                    }
+                });
+                name = parentText.trim();
+            }
+        }
+        if (!name) return;
+        name = name.substring(0, 80);
+        const nameLower = name.toLowerCase();
+        if (seenSvgNames.has(nameLower)) return;
+        seenSvgNames.add(nameLower);
+
+        // Visibility via bounding rect (SVGs have no offsetParent)
+        const rect = svg.getBoundingClientRect();
+        if (!rect.width && !rect.height) return;
+
+        const parentTag = parent ? parent.tagName.toLowerCase() : '';
+        const parentRole = parent ? (parent.getAttribute('role') || '') : '';
+        svgIcons.push({
+            name: name,
+            id: svg.id || null,
+            dataTestId: svg.getAttribute('data-testid') || svg.getAttribute('data-test-id') || null,
+            ariaLabel: svg.getAttribute('aria-label') || null,
+            parentTag: parentTag,
+            parentRole: parentRole,
+        });
+    });
+
+    return { elements, customDropdowns, svgIcons };
+}
+"""
+
+
 def extract_selectors(url: str, headless: bool = True, timeout: int = 30000, storage_state_file: str = None) -> dict:
     """Extract all selectors from a given URL.
 
@@ -39,173 +246,16 @@ def extract_selectors(url: str, headless: bool = True, timeout: int = 30000, sto
             except Exception:
                 pass
 
-            # JavaScript to extract all elements with their selectors
-            extraction_script = """
-            () => {
-                const elements = [];
-                const allElements = document.querySelectorAll('*');
-
-                allElements.forEach((el, index) => {
-                    if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE' || el.tagName === 'NOSCRIPT') {
-                        return;
-                    }
-
-                    const ARIA_INTERACTIVE_ROLES = new Set([
-                        'button','checkbox','radio','switch','combobox','listbox',
-                        'option','menuitem','menuitemcheckbox','menuitemradio',
-                        'tab','treeitem','slider','spinbutton','textbox',
-                        'searchbox','link','gridcell','columnheader','rowheader'
-                    ]);
-                    const elRole = el.getAttribute('role') || '';
-
-                    // Resolve the best available label for this element
-                    function resolveLabel(elem) {
-                        // 1. aria-label attribute
-                        const direct = elem.getAttribute('aria-label');
-                        if (direct && direct.trim()) return direct.trim();
-
-                        // 2. aria-labelledby — resolve referenced element(s) text
-                        const labelledBy = elem.getAttribute('aria-labelledby');
-                        if (labelledBy) {
-                            const labelText = labelledBy.split(/\s+/)
-                                .map(id => { const ref = document.getElementById(id); return ref ? ref.innerText.trim() : ''; })
-                                .filter(Boolean).join(' ');
-                            if (labelText) return labelText;
-                        }
-
-                        // 3. innerText of the element itself (non-empty)
-                        const ownText = elem.innerText ? elem.innerText.trim() : '';
-                        if (ownText) return ownText.substring(0, 80);
-
-                        // 4. For ARIA widgets — look at closest sibling or parent label text
-                        const parent = elem.parentElement;
-                        if (parent) {
-                            // Try sibling text nodes / spans next to the widget
-                            for (const sibling of parent.childNodes) {
-                                if (sibling === elem) continue;
-                                const sibText = sibling.innerText ? sibling.innerText.trim()
-                                              : (sibling.textContent ? sibling.textContent.trim() : '');
-                                if (sibText && sibText.length <= 80) return sibText;
-                            }
-                            // Try parent's own direct text (label wrapping pattern)
-                            const parentLabel = parent.getAttribute('aria-label') || '';
-                            if (parentLabel.trim()) return parentLabel.trim();
-                        }
-
-                        return null;
-                    }
-
-                    const resolvedLabel = resolveLabel(el);
-
-                    const element = {
-                        index: index,
-                        tag: el.tagName.toLowerCase(),
-                        id: el.id || null,
-                        classes: el.className ? (typeof el.className === 'string' ? el.className.split(' ').filter(c => c.trim()) : []) : [],
-                        name: el.getAttribute('name') || null,
-                        type: el.getAttribute('type') || null,
-                        placeholder: el.getAttribute('placeholder') || null,
-                        text: el.innerText ? el.innerText.substring(0, 100).trim() : null,
-                        value: el.value || null,
-                        href: el.getAttribute('href') || null,
-                        src: el.getAttribute('src') || null,
-                        role: elRole || null,
-                        ariaLabel: resolvedLabel,
-                        ariaChecked: el.getAttribute('aria-checked'),
-                        ariaExpanded: el.getAttribute('aria-expanded'),
-                        ariaSelected: el.getAttribute('aria-selected'),
-                        dataTestId: el.getAttribute('data-testid') || el.getAttribute('data-test-id') || null,
-                        dataId: el.getAttribute('data-id') || null,
-                        isVisible: el.offsetParent !== null,
-                        isInteractive: ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)
-                                        || ARIA_INTERACTIVE_ROLES.has(elRole),
-                        rect: el.getBoundingClientRect ? {
-                            x: Math.round(el.getBoundingClientRect().x),
-                            y: Math.round(el.getBoundingClientRect().y),
-                            width: Math.round(el.getBoundingClientRect().width),
-                            height: Math.round(el.getBoundingClientRect().height)
-                        } : null
-                    };
-
-                    const classSelector = element.classes.length > 0 ? '.' + element.classes.join('.') : null;
-
-                    element.selectors = {
-                        byId: el.id ? '#' + el.id : null,
-                        byClass: classSelector,
-                        byName: el.getAttribute('name') ? '[name="' + el.getAttribute('name') + '"]' : null,
-                        byPlaceholder: el.getAttribute('placeholder') ? '[placeholder="' + el.getAttribute('placeholder') + '"]' : null,
-                        byRole: el.getAttribute('role') ? '[role="' + el.getAttribute('role') + '"]' : null,
-                        byTestId: element.dataTestId ? '[data-testid="' + element.dataTestId + '"]' : null,
-                        byText: element.text && element.text.length < 50 ? 'text=' + element.text : null,
-                        xpath: getXPath(el)
-                    };
-
-                    elements.push(element);
-                });
-
-                function getXPath(element) {
-                    if (element.id) {
-                        return '//*[@id="' + element.id + '"]';
-                    }
-                    if (element === document.body) {
-                        return '/html/body';
-                    }
-
-                    let ix = 0;
-                    const siblings = element.parentNode ? element.parentNode.childNodes : [];
-                    for (let i = 0; i < siblings.length; i++) {
-                        const sibling = siblings[i];
-                        if (sibling === element) {
-                            const parentPath = element.parentNode ? getXPath(element.parentNode) : '';
-                            return parentPath + '/' + element.tagName.toLowerCase() + '[' + (ix + 1) + ']';
-                        }
-                        if (sibling.nodeType === 1 && sibling.tagName === element.tagName) {
-                            ix++;
-                        }
-                    }
-                    return '';
-                }
-
-                // Pass 2: Detect custom div-based dropdowns
-                // Pattern: <label>X</label> followed by a sibling <div> with cursor:pointer or svg chevron
-                const customDropdowns = [];
-                document.querySelectorAll('label').forEach(label => {
-                    const labelText = label.innerText ? label.innerText.trim() : '';
-                    if (!labelText) return;
-                    let sibling = label.nextElementSibling;
-                    for (let i = 0; i < 3 && sibling; i++) {
-                        const tag = sibling.tagName.toLowerCase();
-                        if (['input','button','select','textarea'].includes(tag)) break;
-                        const cs = window.getComputedStyle(sibling);
-                        const hasCursorPointer = cs.cursor === 'pointer';
-                        const hasDropdownIndicator = sibling.querySelector('svg') !== null
-                            || /select|dropdown|combo|picker|chevron|arrow/i.test(sibling.className || '');
-                        if (hasCursorPointer || hasDropdownIndicator) {
-                            const innerText = sibling.innerText ? sibling.innerText.trim() : '';
-                            customDropdowns.push({
-                                label: labelText,
-                                currentValue: innerText.substring(0, 80),
-                                tag: tag,
-                                id: sibling.id || null,
-                            });
-                            break;
-                        }
-                        sibling = sibling.nextElementSibling;
-                    }
-                });
-
-                return { elements, customDropdowns };
-            }
-            """
-
-            js_result = page.evaluate(extraction_script)
+            js_result = page.evaluate(_EXTRACTION_SCRIPT)
             all_elements = js_result["elements"]
             custom_dropdowns = js_result.get("customDropdowns", [])
+            svg_icons = js_result.get("svgIcons", [])
             title = page.title()
 
             # Categorize elements
             result = categorize_elements(all_elements)
             result["custom_dropdowns"] = custom_dropdowns
+            result["svg_icons"] = svg_icons
             result["url"] = url
             result["title"] = title
 
@@ -213,6 +263,37 @@ def extract_selectors(url: str, headless: bool = True, timeout: int = 30000, sto
 
         finally:
             browser.close()
+
+
+def extract_from_existing_page(page) -> dict:
+    """
+    Extract page structure from an already-open Playwright Page object.
+
+    Returns the same dict shape as extract_selectors() but uses the existing
+    live page — no new browser launched, no re-navigation, no auth re-play.
+    Use this on the persistent executor browser page for accurate post-execution
+    re-scraping.
+    """
+    js_result = page.evaluate(_EXTRACTION_SCRIPT)
+    all_elements = js_result["elements"]
+    custom_dropdowns = js_result.get("customDropdowns", [])
+    svg_icons = js_result.get("svgIcons", [])
+    title = ""
+    try:
+        title = page.title()
+    except Exception:
+        pass
+    url = ""
+    try:
+        url = page.url
+    except Exception:
+        pass
+    result = categorize_elements(all_elements)
+    result["custom_dropdowns"] = custom_dropdowns
+    result["svg_icons"] = svg_icons
+    result["url"] = url
+    result["title"] = title
+    return result
 
 
 ARIA_WIDGET_ROLES = {
@@ -314,6 +395,7 @@ def simplify_element(el: dict) -> dict:
         "ariaExpanded": el.get("ariaExpanded"),
         "ariaSelected": el.get("ariaSelected"),
         "dataTestId": el.get("dataTestId"),
+        "titleAttr": el.get("titleAttr"),
         "href": el.get("href"),
         "selectors": el.get("selectors"),
         "isVisible": el.get("isVisible")

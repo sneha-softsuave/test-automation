@@ -1969,6 +1969,108 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
         background_tasks.add_task(_info)
         return {"session_id": _session_id, "status": "thinking", "intent": "informational"}
 
+    # ── Scrape ────────────────────────────────────────────────────────────────
+    elif intent == "scrape":
+        append_message(_session_id, "user", request.user_message)
+
+        async def _do_scrape():
+            import asyncio as _ai_sc
+            from app.tools.selector_extractor import SelectorExtractor as _SE_sc
+            from app.agents.test_case_generator import (
+                TestCaseGeneratorAgent as _TGA_sc,
+                compact_page_elements as _cpe_sc,
+            )
+            from app.agents.base_agent import LLMProvider as _LP_sc
+            from app.services.executor_session_manager import executor_session_manager as _esm_sc
+
+            await sse_manager.broadcast(_session_id, {
+                "type": "chat_thinking",
+                "message": "Scraping the current page for you…",
+            })
+
+            try:
+                new_page_structure = None
+                url_to_scrape = ""
+                storage_state = None
+
+                # ── Priority 1: live capture from persistent executor browser ──
+                _exec_sess = _esm_sc.get_session(_session_id)
+                if _exec_sess and _exec_sess._pw_thread.is_alive():
+                    try:
+                        from app.tools.playwright_runner import extract_from_existing_page as _efep
+                        def _cap():
+                            return _efep(_exec_sess._page)
+                        new_page_structure = await _ai_sc.to_thread(
+                            _exec_sess.run_in_pw_thread, _cap
+                        )
+                        url_to_scrape = new_page_structure.get("url", "")
+                        print(f"[scrape-intent] Live capture from persistent browser: {url_to_scrape}")
+                    except Exception as _cap_err:
+                        print(f"[scrape-intent] Live capture failed, falling back to headless: {_cap_err}")
+                        new_page_structure = None
+
+                # ── Priority 2: headless re-scrape with stored auth ────────────
+                if new_page_structure is None:
+                    _compact_sc = session.get("compact") or {}
+                    url_to_scrape = _compact_sc.get("url", "")
+                    _last_res = session.get("last_execution_result")
+                    if isinstance(_last_res, list) and _last_res:
+                        _last_res = _last_res[-1]
+                    if isinstance(_last_res, dict):
+                        storage_state = _last_res.get("final_storage_state")
+
+                    if not url_to_scrape:
+                        await sse_manager.broadcast(_session_id, {
+                            "type": "chat_response",
+                            "message": "I don't have a URL to scrape. Please load a page first.",
+                        })
+                        return
+
+                    print(f"[scrape-intent] Headless re-scrape: {url_to_scrape}")
+                    extractor = _SE_sc(headless=True)
+                    new_page_structure = await extractor.extract_selectors(
+                        url_to_scrape, storage_state=storage_state
+                    )
+
+                # ── Update session + generate intro ───────────────────────────
+                new_compact = _cpe_sc(new_page_structure)
+                session["page_structure"] = new_page_structure
+                session["compact"] = new_compact
+                session["last_test_suite"] = None
+
+                _provider_sc = _LP_sc(provider_name)
+                _agent_sc = _TGA_sc(provider=_provider_sc)
+                _tok_before = _get_stats()
+                intro = await _ai_sc.to_thread(_agent_sc.generate_intro, new_compact)
+                _tok_after = _get_stats()
+                _msg_tokens = _tok_after["total_tokens"] - _tok_before["total_tokens"]
+                _msg_cost = round(_tok_after["total_cost_usd"] - _tok_before["total_cost_usd"], 8)
+                add_session_tokens(_session_id, _msg_tokens, _msg_cost)
+                _sess_tok = get_session_tokens(_session_id)
+
+                scrape_msg = f"Here's what I found on the current page:\n\n{intro}"
+                append_message(_session_id, "assistant", scrape_msg)
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": scrape_msg,
+                    "intent": "scrape",
+                    "tokens_used": _msg_tokens,
+                    "cost_usd": _msg_cost,
+                    "session_total_tokens": _sess_tok["total_tokens"],
+                    "session_total_cost": _sess_tok["cost_usd"],
+                })
+
+            except Exception as _sc_err:
+                import traceback
+                print(f"[scrape-intent] Error: {traceback.format_exc()}")
+                await sse_manager.broadcast(_session_id, {
+                    "type": "chat_response",
+                    "message": "Failed to scrape the page. Please try again.",
+                })
+
+        background_tasks.add_task(_do_scrape)
+        return {"session_id": _session_id, "status": "thinking", "intent": "scrape"}
+
     # ── Edit ──────────────────────────────────────────────────────────────────
     elif intent == "edit":
         if not last_suite:
