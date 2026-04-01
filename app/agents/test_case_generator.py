@@ -975,23 +975,26 @@ IMPORTANT:
 - Keep selectors accurate to what exists on the real page
 - HONOR the user's stated element type: if they say "dropdown" → use dropdown/select selectors and element_type="dropdown"; if they say "button" → use button selectors; if they say "text box" → use input selectors
 - NEVER use a navigation/sidebar button (e.g., "Our Project") when the user explicitly says "dropdown", "select from dropdown", or similar — use a label-matched combobox or select element instead
+- GENERATE FRESH TEST CASES ONLY: Base your output solely on the CURRENT USER INTENT and the PAGE STRUCTURE above. Do NOT copy, repeat, or re-use steps from any previously generated test cases that appear in the conversation history. Each generation is completely independent — prior test cases in the history are for context only, not templates to replicate.
 
 {browser_context_note}
 """
 
 
-def _format_custom_dropdowns(dropdowns: List[Dict]) -> str:
+def _format_custom_dropdowns(dropdowns: List[Dict], max_items: int = 10) -> str:
     """Format custom div-based dropdowns for the generator prompt."""
     if not dropdowns:
         return "  (none found)"
     lines = []
-    for cd in dropdowns:
+    for cd in dropdowns[:max_items]:
         label = cd.get("label", "")
         val = cd.get("currentValue", "")
         lines.append(
             f'  label="{label}" currentValue="{val}"'
             f' → USE: locator(\'label:has-text("{label}") ~ div button\').first()'
         )
+    if len(dropdowns) > max_items:
+        lines.append(f"  ... and {len(dropdowns) - max_items} more dropdowns")
     return "\n".join(lines)
 
 
@@ -1159,7 +1162,8 @@ class TestCaseGeneratorAgent(BaseAgent):
 
         # Pass history as real messages + current user message as final turn.
         # Drop leading assistant messages — API requires first message to be "user".
-        trimmed = _trim_history(history or [])
+        # Use tighter limits than the default to avoid 413 on small-quota models.
+        trimmed = _trim_history(history or [], max_turns=6, max_chars_per_msg=400)
         while trimmed and trimmed[0]["role"] != "user":
             trimmed = trimmed[1:]
         messages = trimmed + [{"role": "user", "content": user_message}]
@@ -1339,19 +1343,28 @@ class TestCaseGeneratorAgent(BaseAgent):
             "(Implement the intent provided in the user message below. "
             "Use the page structure above to generate accurate test steps.)"
         )
+        # Scale element caps down when the page is large to stay within token limits.
+        # Large pages (100+ elements) get tighter caps; normal pages keep defaults.
+        total_elements = (len(inputs) + len(buttons) + len(headings)
+                          + len(links) + len(custom_dropdowns))
+        if total_elements > 100:
+            _inp_cap, _btn_cap, _hdg_cap, _lnk_cap = 10, 8, 6, 6
+        else:
+            _inp_cap, _btn_cap, _hdg_cap, _lnk_cap = 15, 12, 10, 8
+
         system_prompt = GENERATOR_PROMPT.format(
             url=url,
             title=title,
             input_count=len(inputs),
-            inputs_text=_format_elements(inputs),
+            inputs_text=_format_elements(inputs, max_items=_inp_cap),
             custom_dropdown_count=len(custom_dropdowns),
             custom_dropdowns_text=_format_custom_dropdowns(custom_dropdowns),
             button_count=len(buttons),
-            buttons_text=_format_elements(buttons),
+            buttons_text=_format_elements(buttons, max_items=_btn_cap),
             heading_count=len(headings),
-            headings_text=_format_elements(headings),
+            headings_text=_format_elements(headings, max_items=_hdg_cap),
             link_count=len(links),
-            links_text=_format_elements(links, max_items=10),
+            links_text=_format_elements(links, max_items=_lnk_cap),
             intent=_intent_instruction,
             app_name=app_name,
             base_url=base_url,
@@ -1361,7 +1374,10 @@ class TestCaseGeneratorAgent(BaseAgent):
         )
 
         # Build messages: trimmed history (must start with user role) + current intent
-        trimmed = _trim_history(history or [])
+        # Use tighter limits for large pages to avoid exceeding model token limits.
+        _hist_turns = 4 if total_elements > 100 else 8
+        _hist_chars = 300 if total_elements > 100 else 600
+        trimmed = _trim_history(history or [], max_turns=_hist_turns, max_chars_per_msg=_hist_chars)
         # Drop leading assistant messages — Anthropic API requires first message to be "user"
         while trimmed and trimmed[0]["role"] != "user":
             trimmed = trimmed[1:]
