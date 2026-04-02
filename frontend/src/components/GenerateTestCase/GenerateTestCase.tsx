@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Sparkles, Globe, ChevronDown, ChevronRight, ChevronLeft,
+  Sparkles, Globe, ChevronDown, ChevronRight,
   Play, FileSpreadsheet, AlertCircle, Check,
-  Eye, EyeOff, RotateCcw, Video, MonitorPlay, Monitor,
-  Circle, CheckCircle2, XCircle, Loader2, Camera, X, Send,
-  Zap, Save, FileJson, Pencil, Copy, PanelRightOpen, Maximize2, StopCircle
+  RotateCcw, Video, MonitorPlay, Monitor,
+  CheckCircle2, XCircle, Loader2, Camera, X, Send,
+  Zap, Save, FileJson, Pencil, Copy, Maximize2, StopCircle
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { SaveToProjectModal } from './SaveToProjectModal';
@@ -39,15 +39,6 @@ interface GeneratedSuite {
   common_selectors: Record<string, unknown>;
   test_data: Record<string, unknown>;
   source?: string;
-}
-
-interface ApiResult {
-  success: boolean;
-  message: string;
-  llm_provider: string;
-  model: string;
-  page_summary: Record<string, number>;
-  test_suite: GeneratedSuite;
 }
 
 // ── Chatbot generate types ────────────────────────────────────────────────────
@@ -214,17 +205,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const [mode, setMode] = useState<Mode>('generate');
 
   // ── Generate mode state ──────────────────────────────────────────────────
-  const [url, setUrl] = useState('');
-  const [intent, setIntent] = useState('');
-  const [appName, setAppName] = useState('');
-  const [testEmail, setTestEmail] = useState('');
-  const [testPassword, setTestPassword] = useState('');
   const [selectedProvider, setSelectedProvider] = useState(llmProvider);
-  const [showPassword, setShowPassword] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [loadingStep, setLoadingStep] = useState<0 | 1 | 2>(0);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<ApiResult | null>(null);
   const [expandedTc, setExpandedTc] = useState<string | null>(null);
 
   // ── Chatbot generate mode state ──────────────────────────────────────────
@@ -243,10 +224,10 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const lastExecMsgRef = useRef<ChatMsg | null>(null);
 
   // ── Execution state (chatbot execute mode) ────────────────────────────────
-  const [execSessionId, setExecSessionId] = useState<string | null>(null);
+  const [, setExecSessionId] = useState<string | null>(null);
   const execSseRef = useRef<EventSource | null>(null);
   const [execSteps, setExecSteps] = useState<ExecStepMsg[]>([]);
-  const [execSummary, setExecSummary] = useState<ExecSummary | null>(null);
+  const [, setExecSummary] = useState<ExecSummary | null>(null);
   const execStepsEndRef = useRef<HTMLDivElement>(null);
   const [execScreenshot, setExecScreenshot] = useState<string | null>(null);
   const [execCurrentUrl, setExecCurrentUrl] = useState('');
@@ -264,7 +245,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
   // ── Rerun tracking ────────────────────────────────────────────────────────
   const [rerunCounter, setRerunCounter] = useState(0);
-  const [rerunResults, setRerunResults] = useState<RerunResult[]>([]);
+  const [, setRerunResults] = useState<RerunResult[]>([]);
   const rerunSessionRef = useRef<{ tsrId: string; testId: string } | null>(null);
 
   // ── Per-step URL tracking ─────────────────────────────────────────────────
@@ -281,12 +262,12 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   // ── Record mode state ────────────────────────────────────────────────────
   const [recUrl, setRecUrl] = useState('');
   const [recProvider, setRecProvider] = useState(llmProvider);
-  const [recAppName, setRecAppName] = useState('');
+  const [recAppName] = useState('');
   const [recStatus, setRecStatus] = useState<RecordingStatus>('idle');
   const [recError, setRecError] = useState<string | null>(null);
   const [recMessages, setRecMessages] = useState<RecorderMessage[]>([]);
   const [recScreenshot, setRecScreenshot] = useState<string | null>(null);
-  const [recCurrentUrl, setRecCurrentUrl] = useState('');
+  const [, setRecCurrentUrl] = useState('');
   const recCurrentUrlRef = useRef('');
   const [recResult, setRecResult] = useState<{ test_suite: GeneratedSuite; step_count: number; export_json?: object } | null>(null);
   const [recInstruction, setRecInstruction] = useState('');
@@ -608,58 +589,12 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   }, [chatSessionId, chatPhase]);
 
   // ── Computed flags ────────────────────────────────────────────────────────
-  const canGenerate = url.trim().length > 0 && intent.trim().length > 0 && !loading;
   const canStartRecording = recUrl.trim().length > 0 && (recStatus === 'idle' || recStatus === 'error');
   const canExecuteSteps = recInstruction.trim().length > 0 && recStatus === 'active';
 
   // ==========================================================================
-  // Generate mode handlers
+  // Generate mode helpers
   // ==========================================================================
-
-  const handleGenerate = async () => {
-    setError(null);
-    setResult(null);
-    setLoading(true);
-    setLoadingStep(1);
-    try {
-      const body = {
-        url: url.trim(),
-        intent: intent.trim(),
-        app_name: appName.trim() || undefined,
-        test_email: testEmail.trim() || undefined,
-        test_password: testPassword.trim() || undefined,
-      };
-      await new Promise(r => setTimeout(r, 100));
-      const params = new URLSearchParams({ llm_provider: selectedProvider });
-      const res = await fetch(`${API_BASE}/api/v1/generate-from-url?${params}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      setLoadingStep(2);
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail || 'Server error');
-      }
-      const data: ApiResult = await res.json();
-      setResult(data);
-      addNotification('success', `Generated ${data.test_suite?.test_cases?.length ?? 0} test case(s) successfully`);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
-      addNotification('error', `Generation failed: ${msg}`);
-    } finally {
-      setLoading(false);
-      setLoadingStep(0);
-    }
-  };
-
-  const handleUseInAgent = () => {
-    if (!result?.test_suite) return;
-    setTestSuite(result.test_suite as any);
-    addNotification('success', 'Test suite loaded — switch to Agent or Execute to run tests');
-    setCurrentView('suite');
-  };
 
   const handleExportExcel = async (suite: GeneratedSuite) => {
     try {
@@ -720,11 +655,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       const msg = e instanceof Error ? e.message : String(e);
       addNotification('error', `Export failed: ${msg}`);
     }
-  };
-
-  const handleReset = () => {
-    setResult(null);
-    setError(null);
   };
 
   // ==========================================================================
@@ -1420,12 +1350,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     appendChatMsg({ id: `stop_${Date.now()}`, role: 'assistant', content: '_User Interrupted_' });
   }, [chatPhase, chatSessionId]);
 
-  const handleChatUseInAgent = (suite: GeneratedSuite) => {
-    setTestSuite(suite as any);
-    addNotification('success', 'Test suite loaded — switch to Agent or Execute to run tests');
-    setCurrentView('suite');
-  };
-
   const handleChatReset = () => {
     if (execSseRef.current) { execSseRef.current.close(); execSseRef.current = null; }
     disconnectSSE();
@@ -1445,13 +1369,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     setExecCurrentUrl('');
     setConfirmedExecResults([]);
     setConfirmedTcIds(new Set());
-  };
-
-  const handleConfirmResult = (tc: ExecTestResult) => {
-    if (confirmedTcIds.has(tc.id)) return;
-    setConfirmedExecResults(prev => [...prev, tc]);
-    setConfirmedTcIds(prev => new Set([...prev, tc.id]));
-    setExecPanelView('excel');
   };
 
 
@@ -2102,7 +2019,13 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
               if (mode === 'record') setRecProvider(val as typeof recProvider);
               else setSelectedProvider(val as typeof selectedProvider);
             }}
-            disabled={loading || recStatus === 'executing' || recStatus === 'completing'}
+            disabled={
+              chatPhase === 'analyzing' ||
+              chatPhase === 'generating' ||
+              chatPhase === 'executing' ||
+              recStatus === 'executing' ||
+              recStatus === 'completing'
+            }
           />
         </div>
         <p className={styles.subtitle}>
@@ -3469,3 +3392,4 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     </div>
   );
 };
+

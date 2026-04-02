@@ -1017,6 +1017,26 @@ class EnhancedJsonParserAgent(BaseAgent):
                         td["source"] = "table"
                     print(f"    [Parser] Reclassified to fill-from-table: {instruction[:60]}...")
                     continue
+                if action_type == "select" and ((step.get("selector_hints") or {}).get("element_type", "") or "").lower() in ("checkbox", "radio", "switch", "option"):
+                    action["type"] = "click"
+                    action["playwright_method"] = "page.click() / locator.click()"
+                    print(
+                        f"    [Parser] Reclassified select -> click for {((step.get('selector_hints') or {}).get('element_type', '') or '').lower()}: {instruction[:60]}..."
+                    )
+                    continue
+
+                # Dropdown/combobox clicks are usually meant to choose a value, not
+                # just open the trigger. Normalize those back to select so the
+                # executor uses the two-step open + option selection flow.
+                if action_type == "click" and ((step.get("selector_hints") or {}).get("element_type", "") or "").lower() in ("dropdown", "select", "combobox"):
+                    if any(kw in instruction for kw in ("dropdown", "combobox", "select", "choose")):
+                        action["type"] = "select"
+                        action["playwright_method"] = "page.selectOption() / locator.click()"
+                        print(
+                            f"    [Parser] Reclassified click -> select for dropdown-like control: {instruction[:60]}..."
+                        )
+                        continue
+
                 if action_type not in ("assert_all_rows",) and not _is_fill_from_table and any(
                     _re_fix.search(kw, instruction) for kw in row_iteration_keywords
                 ):

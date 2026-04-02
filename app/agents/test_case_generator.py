@@ -696,6 +696,9 @@ INPUTS ({input_count}):
 CUSTOM DROPDOWNS ({custom_dropdown_count}):
 {custom_dropdowns_text}
 
+ARIA WIDGETS ({aria_widget_count}):
+{aria_widgets_text}
+
 BUTTONS ({button_count}):
 {buttons_text}
 
@@ -801,6 +804,15 @@ DISAMBIGUATION — Dropdown trigger vs. navigation button:
       Step 2 (pick):  click  page.get_by_text('VALUE', exact=True)
                      element_type="option"
   - Do NOT use action_type "select" for these — they are custom components, use "click".
+  - If the value appears as a checkbox/radio/switch row or option text, generate a
+    click step on the visible label/value text, not a select action.
+
+  ARIA WIDGETS (checkboxes, radios, switches, comboboxes, options):
+  - If the page structure shows role="checkbox", role="radio", role="switch", role="combobox",
+    or role="option", treat those as real interactive targets.
+  - Checkbox/radio/switch widgets must be clicked, never selected.
+  - Option rows inside dropdowns/listboxes must be clicked by their visible text.
+  - For comboboxes, generate an open click followed by a separate option click when needed.
 
   COLLAPSE / EXPAND / TOGGLE SIDEBAR:
   - If the user says "collapse button", "expand button", or "toggle sidebar":
@@ -809,6 +821,37 @@ DISAMBIGUATION — Dropdown trigger vs. navigation button:
       • NEVER pick a password-toggle, eye icon, or any unrelated button.
       • Prefer: page.get_by_role('button', name=/collapse|expand|toggle/i)
         or page.locator('button[aria-label*="collapse" i]')
+
+─────────────────────────────────────────────────────────────
+SELECTOR PRIORITY — MANDATORY (apply to every suggested_selectors array)
+─────────────────────────────────────────────────────────────
+ALWAYS order selectors from most reliable to least reliable:
+
+  1st  page.get_by_role('...', name='...')          ← HIGHEST PRIORITY
+  2nd  page.get_by_label('...')
+  3rd  page.get_by_placeholder('...')
+  4th  page.get_by_text('...', exact=False)
+  5th  locator with has-text (e.g. label:has-text('...'))
+  6th  data-testid / aria-label attribute selector   ← only if above fail
+  LAST CSS class / XPath selectors                   ← LAST RESORT only
+
+Rules:
+- NEVER put a CSS class selector (.some-class) as the first or second selector.
+- NEVER rely on class-based selectors as primary — they break on style changes.
+- For custom UI components (checkbox, dropdown, toggle, button built from div/span):
+    ALWAYS use visible text selectors:
+    e.g. page.get_by_text('Arrange for ambulance services', exact=False)
+         page.get_by_role('checkbox', name='Arrange for ambulance services')
+         label:has-text('Arrange for ambulance services')
+- Provide a MINIMUM of 2 text/role-based selectors before any CSS fallback.
+
+Example for a custom checkbox labeled "Arrange for ambulance services":
+  "suggested_selectors": [
+    "page.get_by_role('checkbox', name='Arrange for ambulance services')",
+    "page.get_by_text('Arrange for ambulance services', exact=False)",
+    "label:has-text('Arrange for ambulance services')",
+    "input[type='checkbox'][value='ambulance']"
+  ]
 
 ─────────────────────────────────────────────────────────────
 STEP INSTRUCTION NAMING — MANDATORY
@@ -1011,6 +1054,7 @@ IMPORTANT:
 - Generate as many test cases as needed to cover the user intent
 - Keep selectors accurate to what exists on the real page
 - HONOR the user's stated element type: if they say "dropdown" → use dropdown/select selectors and element_type="dropdown"; if they say "button" → use button selectors; if they say "text box" → use input selectors
+- Treat checkbox, radio, switch, and option rows as click targets. Do not turn them into select actions.
 - NEVER use a navigation/sidebar button (e.g., "Our Project") when the user explicitly says "dropdown", "select from dropdown", or similar — use a label-matched combobox or select element instead
 - GENERATE FRESH TEST CASES ONLY: Base your output solely on the CURRENT USER INTENT and the PAGE STRUCTURE above. Do NOT copy, repeat, or re-use steps from any previously generated test cases that appear in the conversation history. Each generation is completely independent — prior test cases in the history are for context only, not templates to replicate.
 
@@ -1032,6 +1076,28 @@ def _format_custom_dropdowns(dropdowns: List[Dict], max_items: int = 10) -> str:
         )
     if len(dropdowns) > max_items:
         lines.append(f"  ... and {len(dropdowns) - max_items} more dropdowns")
+    return "\n".join(lines)
+
+
+def _format_aria_widgets(widgets: List[Dict], max_items: int = 15) -> str:
+    """Format ARIA widgets such as checkboxes, radios, switches, and comboboxes."""
+    if not widgets:
+        return "  (none found)"
+    lines = []
+    for widget in widgets[:max_items]:
+        role = widget.get("role", "")
+        label = widget.get("label", "")
+        text = widget.get("text", "")
+        states = []
+        for key in ("ariaChecked", "ariaExpanded", "ariaSelected"):
+            if widget.get(key) is not None:
+                states.append(f"{key}={widget.get(key)}")
+        state_str = " ".join(states) if states else "no-state"
+        lines.append(
+            f'  role="{role}" label="{label}" text="{text}" {state_str}'
+        )
+    if len(widgets) > max_items:
+        lines.append(f"  ... and {len(widgets) - max_items} more widgets")
     return "\n".join(lines)
 
 
@@ -1329,6 +1395,7 @@ class TestCaseGeneratorAgent(BaseAgent):
         headings = page_structure.get("headings", [])
         links = page_structure.get("links", [])
         custom_dropdowns = page_structure.get("custom_dropdowns", [])
+        aria_widgets = page_structure.get("aria_widgets", [])
 
         # Supplement native <button> elements with custom interactive components
         # (e.g. <div role="button">, <span role="menuitem">) that only appear in
@@ -1383,7 +1450,7 @@ class TestCaseGeneratorAgent(BaseAgent):
         # Scale element caps down when the page is large to stay within token limits.
         # Large pages (100+ elements) get tighter caps; normal pages keep defaults.
         total_elements = (len(inputs) + len(buttons) + len(headings)
-                          + len(links) + len(custom_dropdowns))
+                          + len(links) + len(custom_dropdowns) + len(aria_widgets))
         if total_elements > 100:
             _inp_cap, _btn_cap, _hdg_cap, _lnk_cap = 10, 8, 6, 6
         else:
@@ -1396,6 +1463,8 @@ class TestCaseGeneratorAgent(BaseAgent):
             inputs_text=_format_elements(inputs, max_items=_inp_cap),
             custom_dropdown_count=len(custom_dropdowns),
             custom_dropdowns_text=_format_custom_dropdowns(custom_dropdowns),
+            aria_widget_count=len(aria_widgets),
+            aria_widgets_text=_format_aria_widgets(aria_widgets),
             button_count=len(buttons),
             buttons_text=_format_elements(buttons, max_items=_btn_cap),
             heading_count=len(headings),

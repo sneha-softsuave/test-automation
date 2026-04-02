@@ -709,8 +709,42 @@ def _execute_single_test_sync(
                         capture_and_send_screenshot(page, step_num, "failed")
                     else:
                         print(f"    [FINAL ATTEMPT FAILED] {error_msg}")
-                        # Final attempt failed — try IR vision fallback for UI actions
+                        # Final attempt failed — run text/label fallbacks then vision
                         if action_type in ("fill", "click", "select"):
+                            _elem_name = current_selector_hints.get("element_name", "")
+
+                            # Tier 4: text fallback (get_by_text) — custom checkboxes, portals
+                            if _text_fallback(page, _elem_name, action_type, current_selector_hints.get("element_type", "")):
+                                step_passed = True
+                                step_result["selector_used"] = "text_fallback"
+                                step_result["retry_count"] = attempt
+                                capture_and_send_screenshot(page, step_num, "passed")
+                                step_update("step_completed", {
+                                    "message": f"Step {step_num} succeeded via text fallback",
+                                    "step_number": step_num,
+                                    "status": "PASSED",
+                                    "duration": round(step_time.time() - step_start, 2),
+                                    "retry_count": attempt,
+                                })
+                                break
+
+                            # Tier 5: label fallback — label/span/div has-text click
+                            if not step_passed and _label_fallback(page, _elem_name, action_type, current_selector_hints.get("element_type", "")):
+                                step_passed = True
+                                step_result["selector_used"] = "label_fallback"
+                                step_result["retry_count"] = attempt
+                                capture_and_send_screenshot(page, step_num, "passed")
+                                step_update("step_completed", {
+                                    "message": f"Step {step_num} succeeded via label fallback",
+                                    "step_number": step_num,
+                                    "status": "PASSED",
+                                    "duration": round(step_time.time() - step_start, 2),
+                                    "retry_count": attempt,
+                                })
+                                break
+
+                            # Tier 6: vision rescue (existing)
+                        if not step_passed and action_type in ("fill", "click", "select"):
                             print(f"    [IR-Rescue] All DOM-based attempts failed, trying vision fallback...")
                             ir_success = _ir_selector_rescue(
                                 page=page,
@@ -899,6 +933,197 @@ def _execute_single_test_sync(
     return result
 
 
+def _score_selector(selector: str) -> int:
+    """
+    Score a Playwright selector string by reliability.
+    Higher score = try first. Text/role-based selectors score highest;
+    CSS class/XPath score lowest (fragile on dynamic UIs).
+    """
+    if "get_by_role" in selector:          return 100
+    if "get_by_label" in selector:         return 95
+    if "get_by_placeholder" in selector:   return 90
+    if "get_by_text" in selector:          return 85
+    if "has-text" in selector:             return 75
+    if "data-testid" in selector or "data-test" in selector: return 65
+    if "aria-label" in selector:           return 60
+    if "xpath" in selector.lower():        return 15
+    # CSS class-only selectors (e.g. locator('.btn-primary')) — fragile
+    if selector.strip().startswith("page.locator('."):      return 20
+    return 40  # other attribute/CSS selectors — reasonable mid-tier fallback
+
+
+def _click_locator_with_fallback(locator, timeout: int = 5000) -> bool:
+    """Click a locator, then fall back to ancestor clicks if needed."""
+    try:
+        if locator.count() > 0 and locator.first.is_visible():
+            try:
+                locator.first.scroll_into_view_if_needed(timeout=1000)
+            except Exception:
+                pass
+            locator.first.click(timeout=timeout)
+            return True
+    except Exception:
+        pass
+
+    current = locator
+    for depth in range(1, 5):
+        try:
+            current = current.locator("..")
+            if current.count() > 0 and current.first.is_visible():
+                try:
+                    current.first.scroll_into_view_if_needed(timeout=1000)
+                except Exception:
+                    pass
+                current.first.click(timeout=timeout)
+                print(f"    [ancestor-click] Succeeded at depth {depth}")
+                return True
+        except Exception:
+            continue
+
+    try:
+        if locator.count() > 0 and locator.first.is_visible():
+            locator.first.click(force=True, timeout=timeout)
+            print("    [ancestor-click] force click on original locator succeeded")
+            return True
+    except Exception:
+        pass
+
+    current = locator
+    for depth in range(1, 5):
+        try:
+            current = current.locator("..")
+            if current.count() > 0 and current.first.is_visible():
+                current.first.click(force=True, timeout=timeout)
+                print(f"    [ancestor-click] force click succeeded at depth {depth}")
+                return True
+        except Exception:
+            continue
+
+    try:
+        locator.dispatch_event("click")
+        print("    [ancestor-click] dispatch_event('click') succeeded")
+        return True
+    except Exception:
+        return False
+
+
+def _text_fallback(page, element_name: str, action_type: str, element_type: str = "") -> bool:
+    """
+    Tier 4 rescue: find element by visible text using get_by_text.
+    Works for custom checkboxes, div-based buttons, and portal dropdowns.
+    Only applies to click/select — fill needs an actual input element.
+    """
+    if not element_name or action_type not in ("click", "select"):
+        return False
+    try:
+        element_type = (element_type or "").lower()
+
+        if element_type in ("checkbox", "radio"):
+            for role in (element_type, "checkbox", "radio"):
+                try:
+                    locator = page.get_by_role(role, name=element_name, exact=False)
+                    if locator.count() > 0:
+                        try:
+                            locator.first.check(timeout=5000)
+                            print(f"    [text-fallback] Succeeded with check() on role='{role}' for '{element_name}'")
+                            return True
+                        except Exception:
+                            if _click_locator_with_fallback(locator):
+                                print(f"    [text-fallback] Succeeded with click fallback for role='{role}' and '{element_name}'")
+                                return True
+                except Exception:
+                    continue
+
+        if element_type == "switch":
+            try:
+                locator = page.get_by_role("switch", name=element_name, exact=False)
+                if locator.count() > 0 and _click_locator_with_fallback(locator):
+                    print(f"    [text-fallback] Succeeded with get_by_role('switch', '{element_name}')")
+                    return True
+            except Exception:
+                pass
+
+        if element_type == "option":
+            popup = None
+            try:
+                popup = _get_dropdown_popup_container(page)
+            except Exception:
+                popup = None
+
+            option_locators = []
+            if popup is not None:
+                option_locators.extend([
+                    popup.get_by_role("option", name=element_name, exact=False),
+                    popup.get_by_text(element_name, exact=True),
+                    popup.locator(f'[role="option"]:has-text("{element_name}")'),
+                    popup.locator(f'li:has-text("{element_name}")'),
+                    popup.locator(f'div:has-text("{element_name}")'),
+                ])
+            option_locators.extend([
+                page.get_by_role("option", name=element_name, exact=False),
+                page.get_by_text(element_name, exact=True),
+                page.get_by_text(element_name, exact=False),
+                page.locator(f'[role="option"]:has-text("{element_name}")'),
+                page.locator(f'li:has-text("{element_name}")'),
+            ])
+
+            for locator in option_locators:
+                try:
+                    if locator.count() > 0 and _click_locator_with_fallback(locator):
+                        print(f"    [text-fallback] Succeeded with option locator for '{element_name}'")
+                        return True
+                except Exception:
+                    continue
+
+        locator = page.get_by_text(element_name, exact=False)
+        if locator.count() > 0 and _click_locator_with_fallback(locator):
+            print(f"    [text-fallback] Succeeded with get_by_text('{element_name}')")
+            return True
+    except Exception as e:
+        print(f"    [text-fallback] get_by_text failed: {e}")
+    return False
+
+
+def _label_fallback(page, element_name: str, action_type: str, element_type: str = "") -> bool:
+    """
+    Tier 5 rescue: click via label:has-text() then span:has-text().
+    Directly fixes custom checkboxes and labeled toggle controls where
+    clicking the visible label text triggers the underlying input.
+    Only applies to click/select actions.
+    """
+    if not element_name or action_type not in ("click", "select"):
+        return False
+    if (element_type or "").lower() in ("checkbox", "radio"):
+        for role in ("checkbox", "radio"):
+            try:
+                locator = page.get_by_role(role, name=element_name, exact=False)
+                if locator.count() > 0:
+                    try:
+                        locator.first.check(timeout=5000)
+                        print(f"    [label-fallback] Succeeded with check() on role='{role}' for '{element_name}'")
+                        return True
+                    except Exception:
+                        if _click_locator_with_fallback(locator):
+                            print(f"    [label-fallback] Succeeded with click fallback on role='{role}'")
+                            return True
+            except Exception:
+                continue
+    for strategy in [
+        f"label:has-text('{element_name}')",
+        f"span:has-text('{element_name}')",
+        f"div:has-text('{element_name}')",
+    ]:
+        try:
+            locator = page.locator(strategy)
+            if locator.count() > 0 and _click_locator_with_fallback(locator):
+                print(f"    [label-fallback] Succeeded with {strategy}")
+                return True
+        except Exception:
+            continue
+    print(f"    [label-fallback] All strategies failed for '{element_name}'")
+    return False
+
+
 def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = None, action_type: str = None, instruction: str = "", failed_selectors: List[str] = None) -> Optional[str]:
     """
     Get the best working selector from hints (sync version).
@@ -974,6 +1199,11 @@ def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = N
                         return f'locator::{lbl_sel}'
                 except Exception:
                     pass
+
+    # Sort by reliability score — text/role-based first, CSS/XPath last.
+    # This ensures the LLM's best selectors are tried first regardless of
+    # the order they were generated in.
+    suggested = sorted(suggested, key=_score_selector, reverse=True)
 
     # Try each suggested selector
     for selector in suggested:
@@ -1150,7 +1380,7 @@ def _find_selector_dynamically_sync(page, selector_hints: Dict, test_data: Dict 
                 });
             });
 
-            document.querySelectorAll('button, input[type="submit"], [role="button"], a.btn, a[class*="button"]').forEach(el => {
+            document.querySelectorAll('button, input[type="submit"], [role="button"], [role="checkbox"], [role="radio"], [role="switch"], [role="option"], input[type="checkbox"], input[type="radio"], a.btn, a[class*="button"], label').forEach(el => {
                 // Get alt text from child img or svg title (store both original and lowercase)
                 var altTextOriginal = '';
                 var childImg = el.querySelector('img');
@@ -1741,6 +1971,19 @@ def _generate_fallback_selectors(element_name: str, element_type: str) -> List[s
             f'get_by_role::link::{element_name}',
             f'get_by_text::{element_name}',
         ])
+    elif element_type == "option":
+        selectors.extend([
+            f'get_by_role::option::{element_name}',
+            f'get_by_text::{element_name}',
+            f'locator::[role="option"]:has-text("{element_name}")',
+            f'locator::li:has-text("{element_name}")',
+        ])
+    elif element_type == "switch":
+        selectors.extend([
+            f'get_by_role::switch::{element_name}',
+            f'get_by_text::{element_name}',
+            f'locator::[role="switch"]',
+        ])
 
     return selectors
 
@@ -1790,6 +2033,7 @@ def _generate_alternative_selectors(
             f'get_by_role::button::{element_name}',
             f'get_by_role::link::{element_name}',
             f'get_by_role::menuitem::{element_name}',
+            f'get_by_role::option::{element_name}',
         ]
 
         # Attribute-based alternatives
@@ -1833,7 +2077,7 @@ def _generate_alternative_selectors(
             alternatives = [s for s in error_variations if s not in failed_selectors] + alternatives
 
         # Checkbox/radio-specific alternatives — prepended so they're tried before generic ones
-        if element_type.lower() in ("checkbox", "radio"):
+        if element_type.lower() in ("checkbox", "radio", "switch"):
             checkbox_variations = [
                 f'get_by_role::{element_type.lower()}::{element_name}',
                 f'get_by_label::{element_name}',
@@ -1845,6 +2089,16 @@ def _generate_alternative_selectors(
             # Prepend so checkbox-specific selectors are tried first
             alternatives = [s for s in checkbox_variations if s not in failed_selectors] + alternatives
 
+        if element_type.lower() == "option":
+            option_variations = [
+                f'get_by_role::option::{element_name}',
+                f'get_by_text::{element_name}',
+                f'locator::[role="option"]:has-text("{element_name}")',
+                f'locator::li:has-text("{element_name}")',
+                f'locator::div:has-text("{element_name}")',
+            ]
+            alternatives = [s for s in option_variations if s not in failed_selectors] + alternatives
+
     # Tier 2: Dynamic page analysis (on retry 2+)
     if attempt >= 2 and page:
         try:
@@ -1855,7 +2109,7 @@ def _generate_alternative_selectors(
                 const nameLower = (elementName || '').toLowerCase();
 
                 // Find elements by text content
-                const allElements = document.querySelectorAll('button, a, input, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"]');
+                const allElements = document.querySelectorAll('button, a, input, textarea, [role="button"], [role="link"], [role="checkbox"], [role="radio"], [role="switch"], [role="option"]');
 
                 for (const el of allElements) {
                     // Check text content
@@ -2798,6 +3052,31 @@ def _execute_action_sync(
             print(f"    WARNING: Fill executed with empty value - test_data was null/empty and no value found in instruction")
 
     elif action_type == "click":
+        element_type_lc = (selector_hints.get("element_type") or "").lower()
+        instruction_lc = (instruction or "").lower()
+
+        # Dropdown-like clicks often mean "choose a value", not "open the trigger".
+        # Route those through the select workflow so custom dropdowns get the
+        # open-then-pick behavior instead of a false-positive text click.
+        if element_type_lc in ("dropdown", "select", "combobox") and step_test_data and any(
+            k in instruction_lc for k in ("dropdown", "combobox", "select", "choose")
+        ):
+            print("    [click->select] Routing dropdown-like click through select flow")
+            return _execute_action_sync(
+                page=page,
+                action_type="select",
+                selector_hints=selector_hints,
+                step_test_data=step_test_data,
+                assertions=assertions,
+                suite_test_data=suite_test_data,
+                timeout=timeout,
+                sync_expect=sync_expect,
+                instruction=instruction,
+                signal_file=signal_file,
+                run_context=run_context,
+                failed_selectors=failed_selectors,
+            )
+
         selector = _get_best_selector_sync(page, selector_hints, step_test_data, action_type="click", instruction=instruction, failed_selectors=failed_selectors)
 
         # Fast-path for login/submit buttons: if selector still not found, try
@@ -3013,7 +3292,36 @@ def _execute_action_sync(
                         break
                     # Timeout — poll again after checking signal
                     print(f"    Click attempt {_cp + 1}/{click_polls} timed out, retrying...")
-            # Final fallback: dispatch JS click event directly.
+            # Fallback A: click parent element.
+            # When get_by_text() finds a text <span> with pointer-events:none (common
+            # in React/MUI custom checkboxes), the pointer click times out. The React
+            # onClick handler lives on the PARENT container, so clicking the parent
+            # is the correct interaction.
+            if not click_done and click_error is not None:
+                try:
+                    parent_loc = locator.locator('..')
+                    if parent_loc.count() > 0 and parent_loc.first.is_visible():
+                        parent_loc.first.click(timeout=5000)
+                        click_done = True
+                        selector_used = selector + "/../(parent)"
+                        click_error = None
+                        print(f"    Parent element click succeeded")
+                except Exception as _pe:
+                    print(f"    Parent click failed ({_pe}), trying grandparent...")
+                    # Try grandparent — some frameworks nest text inside 2 wrapper spans
+                    try:
+                        gp_loc = locator.locator('../..')
+                        if gp_loc.count() > 0 and gp_loc.first.is_visible():
+                            gp_loc.first.click(timeout=5000)
+                            click_done = True
+                            selector_used = selector + "/../../(grandparent)"
+                            click_error = None
+                            print(f"    Grandparent element click succeeded")
+                    except Exception as _gpe:
+                        click_error = _gpe
+
+            # Fallback B: dispatch JS click event directly.
+            # Used only when parent/grandparent clicks also fail.
             # Custom checkboxes inside MUI Modals time out on pointer clicks because
             # the backdrop/label intercepts, but they respond to JS-dispatched events.
             if not click_done and click_error is not None:

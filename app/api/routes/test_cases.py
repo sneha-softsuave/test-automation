@@ -1224,6 +1224,9 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
     history = get_messages(request.session_id)
     append_message(request.session_id, "user", request.user_message)
 
+    provider_enum = AgentLLMProvider(provider_name)
+    agent = TestCaseGeneratorAgent(provider=provider_enum)
+
     new_creds = _extract_credentials(request.user_message)
     session_creds = get_credentials(request.session_id)
     if new_creds:
@@ -1250,7 +1253,6 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
     _test_email = session_creds.get("email") or request.test_email or "test@example.com"
     _test_password = session_creds.get("password") or request.test_password or "password123"
     _new_creds = new_creds
-    _provider_name = provider_name
 
     async def _generate():
         try:
@@ -1261,9 +1263,6 @@ async def chat_generate(request: ChatGenerateRequest, background_tasks: Backgrou
 
             from app.services.executor_session_manager import executor_session_manager as _esm_gen
             _browser_alive = _esm_gen.get_session(_session_id) is not None
-
-            provider_enum = AgentLLMProvider(_provider_name)
-            agent = TestCaseGeneratorAgent(provider=provider_enum)
 
             _tok_before = _get_stats()
             test_suite = await _asyncio.to_thread(
