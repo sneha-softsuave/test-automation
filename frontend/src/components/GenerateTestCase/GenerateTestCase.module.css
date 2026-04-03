@@ -351,6 +351,12 @@
   background: #eef2ff;
 }
 
+.chatActionBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 .chatInputHint {
   display: flex;
   align-items: center;
@@ -471,6 +477,7 @@
   border-radius: 18px 18px 4px 18px;
   font-size: 0.9rem;
   line-height: 1.5;
+  white-space: pre-wrap;
   word-break: break-word;
   width: fit-content;
   max-width: 80%;
@@ -2391,13 +2398,14 @@
 .exportConfirmDialog {
   background: #fff;
   border-radius: 16px;
-  padding: 32px 36px;
+  padding: 40px 36px;
   max-width: 360px;
   width: 90%;
+  min-height: 200px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.18);
 }
 

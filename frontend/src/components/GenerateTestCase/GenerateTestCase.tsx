@@ -3,9 +3,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Sparkles, Globe, ChevronDown, ChevronRight,
   Play, FileSpreadsheet, AlertCircle, Check,
-  RotateCcw, Video, MonitorPlay, Monitor,
-  CheckCircle2, XCircle, Loader2, Camera, X, Send,
-  Zap, Save, FileJson, Pencil, Copy, Maximize2, StopCircle
+  Eye, EyeOff, RotateCcw, Video, MonitorPlay, Monitor, MonitorOff,
+  Circle, CheckCircle2, XCircle, Loader2, Camera, X, Send,
+  Zap, Save, FileJson, Pencil, Copy, PanelRightOpen, Maximize2, StopCircle
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { SaveToProjectModal } from './SaveToProjectModal';
@@ -102,6 +102,8 @@ interface ChatMsg {
   session_total_tokens?: number;
   session_total_cost?: number;
   tsrId?: string; // TSR rerun badge label e.g. "TSR_001"
+  isBrowserClosedMsg?: boolean; // True for "Test Interrupted" messages — renders Reopen + New Chat buttons
+  browserClosedActioned?: boolean; // True once Reopen or New Chat was clicked — disables both buttons
 }
 
 interface RerunResult {
@@ -211,6 +213,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   // ── Chatbot generate mode state ──────────────────────────────────────────
   const [chatPhase, setChatPhase] = useState<ChatPhase>('url_input');
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  const chatSessionIdRef = useRef<string | null>(null); // stable ref — always mirrors chatSessionId
   const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
   const [typingMsg, setTypingMsg] = useState<{ id: string; full: string; shown: number } | null>(null);
   const [chatUrlInput, setChatUrlInput] = useState('');
@@ -235,6 +238,9 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const [execPanelView, setExecPanelView] = useState<'browser' | 'excel'>('browser');
   const [confirmedExecResults, setConfirmedExecResults] = useState<ExecTestResult[]>([]);
   const [confirmedTcIds, setConfirmedTcIds] = useState<Set<string>>(new Set());
+  const [browserClosed, setBrowserClosed] = useState(false);
+  const browserClosedAlertedRef = useRef(false);
+  const isAnalyzingRef = useRef(false); // guard against concurrent handleAnalyzeUrl calls
 
   // ── Excel edit mode ───────────────────────────────────────────────────────
   const [isExcelEditMode, setIsExcelEditMode] = useState(false);
@@ -245,7 +251,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
   // ── Rerun tracking ────────────────────────────────────────────────────────
   const [rerunCounter, setRerunCounter] = useState(0);
-  const [, setRerunResults] = useState<RerunResult[]>([]);
+  const [rerunResults, setRerunResults] = useState<RerunResult[]>([]);
   const rerunSessionRef = useRef<{ tsrId: string; testId: string } | null>(null);
 
   // ── Per-step URL tracking ─────────────────────────────────────────────────
@@ -253,6 +259,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   const currentUrlRef = useRef<string>('');
   // Captures browser URL at the start of every step: { testId: urlPerStep[] }
   const stepUrlMapRef = useRef<Record<string, string[]>>({});
+  // Last storage state (cookies/localStorage) received from page_navigated SSE — used for Reopen
+  const lastStorageStateRef = useRef<object | null>(null);
 
   // Last generated test suite (for suggestion buttons)
   const [lastTestSuite, setLastTestSuite] = useState<GeneratedSuite | null>(null);
@@ -292,6 +300,10 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
   // ── Export Excel confirm dialog ───────────────────────────────────────────
   const [showExportConfirm, setShowExportConfirm] = useState(false);
+
+  // ── New Chat confirm dialog ───────────────────────────────────────────────
+  const [showNewChatConfirm, setShowNewChatConfirm] = useState(false);
+  const newChatMsgIdRef = useRef<string | null>(null); // msg ID of the browser-closed button that triggered the dialog
 
   const sessionIdRef = useRef<string>(makeSessionId());
   const sseRef = useRef<EventSource | null>(null);
@@ -418,6 +430,15 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
           setChatPhase('chatting');
           setTimeout(() => chatInputRef.current?.focus(), 50);
 
+        } else if (data.type === 'browser_closed_during_exec') {
+          setBrowserClosed(true);
+          setExecScreenshot(null);
+          setChatMessages(prev => [...prev, {
+            id: `sys_${Date.now()}`,
+            role: 'assistant',
+            content: '*Execution aborted because the browser was closed manually.*',
+            isBrowserClosedMsg: true,
+          }]);
         } else if (data.type === 'chat_test_suite') {
           const suite = data.test_suite as GeneratedSuite | undefined;
           _resolveThinking({
@@ -520,8 +541,9 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
         // ── Browser preview (loaded on URL submit, before execution) ──────
         } else if (data.type === 'browser_preview') {
-          if (data.image_b64) setExecScreenshot(String(data.image_b64));
-          if (data.url) setExecCurrentUrl(String(data.url));
+          setBrowserClosed(false);
+          setExecScreenshot(data.image);
+          if (data.url) setExecCurrentUrl(data.url);
           setBrowserPreviewLoading(false);
 
         // ── Recorder events ────────────────────────────────────────────────
@@ -568,6 +590,42 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
 
   useEffect(() => () => disconnectSSE(), [disconnectSSE]);
 
+  // ── Session cleanup helper — callable from any code path ─────────────────
+  // Uses a ref so it always sees the current session ID regardless of closure age.
+  const closeBrowserSession = useCallback((sessionId?: string | null) => {
+    const id = sessionId ?? chatSessionIdRef.current;
+    if (!id) return;
+    fetch(`${API_BASE}/api/v1/browser-session/${id}`, {
+      method: 'DELETE',
+      keepalive: true,
+    }).catch(() => {});
+  }, []);
+
+  // Keep ref in sync with state so closeBrowserSession always has the latest ID.
+  // Also update the ref synchronously via a wrapper used throughout this component.
+  const setSessionId = useCallback((id: string | null) => {
+    chatSessionIdRef.current = id;
+    setChatSessionId(id);
+  }, []);
+
+  useEffect(() => {
+    chatSessionIdRef.current = chatSessionId;
+  }, [chatSessionId]);
+
+  // ── Session cleanup on tab close / page refresh ───────────────────────────
+  // Registered ONCE — reads chatSessionIdRef.current at event time so it is
+  // never stale regardless of when chatSessionId state changes.
+  useEffect(() => {
+    const onUnload = () => closeBrowserSession(); // always reads ref
+    window.addEventListener('beforeunload', onUnload);
+    return () => window.removeEventListener('beforeunload', onUnload);
+  }, [closeBrowserSession]);
+
+  // ── Session cleanup on component unmount (route change) ───────────────────
+  useEffect(() => {
+    return () => closeBrowserSession(); // reads ref at unmount time
+  }, [closeBrowserSession]);
+
   // ── Periodic live-browser screenshot (every 10 s) ─────────────────────────
   // Polls the current page screenshot from the persistent executor session so
   // the browser panel stays live even when no test is running (loaders, idle, etc.)
@@ -575,16 +633,49 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   useEffect(() => {
     if (!chatSessionId) return;
     const poll = async () => {
-      if (chatPhase === 'executing') return;
+      if (chatPhase === 'executing' || chatPhase === 'analyzing') return;
       try {
         const res = await fetch(`${API_BASE}/api/v1/browser-screenshot/${chatSessionId}`);
         if (!res.ok) return;
         const data = await res.json();
+        
+        if (data.browser_closed) {
+          setBrowserClosed(true);
+          setExecScreenshot(null);
+          setExecCurrentUrl('');
+
+          // Stop any in-flight LLM response from being rendered after the interrupt.
+          // Close the SSE so the backend's chat_test_suite / chat_response never arrives.
+          if (sseRef.current) {
+            sseRef.current.close();
+            sseRef.current = null;
+          }
+          // Dismiss the thinking spinner if one is showing.
+          const tid = chatThinkingIdRef.current;
+          if (tid) {
+            chatThinkingIdRef.current = null;
+            setChatMessages(prev => prev.filter(m => m.id !== tid));
+          }
+          // Unblock the input so the user isn't stuck.
+          setChatPhase(prev => prev === 'generating' ? 'chatting' : prev);
+
+          if (!browserClosedAlertedRef.current) {
+            browserClosedAlertedRef.current = true;
+            setChatMessages(prev => [...prev, {
+              id: `sys_${Date.now()}`,
+              role: 'assistant',
+              content: '*Test Interrupted. The browser window was closed unfortunately.*',
+              isBrowserClosedMsg: true,
+            }]);
+          }
+          return;
+        }
+
         if (data.image_b64) setExecScreenshot(data.image_b64);
         if (data.url) { setExecCurrentUrl(data.url); currentUrlRef.current = data.url; }
-      } catch { /* ignore — session may not exist yet */ }
+      } catch { setBrowserClosed(true); setExecScreenshot(null); }
     };
-    const id = setInterval(poll, 10000);
+    const id = setInterval(poll, 2000);
     return () => clearInterval(id);
   }, [chatSessionId, chatPhase]);
 
@@ -712,18 +803,39 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     }
   };
 
+  const markBrowserClosedActioned = (msgId: string) => {
+    setChatMessages(prev => prev.map(m => m.id === msgId ? { ...m, browserClosedActioned: true } : m));
+  };
+
   const _URL_PATTERN = /^(https?:\/\/|www\.)\S+/i;
   const looksLikeUrl = (text: string) => _URL_PATTERN.test(text.trim());
 
 
-  const handleAnalyzeUrl = async (urlOverride?: string) => {
+  const handleAnalyzeUrl = async (urlOverride?: string, storageState?: object | null, isReopen = false) => {
     const trimmedUrl = (urlOverride ?? chatUrlInput).trim();
     if (!trimmedUrl) return;
+    // Prevent concurrent calls — second tap/click while first is in flight
+    if (isAnalyzingRef.current) return;
+    isAnalyzingRef.current = true;
 
     setChatUrlInput(trimmedUrl);
-    appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: trimmedUrl });
+    appendChatMsg({
+      id: `cu_${Date.now()}`,
+      role: 'user',
+      content: isReopen ? `Reopen the browser` : trimmedUrl,
+    });
     setChatPhase('analyzing');
     setBrowserPreviewLoading(true);
+    setBrowserClosed(false);
+    browserClosedAlertedRef.current = false;
+
+    // Close the previous browser synchronously. Don't set chatSessionId to ''
+    // as an intermediate — that would deregister the beforeunload listener and
+    // leave a gap where a page refresh can't clean up the new session.
+    if (chatSessionIdRef.current) {
+      closeBrowserSession(chatSessionIdRef.current);
+    }
+
     chatThinkingIdRef.current = null; // reset any stale thinking state
     _showThinking('Analyzing page…'); // show dots immediately, before network round-trip
 
@@ -731,14 +843,14 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       const res = await fetch(`${API_BASE}/api/v1/analyze-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: trimmedUrl, llm_provider: selectedProvider }),
+        body: JSON.stringify({ url: trimmedUrl, llm_provider: selectedProvider, ...(storageState ? { storage_state: storageState } : {}) }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));
         throw new Error(err.detail || 'Server error');
       }
       const data = await res.json();
-      setChatSessionId(data.session_id);
+      setSessionId(data.session_id); // update ref + state atomically
       connectSSE(data.session_id);
       // chat_page_ready SSE event will call _resolveThinking + setChatPhase('chatting')
     } catch (e: unknown) {
@@ -746,8 +858,35 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       _resolveThinking({ id: `ce_${Date.now()}`, role: 'assistant', content: msg });
       setChatPhase('url_input');
       addNotification('error', `Analyse failed: ${msg}`);
+    } finally {
+      isAnalyzingRef.current = false;
     }
   };
+
+  // ── Reopen browser at last known URL with restored session state ───────────
+  const handleReopen = useCallback(async () => {
+    // Use the original session URL (what was submitted in the URL input) as the
+    // reopen target. currentUrlRef tracks every navigation including error/redirect
+    // pages (/no-access, etc.) so it is not reliable as a reopen target.
+    const reopenUrl = chatUrlInput || currentUrlRef.current;
+    if (!reopenUrl) return;
+
+    // Remove execution result messages that were never confirmed to Excel.
+    // Confirmed messages keep their "In Excel" badge; unconfirmed ones won't
+    // match the restored page state so they are cleaned up.
+    setChatMessages(prev => prev.filter(msg => {
+      if (!msg.execTestCases?.length) return true;
+      return msg.execTestCases.some(tc => confirmedTcIds.has(tc.id));
+    }));
+
+    // Reset browser state but keep confirmed Excel results and last test suite
+    setExecSteps([]);
+    setExecSummary(null);
+    setExecScreenshot(null);
+
+    // Reopen the original URL, restoring session cookies so the user stays logged in
+    await handleAnalyzeUrl(reopenUrl, lastStorageStateRef.current, true);
+  }, [confirmedTcIds, chatUrlInput]);
 
   // ── Execution SSE connection ───────────────────────────────────────────────
   // Always-current ref so the SSE onmessage handler never uses a stale closure
@@ -757,6 +896,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     if (execSseRef.current) {
       execSseRef.current.close();
       execSseRef.current = null;
+      setBrowserClosed(false);
+      setExecScreenshot(null);
     }
     setExecSteps([]);
     setExecSummary(null);
@@ -913,6 +1054,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         const elemSummary = String(data.elements_summary ?? `Browser navigated to: ${navUrl}`);
         if (navUrl) { setExecCurrentUrl(navUrl); currentUrlRef.current = navUrl; }
         if (data.image_b64) setExecScreenshot(String(data.image_b64));
+        // Track latest session state for Reopen restore
+        if (data.storage_state) lastStorageStateRef.current = data.storage_state as object;
         appendChatMsg({
           id: `nav_${Date.now()}`,
           role: 'assistant',
@@ -993,8 +1136,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     currentUrlRef.current = '';
     stepUrlMapRef.current = {};
     setExecPanelView('browser');
-    setConfirmedExecResults([]);
-    setConfirmedTcIds(new Set());
 
     if (!inputData) {
       // Only append user message on first call (not when re-calling after needs_input)
@@ -1221,25 +1362,28 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     if (!text) return;
     setChatTextInput('');
 
-    // In URL input phase, treat input as URL
+    const isUrl = looksLikeUrl(text);
+
+    // In URL input phase OR if browser was closed, treat input as URL directly to restart browser
+    if ((chatPhase === 'url_input' || browserClosed) && isUrl) {
+      const url = text.startsWith('http') ? text : `https://${text}`;
+      await handleAnalyzeUrl(url);
+      return;
+    }
+
     if (chatPhase === 'url_input') {
-      if (looksLikeUrl(text)) {
-        const url = text.startsWith('http') ? text : `https://${text}`;
-        await handleAnalyzeUrl(url);
-      } else {
-        appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: text });
-        _showThinking('Thinking…');
-        try {
-          const res = await fetch(`${API_BASE}/api/v1/chat-freeform`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_message: text, llm_provider: selectedProvider, context: 'url_input' }),
-          });
-          const data = await res.json();
-          _resolveThinking({ id: `ca_${Date.now()}`, role: 'assistant', content: data.message });
-        } catch {
-          _resolveThinking({ id: `ca_${Date.now()}`, role: 'assistant', content: 'Could you share the URL of the page you\'d like to test?' });
-        }
+      appendChatMsg({ id: `cu_${Date.now()}`, role: 'user', content: text });
+      _showThinking('Thinking…');
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/chat-freeform`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_message: text, llm_provider: selectedProvider, context: 'url_input' }),
+        });
+        const data = await res.json();
+        _resolveThinking({ id: `ca_${Date.now()}`, role: 'assistant', content: data.message });
+      } catch {
+        _resolveThinking({ id: `ca_${Date.now()}`, role: 'assistant', content: 'Could you share the URL of the page you\'d like to test?' });
       }
       return;
     }
@@ -1299,8 +1443,6 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
         setExecScreenshot(null);
         setExecCurrentUrl('');
         setExecPanelView('browser');
-        setConfirmedExecResults([]);
-        setConfirmedTcIds(new Set());
         _resolveThinking({ id: `ca_${Date.now()}`, role: 'assistant', content: String(data.message ?? '') });
         setExecSessionId(data.exec_session_id);
         setChatPhase('executing');
@@ -1335,6 +1477,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     // Clear typing animation and browser loading spinner
     setTypingMsg(null);
     setBrowserPreviewLoading(false);
+    setBrowserClosed(false);
+    browserClosedAlertedRef.current = false;
 
     // Reset UI to idle
     setChatPhase('chatting');
@@ -1352,12 +1496,13 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
   }, [chatPhase, chatSessionId]);
 
   const handleChatReset = () => {
+    closeBrowserSession(); // close Playwright browser immediately, before state is wiped
     if (execSseRef.current) { execSseRef.current.close(); execSseRef.current = null; }
     disconnectSSE();
     chatThinkingIdRef.current = null;
     setTypingMsg(null);
     setChatPhase('url_input');
-    setChatSessionId(null);
+    setSessionId(null);
     setChatMessages([]);
     setChatUrlInput('');
     setChatTextInput('');
@@ -1873,7 +2018,13 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
               />
             ) : (
               <div className={styles.screenshotPlaceholder}>
-                {browserPreviewLoading ? (
+                {browserClosed ? (
+                  <>
+                    <MonitorOff size={48} style={{ color: '#ef4444' }} />
+                    <span style={{ color: '#ef4444', fontWeight: 500, marginTop: '8px' }}>Browser Closed</span>
+                    <span style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>Submit a URL to reopen it.</span>
+                  </>
+                ) : browserPreviewLoading ? (
                   <>
                     <Loader2 size={36} className={styles.spin} style={{ color: '#6366f1' }} />
                     <span>Loading browser…</span>
@@ -2118,11 +2269,35 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                           ? typingMsg.full.slice(0, typingMsg.shown)
                           : msg.content;
                         return (
-                          <div className={styles.genAssistantBubble}>
-                            <div className={styles.genMarkdown}>
-                              <ReactMarkdown>{displayed}</ReactMarkdown>
+                          <>
+                            <div className={styles.genAssistantBubble}>
+                              <div className={styles.genMarkdown}>
+                                <ReactMarkdown>{displayed}</ReactMarkdown>
+                              </div>
                             </div>
-                          </div>
+                            {msg.isBrowserClosedMsg && (
+                              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                                <button
+                                  className={styles.chatActionBtn}
+                                  disabled={!!msg.browserClosedActioned}
+                                  onClick={() => { markBrowserClosedActioned(msg.id); handleReopen(); }}
+                                  title="Reopen the last URL with your saved session"
+                                >
+                                  <MonitorPlay size={13} />
+                                  <span>Reopen</span>
+                                </button>
+                                <button
+                                  className={styles.chatActionBtn}
+                                  disabled={!!msg.browserClosedActioned}
+                                  onClick={() => { newChatMsgIdRef.current = msg.id; setShowNewChatConfirm(true); }}
+                                  title="Start a new chat session"
+                                >
+                                  <RotateCcw size={13} />
+                                  <span>New Chat</span>
+                                </button>
+                              </div>
+                            )}
+                          </>
                         );
                       })()}
                       {/* Token usage — shown below the bubble for LLM responses */}
@@ -2321,7 +2496,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                 <div className={styles.chatInputActions}>
                   <button
                     className={styles.chatActionBtn}
-                    onClick={handleChatReset}
+                    onClick={() => setShowNewChatConfirm(true)}
                     title="New Chat"
                   >
                     <RotateCcw size={14} />
@@ -2366,7 +2541,9 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                   className={styles.chatTextarea}
                   rows={1}
                   placeholder={
-                    chatPhase === 'url_input'
+                    browserClosed
+                      ? 'Select Reopen or New Chat to continue…'
+                      : chatPhase === 'url_input'
                       ? 'Enter a URL to analyze (e.g. https://myapp.com/login)…'
                       : chatPhase === 'analyzing'
                       ? 'Analyzing page…'
@@ -2384,14 +2561,14 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                   onKeyDown={e => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      const isDisabled = chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing';
+                      const isDisabled = chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing' || browserClosed;
                       if (chatTextInput.trim() && !isDisabled) handleChatSend();
                     }
                   }}
-                  disabled={chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing'}
+                  disabled={chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing' || browserClosed}
                   autoFocus={chatPhase === 'url_input'}
                 />
-                {(chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing') ? (
+                {(!browserClosed && (chatPhase === 'analyzing' || chatPhase === 'generating' || chatPhase === 'executing')) ? (
                   <button
                     className={styles.chatStopBtn}
                     onClick={handleStop}
@@ -2403,7 +2580,7 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                   <button
                     className={styles.chatSendBtn}
                     onClick={handleChatSend}
-                    disabled={!chatTextInput.trim()}
+                    disabled={!chatTextInput.trim() || browserClosed}
                     title="Send (Enter)"
                   >
                     <Send size={16} />
@@ -3343,6 +3520,38 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
                 onClick={() => { setShowExportConfirm(false); handleExportConfirmedExcel(); }}
               >
                 Export
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showNewChatConfirm && (
+        <div className={styles.exportConfirmOverlay} onClick={() => setShowNewChatConfirm(false)}>
+          <div className={styles.exportConfirmDialog} onClick={e => e.stopPropagation()}>
+            <h3 className={styles.exportConfirmTitle}>Start a New Chat?</h3>
+            <p className={styles.exportConfirmDesc}>
+              This will close the current session and browser. Any unsaved work will be lost.
+            </p>
+            <div className={styles.exportConfirmActions}>
+              <button
+                className={styles.exportConfirmCancel}
+                onClick={() => setShowNewChatConfirm(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className={styles.exportConfirmOk}
+                onClick={() => {
+                  setShowNewChatConfirm(false);
+                  if (newChatMsgIdRef.current) {
+                    markBrowserClosedActioned(newChatMsgIdRef.current);
+                    newChatMsgIdRef.current = null;
+                  }
+                  handleChatReset();
+                }}
+              >
+                Yes, proceed
               </button>
             </div>
           </div>

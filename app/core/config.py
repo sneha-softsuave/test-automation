@@ -51,8 +51,12 @@ class Settings(BaseSettings):
     # Which provider to use for vision: "groq" or "openai"
     VISION_PROVIDER: str = "groq"
 
+    # MCP Server
+    mcp_server_url: str = "http://localhost:3000"
+
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
 
 settings = Settings()

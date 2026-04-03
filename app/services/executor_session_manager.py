@@ -27,9 +27,10 @@ class ExecutorSession:
     All Playwright operations run on a dedicated background thread.
     """
 
-    def __init__(self, session_id: str, headless: bool = False):
+    def __init__(self, session_id: str, headless: bool = False, storage_state: Optional[dict] = None):
         self.session_id = session_id
         self.headless = headless
+        self._initial_storage_state = storage_state
 
         # Playwright objects — only accessed from _pw_thread
         self._playwright: Any = None
@@ -59,11 +60,18 @@ class ExecutorSession:
                 slow_mo=500,
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
-            self._context = self._browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                ignore_https_errors=True,
-            )
+            ctx_kwargs: dict = {"viewport": {"width": 1280, "height": 800}, "ignore_https_errors": True}
+            if self._initial_storage_state:
+                ctx_kwargs["storage_state"] = self._initial_storage_state
+            self._context = self._browser.new_context(**ctx_kwargs)
             self._page = self._context.new_page()
+
+            def on_page(page):
+                self._page = page
+                logger.info(f"[ExecutorSession {self.session_id[:8]}] New page opened, switching active page")
+                
+            self._context.on("page", on_page)
+
             logger.info(
                 f"[ExecutorSession {self.session_id[:8]}] Browser launched "
                 f"(headless={self.headless})"
@@ -227,6 +235,12 @@ class ExecutorSession:
                 )
                 results.append(result)
 
+                if result.get("browser_closed"):
+                    send_update("browser_closed_during_exec", {
+                        "message": "Execution aborted because the browser was closed manually."
+                    })
+                    break
+
                 if result.get("final_storage_state") is not None:
                     shared_storage_state = result["final_storage_state"]
 
@@ -321,13 +335,13 @@ class ExecutorSessionManager:
         return cls._instance
 
     def get_or_create_session(
-        self, session_id: str, headless: bool = False
+        self, session_id: str, headless: bool = False, storage_state: Optional[dict] = None
     ) -> ExecutorSession:
         """Return the existing live session or create a new one."""
         with self._sessions_lock:
             session = self._sessions.get(session_id)
             if session is None or not session._pw_thread.is_alive():
-                session = ExecutorSession(session_id=session_id, headless=headless)
+                session = ExecutorSession(session_id=session_id, headless=headless, storage_state=storage_state)
                 self._sessions[session_id] = session
                 logger.info(
                     f"[ExecutorSessionManager] Created executor session "

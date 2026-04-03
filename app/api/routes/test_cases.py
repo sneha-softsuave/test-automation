@@ -1101,6 +1101,7 @@ async def generate_from_url(
 class AnalyzeUrlRequest(PydanticBaseModel):
     url: str
     llm_provider: Optional[str] = None
+    storage_state: Optional[dict] = None  # Restored session cookies for Reopen flow
 
 
 class ChatGenerateRequest(PydanticBaseModel):
@@ -1145,7 +1146,7 @@ async def analyze_url(
                 "message": "Analyzing page…",
             })
             extractor = SelectorExtractor(headless=headless)
-            page_structure = await extractor.extract_selectors(request.url)
+            page_structure = await extractor.extract_selectors(request.url, storage_state=request.storage_state)
             compact = compact_page_elements(page_structure)
 
             provider_enum = AgentLLMProvider(provider_name)
@@ -1168,7 +1169,7 @@ async def analyze_url(
                 from app.services.executor_session_manager import executor_session_manager as _esm
                 import asyncio as _asyncio
 
-                _exec_session = _esm.get_or_create_session(session_id, headless=True)
+                _exec_session = _esm.get_or_create_session(session_id, headless=False, storage_state=request.storage_state)
                 _preview = await _asyncio.to_thread(_exec_session.preview, request.url)
                 if _preview.get("success"):
                     await sse_manager.broadcast(session_id, {
@@ -1355,11 +1356,16 @@ async def browser_screenshot(session_id: str):
 
     def _capture():
         try:
+            if session._page.is_closed():
+                return {"browser_closed": True}
             ss = session._page.screenshot(type="png")
             url = session._page.url
             return {"image_b64": _b64.b64encode(ss).decode("utf-8"), "url": url}
         except Exception as e:
-            raise RuntimeError(str(e))
+            err_str = str(e)
+            if "Target closed" in err_str or "has been closed" in err_str:
+                return {"browser_closed": True}
+            raise RuntimeError(err_str)
 
     try:
         result = await _asyncio.to_thread(session.run_in_pw_thread, _capture)
@@ -1605,7 +1611,7 @@ class ChatMessageRequest(PydanticBaseModel):
     session_id: str
     user_message: str
     llm_provider: Optional[str] = None
-    headless: bool = True
+    headless: bool = False
     timeout: int = 30000
 
 
@@ -2809,18 +2815,19 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                         })
                     elif msg_type == "page_navigated":
                         nav_url = msg.get("url", "")
+                        nav_ss = msg.get("storage_state")
                         await sse_manager.broadcast(exec_session_id, {
                             "type": "page_navigated",
                             "url": nav_url,
                             "elements_summary": msg.get("elements_summary", ""),
                             "image_b64": msg.get("image", ""),
+                            "storage_state": nav_ss,
                         })
                         # Collect genuinely new post-login navigations for deferred
                         # re-scraping.  We intentionally do NOT start the scrape here
                         # because _do_page_scrape broadcasts page_analysis_start, which
                         # would appear in the chat before chat_execution_done.
                         # The scrape tasks are created after execution completes.
-                        nav_ss = msg.get("storage_state")
                         if nav_url and nav_ss and _meaningful_navigation(nav_url, _base_url):
                             cur_path = _nav_path(nav_url)
                             if _nav_state["initial_path"] is None:
@@ -2941,6 +2948,20 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
             total_passed = full_result.get("passed", 0)
             total_failed = full_result.get("failed", 0)
 
+            # ── Drain the forwarder before sending results ────────────────────
+            # page_navigated events emitted near the end of execution may still
+            # be sitting in update_queue.  If we start deferred scrapes first
+            # they broadcast page_analysis_start (thinking bubble) directly,
+            # which arrives at the frontend BEFORE the buffered page_navigated
+            # messages — causing the loading indicator to appear above the nav
+            # message.  Stopping the forwarder here and waiting for it to flush
+            # guarantees all page_navigated events land before page_analysis_start.
+            _fwd_state["running"] = False
+            try:
+                await _asyncio.wait_for(fwd_task, timeout=5.0)
+            except (_asyncio.CancelledError, _asyncio.TimeoutError):
+                fwd_task.cancel()
+
             summary_msg = f"Execution complete! {total_passed}/{count} test{'s' if count != 1 else ''} passed."
             if total_failed > 0:
                 summary_msg += f" {total_failed} failed."
@@ -3022,8 +3043,7 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
             })
         finally:
             _fwd_state["running"] = False
-            await _asyncio.sleep(0.3)  # drain remaining queue events
-            fwd_task.cancel()
+            fwd_task.cancel()  # no-op if already finished by the drain above
             # Wait for any concurrent re-scrape tasks so the summary reaches the
             # frontend before exec_session_complete closes the SSE connection.
             for _t in _scrape_tasks:
@@ -3164,3 +3184,17 @@ async def chat_edit(request: ChatEditRequest, background_tasks: BackgroundTasks)
 
     background_tasks.add_task(_edit)
     return {"session_id": request.session_id, "status": "thinking"}
+
+# ---------------------------------------------------------------------------
+# Session Teardown
+# ---------------------------------------------------------------------------
+
+@router.delete("/browser-session/{session_id}")
+async def close_browser_session(session_id: str):
+    """
+    Called by the frontend exactly when the user navigates away or closes the browser tab.
+    Destroys the associated persistent executor session to free backend resources.
+    """
+    from app.services.executor_session_manager import executor_session_manager as _esm
+    _esm.close_session(session_id)
+    return {"status": "closed"}

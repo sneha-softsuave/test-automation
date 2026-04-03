@@ -616,6 +616,15 @@ def _execute_single_test_sync(
                     step_result["selector_used"] = selector_used
                     step_result["retry_count"] = attempt
 
+                    # If the action opened a new tab/popup (e.g. target="_blank"), switch our active page to it
+                    if len(context.pages) > 0 and page != context.pages[-1]:
+                        page = context.pages[-1]
+                        try:
+                            page.bring_to_front()
+                        except Exception:
+                            pass
+                        print(f"    [Tab Switch] Action opened a new tab, switching to: {page.url}")
+
                     if selector_used:
                         result["selector_mappings"][f"step_{step_num}"] = selector_used
 
@@ -684,10 +693,18 @@ def _execute_single_test_sync(
                             "retry_count": attempt,
                         })
                     break  # Exit retry loop
-
                 except Exception as e:
                     attempt_duration = step_time.time() - attempt_start
                     error_msg = str(e) if str(e) else f"Unknown error in step {step_num}"
+
+                    # If browser/page was manually closed, ABORT immediately without retrying
+                    if "Target closed" in error_msg or "has been closed" in error_msg:
+                        print(f"    [BROWSER CLOSED] User manually closed the browser during step {step_num}")
+                        result["status"] = "ERROR"
+                        result["error"] = "Browser was closed manually."
+                        result["browser_closed"] = True
+                        step_update("browser_closed", {"message": "Browser was closed by the user."})
+                        return result
 
                     # Track failed selector if available
                     if "selector" in str(e).lower():
