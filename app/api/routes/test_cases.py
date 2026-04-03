@@ -1393,13 +1393,29 @@ async def re_analyze_url(
     print(f"\n[re-analyze-url] Scraping {request.url} | session={request.session_id}")
 
     try:
-        # Re-use stored cookies so authenticated pages are scraped correctly
-        from app.core.chat_sessions import get_execution_result
-        exec_result = get_execution_result(request.session_id) or {}
-        auth_state = exec_result.get("final_storage_state")
+        from app.services.executor_session_manager import executor_session_manager as _esm_ra
 
-        extractor = SelectorExtractor(headless=headless)
-        page_structure = await extractor.extract_selectors(request.url, storage_state=auth_state)
+        # Prefer the live persistent browser — fully rendered, authenticated, no cold-start.
+        # Fall back to subprocess scrape only when no browser session is open.
+        page_structure = None
+        _exec_sess_ra = _esm_ra.get_session(request.session_id)
+        if _exec_sess_ra and _exec_sess_ra._pw_thread.is_alive():
+            try:
+                import asyncio as _asyncio_ra
+                page_structure = await _asyncio_ra.to_thread(_exec_sess_ra.capture_page_structure)
+                print(f"[re-analyze-url] Used live browser for {request.url}")
+            except Exception as _ra_err:
+                print(f"[re-analyze-url] Live browser scrape failed ({_ra_err}), falling back to subprocess")
+                page_structure = None
+
+        if page_structure is None:
+            from app.core.chat_sessions import get_execution_result
+            exec_result = get_execution_result(request.session_id) or {}
+            auth_state = exec_result.get("final_storage_state")
+            extractor = SelectorExtractor(headless=headless)
+            page_structure = await extractor.extract_selectors(request.url, storage_state=auth_state)
+            print(f"[re-analyze-url] Used subprocess scrape for {request.url}")
+
         compact = compact_page_elements(page_structure)
 
         # Update session with new page data; clear stale test suite
@@ -1777,6 +1793,8 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
                 result["targets"] = ctx.get("targets") or "all"
             if not result.get("mode") and ctx.get("mode"):
                 result["mode"] = ctx["mode"]
+            if not result.get("group_size") and ctx.get("group_size"):
+                result["group_size"] = ctx["group_size"]
             return result
 
         # ── Fetch exec results; fall back to unexecuted test suite ────────────
@@ -1842,18 +1860,22 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
 
         # Mode unknown with multiple results → ask ONCE, store hint
         if len(matched) > 1 and not _ap_mode:
-            _ask_msg = (
-                f"I found **{len(matched)}** test case(s) to add:\n"
-                + "\n".join(
-                    f"- **{r.get('id')}**: {r.get('name')} "
-                    f"({'✅' if r.get('status') == 'passed' else '❌' if r.get('status') == 'failed' else '⏳'} {r.get('status', '')})"
+            _row_ctx = {
+                "test_cases": [
+                    {"id": r.get("id"), "name": r.get("name"), "status": r.get("status")}
                     for r in matched
-                )
-                + "\n\nAdd as **individual rows** or **combined into one row**?"
-            )
-            set_approval_context(_session_id, {"targets": [r.get("id") for r in matched], "mode": None})
-            append_message(_session_id, "assistant", _ask_msg)
+                ]
+            }
+            _ctx_to_store = {"targets": [r.get("id") for r in matched], "mode": None}
+            if _ap_params.get("group_size"):
+                _ctx_to_store["group_size"] = _ap_params["group_size"]
+            set_approval_context(_session_id, _ctx_to_store)
+            _row_user_msg = request.user_message
             async def _ask_mode():
+                _ask_msg = await _asyncio.to_thread(
+                    agent.narrate, "approve_row_structure", _row_user_msg, page_url, _row_ctx
+                )
+                append_message(_session_id, "assistant", _ask_msg)
                 await sse_manager.broadcast(_session_id, {"type": "chat_response", "message": _ask_msg, "intent": "approve"})
             background_tasks.add_task(_ask_mode)
             return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
@@ -1861,12 +1883,20 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
         # Safety gate: large bulk add without explicit "all" or confirm
         _explicitly_bulk = (str(_ap_targets).lower() == "all" or _ap_confirm)
         if len(matched) > 5 and not _explicitly_bulk:
-            _bulk_msg = (
-                f"You're about to add **{len(matched)} test cases** to Excel. Shall I go ahead? *(yes / no)*"
-            )
+            _bulk_ctx = {
+                "count": len(matched),
+                "test_cases": [
+                    {"id": r.get("id"), "name": r.get("name"), "status": r.get("status")}
+                    for r in matched
+                ]
+            }
             set_approval_context(_session_id, {"targets": [r.get("id") for r in matched], "mode": _ap_mode or "individual"})
-            append_message(_session_id, "assistant", _bulk_msg)
+            _bulk_user_msg = request.user_message
             async def _bulk_gate():
+                _bulk_msg = await _asyncio.to_thread(
+                    agent.narrate, "approve_confirm_individual", _bulk_user_msg, page_url, _bulk_ctx
+                )
+                append_message(_session_id, "assistant", _bulk_msg)
                 await sse_manager.broadcast(_session_id, {"type": "chat_response", "message": _bulk_msg, "intent": "approve"})
             background_tasks.add_task(_bulk_gate)
             return {"session_id": _session_id, "status": "thinking", "intent": "approve"}
@@ -1883,36 +1913,49 @@ async def chat_message(request: ChatMessageRequest, background_tasks: Background
 
         # ── Write directly ────────────────────────────────────────────────────
         _final_mode    = _ap_mode or "individual"
+        _group_size    = _ap_params.get("group_size")
         _write_matched = matched
         _write_msg     = request.user_message
 
         async def _do_write():
             results = list(_write_matched)
-            if _final_mode == "combined" and len(results) > 1:
-                _ids    = [r["id"] for r in results]
-                _failed = next((r for r in results if r.get("status") == "failed"), None)
+
+            async def _make_combined_row(items: list) -> dict:
+                """Merge a list of test results into a single combined row."""
+                _ids    = [r["id"] for r in items]
+                _failed = next((r for r in items if r.get("status") == "failed"), None)
                 try:
                     _sp = (
-                        f"Summarize what these {len(results)} test steps collectively verify "
+                        f"Summarize what these {len(items)} test steps collectively verify "
                         f"in one short phrase (max 10 words, no quotes):\n"
-                        + "\n".join(f"- {r['name']}" for r in results)
+                        + "\n".join(f"- {r['name']}" for r in items)
                     )
                     _name = await _asyncio.to_thread(agent.call_llm, _sp)
                     _name = re.sub(r'\*+', '', _name).strip().strip('"').rstrip(".")
                     if not _name or len(_name) > 80:
                         raise ValueError("bad summary")
                 except Exception:
-                    _name = f"Combined {len(results)} Test Cases"
-                results = [{
+                    _name = f"Combined {len(items)} Test Cases"
+                return {
                     "id": f"GROUP_{_ids[0]}_{_ids[-1]}",
                     "name": _name,
                     "status": "failed" if _failed else "passed",
-                    "steps": [s for r in _write_matched for s in r.get("steps", [])],
-                    "expected_results": [e for r in _write_matched for e in r.get("expected_results", [])],
-                    "test_data": {k: v for r in _write_matched for k, v in (r.get("test_data") or {}).items()},
+                    "steps": [s for r in items for s in r.get("steps", [])],
+                    "expected_results": [e for r in items for e in r.get("expected_results", [])],
+                    "test_data": {k: v for r in items for k, v in (r.get("test_data") or {}).items()},
                     "error": _failed.get("error") if _failed else None,
                     "grouped_ids": _ids,
-                }]
+                }
+
+            if _final_mode == "combined" and len(results) > 1:
+                _gs = int(_group_size) if _group_size else None
+                if _gs and 0 < _gs < len(results):
+                    # Hybrid: combine first _gs, keep the rest as individual rows
+                    combined_row = await _make_combined_row(results[:_gs])
+                    results = [combined_row] + results[_gs:]
+                else:
+                    # Combine all into one row
+                    results = [await _make_combined_row(results)]
 
             # Mark confirmed IDs and clear session hint
             _all_ids = []
@@ -2689,7 +2732,6 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
         async def _do_page_scrape(nav_url: str, storage_state):
             """Re-scrape a navigated page and push the AI summary to the chatbot."""
             try:
-                from app.tools.selector_extractor import SelectorExtractor as _SE
                 from app.agents.test_case_generator import (
                     TestCaseGeneratorAgent as _TGA,
                     compact_page_elements as _cpe,
@@ -2702,8 +2744,28 @@ async def chat_execute(request: ChatExecuteRequest, background_tasks: Background
                     "url": nav_url,
                     "message": "Browser navigated to a new page — analyzing it for you…",
                 })
-                extractor = _SE(headless=True)
-                new_page_structure = await extractor.extract_selectors(nav_url, storage_state=storage_state)
+
+                # Prefer the persistent browser — fully rendered, authenticated, all
+                # React components and API-fetched content already in DOM.
+                # Fall back to subprocess only when the session is gone.
+                new_page_structure = None
+                _exec_sess_scrape = _esm.get_session(chat_session_id)
+                if _exec_sess_scrape and _exec_sess_scrape._pw_thread.is_alive():
+                    try:
+                        new_page_structure = await _asyncio.to_thread(
+                            _exec_sess_scrape.capture_page_structure
+                        )
+                        print(f"[chat-execute] Re-analysis via live browser → {nav_url}")
+                    except Exception as _live_err:
+                        print(f"[chat-execute] Live browser scrape failed ({_live_err}), falling back")
+                        new_page_structure = None
+
+                if new_page_structure is None:
+                    from app.tools.selector_extractor import SelectorExtractor as _SE
+                    extractor = _SE(headless=True)
+                    new_page_structure = await extractor.extract_selectors(nav_url, storage_state=storage_state)
+                    print(f"[chat-execute] Re-analysis via subprocess → {nav_url}")
+
                 new_compact = _cpe(new_page_structure)
 
                 _session = _gs(chat_session_id)

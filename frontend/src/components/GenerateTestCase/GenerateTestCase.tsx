@@ -690,7 +690,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     if (typingMsg) scrollChatToBottom();
   }, [typingMsg, scrollChatToBottom]);
 
-  // Typewriter animation — advances 4 chars every 12ms ≈ ~330 chars/s
+  // Typewriter animation — advances 8 chars every 8ms ≈ ~1,000 chars/s
+  // (~3× faster than before while keeping the smooth streaming feel)
   useEffect(() => {
     if (!typingMsg) return;
     if (typingMsg.shown >= typingMsg.full.length) {
@@ -698,8 +699,8 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
       return;
     }
     const timer = setTimeout(() => {
-      setTypingMsg(prev => prev ? { ...prev, shown: Math.min(prev.shown + 4, prev.full.length) } : null);
-    }, 12);
+      setTypingMsg(prev => prev ? { ...prev, shown: Math.min(prev.shown + 8, prev.full.length) } : null);
+    }, 8);
     return () => clearTimeout(timer);
   }, [typingMsg]);
 

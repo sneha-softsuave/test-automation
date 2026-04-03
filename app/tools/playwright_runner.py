@@ -246,6 +246,33 @@ def extract_selectors(url: str, headless: bool = True, timeout: int = 30000, sto
             except Exception:
                 pass
 
+            # SPA guard: wait until DOM element count stabilises before scraping.
+            # React/Angular/Vue pages keep adding elements as API responses
+            # arrive; polling until the count is stable ensures all lazy-loaded
+            # sections (custom dropdowns, ARIA widgets, table rows) are rendered.
+            # Two consecutive identical counts = page has finished rendering.
+            # Capped at 8 s total and silently ignored — never blocks extraction.
+            def _wait_dom_stable(pg, max_wait_ms=8000, interval_ms=500):
+                import time as _time
+                stable_count = 0
+                last_count = -1
+                deadline = _time.time() + max_wait_ms / 1000
+                while _time.time() < deadline:
+                    try:
+                        count = pg.evaluate("document.querySelectorAll('*').length")
+                    except Exception:
+                        break
+                    if count == last_count:
+                        stable_count += 1
+                        if stable_count >= 2:
+                            break
+                    else:
+                        stable_count = 0
+                    last_count = count
+                    _time.sleep(interval_ms / 1000)
+
+            _wait_dom_stable(page)
+
             js_result = page.evaluate(_EXTRACTION_SCRIPT)
             all_elements = js_result["elements"]
             custom_dropdowns = js_result.get("customDropdowns", [])

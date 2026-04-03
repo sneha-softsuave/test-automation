@@ -1007,6 +1007,172 @@ def _click_locator_with_fallback(locator, timeout: int = 5000) -> bool:
         return False
 
 
+def _snapshot_toggle_state(locator) -> Optional[Dict[str, Any]]:
+    """Capture a compact state signature for checkbox/radio/switch-like controls."""
+    try:
+        return locator.first.evaluate("""
+            el => {
+                const root = el.closest('label,[role="checkbox"],[role="radio"],[role="switch"]') || el;
+                const candidates = [];
+                const push = (node) => {
+                    if (node && !candidates.includes(node)) {
+                        candidates.push(node);
+                    }
+                };
+
+                push(root);
+                push(el);
+
+                if (root.querySelectorAll) {
+                    root.querySelectorAll('input[type="checkbox"],input[type="radio"],[role="checkbox"],[role="radio"],[role="switch"]').forEach(push);
+                }
+
+                const target = candidates.find((node) => {
+                    const tag = (node.tagName || '').toLowerCase();
+                    const role = (node.getAttribute && (node.getAttribute('role') || '').toLowerCase()) || '';
+                    return tag === 'input' || tag === 'label' || ['checkbox', 'radio', 'switch'].includes(role);
+                }) || root;
+
+                const tag = (target.tagName || '').toLowerCase();
+                const role = (target.getAttribute && (target.getAttribute('role') || '').toLowerCase()) || '';
+                const checked = typeof target.checked === 'boolean' ? target.checked : null;
+                const ariaChecked = target.getAttribute ? (target.getAttribute('aria-checked') || '') : '';
+                return {
+                    tag,
+                    role,
+                    type: target.getAttribute ? (target.getAttribute('type') || '') : '',
+                    checked,
+                    ariaChecked,
+                    className: target.className || '',
+                    outerHTML: (target.outerHTML || '').slice(0, 2500),
+                    rootClassName: root.className || '',
+                    rootOuterHTML: (root.outerHTML || '').slice(0, 2500)
+                };
+            }
+        """)
+    except Exception:
+        return None
+
+
+def _toggle_state_changed(before: Optional[Dict[str, Any]], after: Optional[Dict[str, Any]]) -> bool:
+    """Return True when a toggle-like target visibly changed state."""
+    if not before or not after:
+        return False
+    if before.get("checked") != after.get("checked"):
+        return True
+    if (before.get("ariaChecked") or "").lower() != (after.get("ariaChecked") or "").lower():
+        return True
+    if before.get("className") != after.get("className"):
+        return True
+    if before.get("outerHTML") != after.get("outerHTML"):
+        return True
+    if before.get("rootClassName") != after.get("rootClassName"):
+        return True
+    if before.get("rootOuterHTML") != after.get("rootOuterHTML"):
+        return True
+    return False
+
+
+def _fast_toggle_click(page, element_name: str, element_type: str = "", timeout: int = 1500) -> Optional[str]:
+    """Click a checkbox/radio/switch-like row directly and return the selector used."""
+    if not element_name:
+        return None
+
+    role_candidates = []
+    if element_type in ("checkbox", "radio", "switch"):
+        role_candidates.append(element_type)
+    for role in ("checkbox", "radio", "switch"):
+        if role not in role_candidates:
+            role_candidates.append(role)
+
+    candidates = [
+        (f'locator::label:has-text("{element_name}")', page.locator(f'label:has-text("{element_name}")')),
+        (f'locator::label.cursor-pointer:has-text("{element_name}")', page.locator(f'label.cursor-pointer:has-text("{element_name}")')),
+    ]
+
+    for role in role_candidates:
+        try:
+            candidates.append((f"get_by_role::{role}::{element_name}", page.get_by_role(role, name=element_name, exact=False)))
+        except Exception:
+            continue
+
+    candidates.extend([
+        (f'get_by_label::{element_name}', page.get_by_label(element_name)),
+        (f'locator::span:has-text("{element_name}")', page.locator(f'span:has-text("{element_name}")')),
+    ])
+
+    for selector_id, locator in candidates:
+        try:
+            if locator.count() == 0:
+                continue
+            before = _snapshot_toggle_state(locator)
+            if not _click_locator_with_fallback(locator, timeout=timeout):
+                continue
+            page.wait_for_timeout(150)
+            after = _snapshot_toggle_state(locator)
+            if _toggle_state_changed(before, after):
+                print(f"    [toggle fast-path] Succeeded with {selector_id}")
+                return selector_id
+        except Exception:
+            continue
+
+    return None
+
+
+def _has_toggle_like_label(page, element_name: str) -> bool:
+    """Infer a custom checkbox/radio row from the live DOM structure."""
+    if not element_name:
+        return False
+
+    try:
+        return bool(page.evaluate("""
+            (elementName) => {
+                const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const wanted = normalize(elementName);
+                if (!wanted) {
+                    return false;
+                }
+
+                return Array.from(document.querySelectorAll('label')).some((el) => {
+                    const text = normalize(el.innerText || el.textContent || '');
+                    if (!text || !text.includes(wanted)) {
+                        return false;
+                    }
+
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    if (
+                        style.display === 'none' ||
+                        style.visibility === 'hidden' ||
+                        rect.width === 0 ||
+                        rect.height === 0
+                    ) {
+                        return false;
+                    }
+
+                    const explicitToggle = !!el.querySelector(
+                        'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"]'
+                    );
+                    if (explicitToggle) {
+                        return true;
+                    }
+
+                    const first = el.firstElementChild;
+                    const second = first && first.nextElementSibling;
+                    const firstRect = first ? first.getBoundingClientRect() : { width: 0, height: 0 };
+                    const boxLike = !!first &&
+                        firstRect.width >= 10 && firstRect.width <= 32 &&
+                        firstRect.height >= 10 && firstRect.height <= 32;
+                    const cursorPointer = style.cursor === 'pointer' || (el.className || '').includes('cursor-pointer');
+
+                    return cursorPointer && !!second && boxLike;
+                });
+            }
+        """, element_name))
+    except Exception:
+        return False
+
+
 def _text_fallback(page, element_name: str, action_type: str, element_type: str = "") -> bool:
     """
     Tier 4 rescue: find element by visible text using get_by_text.
@@ -1019,6 +1185,10 @@ def _text_fallback(page, element_name: str, action_type: str, element_type: str 
         element_type = (element_type or "").lower()
 
         if element_type in ("checkbox", "radio"):
+            label_loc = page.locator(f'label:has-text("{element_name}")')
+            if label_loc.count() > 0 and _click_locator_with_fallback(label_loc):
+                print(f"    [text-fallback] Succeeded with label row for '{element_name}'")
+                return True
             for role in (element_type, "checkbox", "radio"):
                 try:
                     locator = page.get_by_role(role, name=element_name, exact=False)
@@ -1094,6 +1264,10 @@ def _label_fallback(page, element_name: str, action_type: str, element_type: str
     if not element_name or action_type not in ("click", "select"):
         return False
     if (element_type or "").lower() in ("checkbox", "radio"):
+        label_loc = page.locator(f'label:has-text("{element_name}")')
+        if label_loc.count() > 0 and _click_locator_with_fallback(label_loc):
+            print(f"    [label-fallback] Succeeded with label row for '{element_name}'")
+            return True
         for role in ("checkbox", "radio"):
             try:
                 locator = page.get_by_role(role, name=element_name, exact=False)
@@ -1142,6 +1316,19 @@ def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = N
     # — catches cases where the generator output wrong element_type or selector.
     if action_type in ("click", "select") and instruction:
         _instr_lc = instruction.lower()
+        if any(kw in _instr_lc for kw in ("checkbox", "toggle", "switch", "radio")) and element_name:
+            for cb_sel in [
+                f'label:has-text("{element_name}")',
+                f'label.cursor-pointer:has-text("{element_name}")',
+                f'label:has-text("{element_name}") span',
+            ]:
+                try:
+                    _loc = page.locator(cb_sel)
+                    if _loc.count() > 0:
+                        print(f"    [checkbox instr-fallback] Found via: {cb_sel}")
+                        return f'locator::{cb_sel}'
+                except Exception:
+                    pass
         if any(kw in _instr_lc for kw in ("dropdown", "filter", "combobox")):
             import re as _re
             _lbl_match = _re.search(
@@ -1173,6 +1360,19 @@ def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = N
                                 return f'locator::{_lbl_sel}'
                         except Exception:
                             pass
+
+    if action_type == "click" and element_name and _has_toggle_like_label(page, element_name):
+        for cb_sel in [
+            f'label:has-text("{element_name}")',
+            f'label.cursor-pointer:has-text("{element_name}")',
+        ]:
+            try:
+                _loc = page.locator(cb_sel)
+                if _loc.count() > 0:
+                    print(f"    [toggle label-priority] Found via: {cb_sel}")
+                    return f'locator::{cb_sel}'
+            except Exception:
+                pass
 
     # For dropdown/select elements, try label-adjacent button patterns FIRST
     # This catches custom dropdown widgets like <label>Select Project</label><div><button>…</button></div>
@@ -3054,6 +3254,23 @@ def _execute_action_sync(
     elif action_type == "click":
         element_type_lc = (selector_hints.get("element_type") or "").lower()
         instruction_lc = (instruction or "").lower()
+        toggle_request = element_type_lc in ("checkbox", "radio", "switch") or any(
+            kw in instruction_lc for kw in ("checkbox", "radio", "toggle", "switch")
+        )
+        if not toggle_request and selector_hints.get("element_name"):
+            toggle_request = _has_toggle_like_label(page, selector_hints.get("element_name") or "")
+            if toggle_request:
+                print("    [toggle fast-path] Inferred custom toggle from live DOM")
+
+        if toggle_request and selector_hints.get("element_name"):
+            selector_used = _fast_toggle_click(
+                page=page,
+                element_name=selector_hints.get("element_name") or "",
+                element_type=element_type_lc,
+                timeout=min(timeout, 1500),
+            )
+            if selector_used:
+                return selector_used
 
         # Dropdown-like clicks often mean "choose a value", not "open the trigger".
         # Route those through the select workflow so custom dropdowns get the
@@ -3209,6 +3426,42 @@ def _execute_action_sync(
             except Exception:
                 pass
 
+        toggle_like = False
+        toggle_state_before = None
+        try:
+            element_info = locator.first.evaluate("""
+                el => ({
+                    tagName: el.tagName.toLowerCase(),
+                    type: el.type || '',
+                    role: el.getAttribute('role') || '',
+                    ariaChecked: el.getAttribute('aria-checked') || '',
+                    htmlFor: el.getAttribute('for') || '',
+                    hasToggleDescendant: !!el.querySelector('input[type="checkbox"],input[type="radio"],[role="checkbox"],[role="radio"],[role="switch"]')
+                })
+            """)
+            tag_name = (element_info.get("tagName") or "").lower()
+            input_type = (element_info.get("type") or "").lower()
+            role_name = (element_info.get("role") or "").lower()
+            checkbox_instr = any(kw in instruction_lc for kw in ("checkbox", "radio", "toggle", "switch"))
+            toggle_like = (
+                element_type_lc in ("checkbox", "radio", "switch")
+                or checkbox_instr
+                or role_name in ("checkbox", "radio", "switch")
+                or (tag_name == "input" and input_type in ("checkbox", "radio"))
+                or (tag_name == "label" and (
+                    role_name in ("checkbox", "radio", "switch")
+                    or input_type in ("checkbox", "radio")
+                    or (element_info.get("hasToggleDescendant") and not element_info.get("htmlFor"))
+                    or (not element_info.get("htmlFor") and not element_info.get("hasToggleDescendant"))
+                ))
+            )
+            if toggle_like:
+                toggle_state_before = _snapshot_toggle_state(locator)
+        except Exception:
+            toggle_like = element_type_lc in ("checkbox", "radio", "switch")
+            if toggle_like:
+                toggle_state_before = _snapshot_toggle_state(locator)
+
         print(f"    Element state: exists={element_exists}, visible={is_visible}, enabled={is_enabled}")
 
         click_done = False
@@ -3261,8 +3514,8 @@ def _execute_action_sync(
         # Case 3: Normal click - element is visible and enabled
         # Use short-timeout polling so Next/Skip signals are checked between attempts
         if not click_done:
-            CLICK_POLL_MS = 2000   # try click with 2s timeout each poll
-            click_polls = max(1, timeout // CLICK_POLL_MS)
+            CLICK_POLL_MS = min(timeout, 1000) if toggle_like else 2000
+            click_polls = 2 if toggle_like else max(1, timeout // CLICK_POLL_MS)
             click_error = None
             for _cp in range(click_polls):
                 # Check signal before each short-timeout click attempt
@@ -3283,7 +3536,7 @@ def _execute_action_sync(
                     if "not visible" in err_lower or "outside of the viewport" in err_lower or "intercepted" in err_lower:
                         print(f"    Normal click failed ({e}), trying force click...")
                         try:
-                            locator.click(force=True, timeout=10000)
+                            locator.click(force=True, timeout=1000 if toggle_like else 10000)
                             click_done = True
                             selector_used = selector
                             click_error = None
@@ -3299,9 +3552,10 @@ def _execute_action_sync(
             # is the correct interaction.
             if not click_done and click_error is not None:
                 try:
+                    parent_click_timeout = 1000 if toggle_like else 5000
                     parent_loc = locator.locator('..')
                     if parent_loc.count() > 0 and parent_loc.first.is_visible():
-                        parent_loc.first.click(timeout=5000)
+                        parent_loc.first.click(timeout=parent_click_timeout)
                         click_done = True
                         selector_used = selector + "/../(parent)"
                         click_error = None
@@ -3312,7 +3566,7 @@ def _execute_action_sync(
                     try:
                         gp_loc = locator.locator('../..')
                         if gp_loc.count() > 0 and gp_loc.first.is_visible():
-                            gp_loc.first.click(timeout=5000)
+                            gp_loc.first.click(timeout=parent_click_timeout)
                             click_done = True
                             selector_used = selector + "/../../(grandparent)"
                             click_error = None
@@ -3335,6 +3589,18 @@ def _execute_action_sync(
                     click_error = _de
             if not click_done and click_error is not None:
                 raise click_error
+
+        if click_done and toggle_like:
+            page.wait_for_timeout(250)
+            toggle_state_after = _snapshot_toggle_state(locator)
+            if not _toggle_state_changed(toggle_state_before, toggle_state_after):
+                print("    Toggle state did not change after click; treating as failure")
+                raise ValueError(
+                    f"Clicked toggle-like element '{selector_hints.get('element_name') or instruction}' "
+                    "but the checked state did not change."
+                )
+            print("    Toggle click confirmed; skipping navigation wait")
+            return selector_used
 
         # Wait for navigation/redirect after click (max 10 seconds)
         # While waiting, opportunistically check for toast/alert on the NEXT step

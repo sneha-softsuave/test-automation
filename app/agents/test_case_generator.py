@@ -543,24 +543,27 @@ OUTPUT — return ONLY this JSON, no extra text:
     "parameters": {{
       "targets": null,
       "mode": null,
-      "confirm": false
+      "confirm": false,
+      "group_size": null
     }}
   }}
 }}
 
 For intent=approve, populate metadata.parameters:
-  targets : "all" | ["TS_001","TS_003"] | null
-  mode    : "individual" | "combined" | null
-  confirm : true | false
+  targets    : "all" | ["TS_001","TS_003"] | null
+  mode       : "individual" | "combined" | null
+  confirm    : true | false
+  group_size : integer | null  (how many to combine when mode="combined" and the rest are individual)
 
   Rules for parameters:
   - "all", "everything", "all passed", "all test cases" → targets="all"
   - "test 1", "TC_001", "1 and 3", "TS_003" → targets=["TS_001","TS_003"]
   - "individually", "separate", "each", "one per row" → mode="individual"
   - "combined", "one row", "together", "merge" → mode="combined"
+  - "first N in one row / combined, rest / remaining individual" → mode="combined", group_size=N
   - "yes", "go ahead", "do it", "proceed", "add them", "add these", "add all",
     "add to excel" WHEN last assistant message was a pending approval question → confirm=true
-    AND infer targets/mode from that last assistant message if not in current message
+    AND infer targets/mode/group_size from that last assistant message if not in current message
   - If message alone is fully clear (e.g. "add all individually") → confirm=true
   - If mode is ambiguous with multiple results → mode=null
 
