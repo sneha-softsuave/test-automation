@@ -1356,7 +1356,8 @@
 }
 
 /* ===== Responsive ===== */
-@media (max-width: 1200px) {
+/* 1460px = 260px sidebar + 1200px content area — collapse the AI panel when content area < 1200px */
+@media (max-width: 1460px) {
   .mainContent.splitView {
     grid-template-columns: 1fr;
   }

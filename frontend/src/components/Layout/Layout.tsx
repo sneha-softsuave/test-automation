@@ -465,7 +465,7 @@ export const Layout = ({ children }: LayoutProps) => {
       </div>
 
       {/* Main Content */}
-      <main className={`${styles.main} ${sidebarCollapsed ? styles.collapsed : ''}`}>
+      <main className={`${styles.main} ${sidebarCollapsed ? styles.collapsed : ''} ${mobileMenuOpen ? styles.sidebarOpen : ''}`}>
         <motion.div
           className={styles.content}
           initial={{ opacity: 0, y: 20 }}

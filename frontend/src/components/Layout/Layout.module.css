@@ -442,7 +442,9 @@
 }
 
 /* ===== Responsive ===== */
-@media (max-width: 1024px) {
+/* Mobile breakpoint: 768px — at ~960px (split-screen on 1920px monitor) the desktop
+   layout still applies, giving the sidebar + content proper alignment. */
+@media (max-width: 768px) {
   .sidebar {
     transform: translateX(-100%);
     transition: transform 0.3s ease, width 0.3s ease, padding 0.3s ease;
@@ -464,6 +466,12 @@
   .main {
     margin-left: 0 !important;
     padding-top: calc(60px + 24px);
+    transition: margin-left 0.3s ease;
+  }
+
+  /* Push content right when sidebar is open so it doesn't get covered */
+  .main.sidebarOpen {
+    margin-left: 260px !important;
   }
 
   .overlay {

@@ -1493,7 +1493,14 @@ export const GenerateTestCase = ({ projectName }: GenerateTestCaseProps = {}) =>
     }
 
     appendChatMsg({ id: `stop_${Date.now()}`, role: 'assistant', content: '_User Interrupted_' });
-  }, [chatPhase, chatSessionId]);
+
+    // Reconnect the chat SSE so subsequent prompts can receive responses.
+    // handleStop closes sseRef but the session is still alive on the backend —
+    // without reconnecting, the next prompt fires but nobody listens.
+    if (chatSessionId) {
+      connectSSE(chatSessionId);
+    }
+  }, [chatPhase, chatSessionId, connectSSE]);
 
   const handleChatReset = () => {
     closeBrowserSession(); // close Playwright browser immediately, before state is wiped

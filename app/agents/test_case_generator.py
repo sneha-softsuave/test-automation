@@ -1192,7 +1192,7 @@ class TestCaseGeneratorAgent(BaseAgent):
         )
         messages = _trim_history(history or []) + [{"role": "user", "content": question}]
         try:
-            return self.call_llm_chat(system, messages, prompt_label="INFORMATIONAL_PROMPT").strip()
+            return self.call_llm_chat(system, messages, prompt_label="INFORMATIONAL_PROMPT", max_tokens=1000).strip()
         except Exception as e:
             logger.warning(f"[answer_question] LLM call failed: {e}")
             try:
@@ -1200,7 +1200,7 @@ class TestCaseGeneratorAgent(BaseAgent):
                     compact_json=_json.dumps(compact, indent=2),
                     question=question,
                 )
-                return self.call_llm(prompt, prompt_label="INFORMATIONAL_PROMPT").strip()
+                return self.call_llm(prompt, prompt_label="INFORMATIONAL_PROMPT", max_tokens=1000).strip()
             except Exception:
                 return "I can see the page has been analysed. Could you clarify what you'd like to know?"
 
@@ -1276,7 +1276,7 @@ class TestCaseGeneratorAgent(BaseAgent):
 
         try:
             raw = self.call_llm_chat(system, messages, markdown=False,
-                                     prompt_label="INTENT_CLASSIFIER").strip()
+                                     prompt_label="INTENT_CLASSIFIER", max_tokens=300).strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
@@ -1341,7 +1341,7 @@ class TestCaseGeneratorAgent(BaseAgent):
         context_block = ("\nAdditional context:\n" + "\n".join(f"- {l}" for l in context_lines) + "\n") if context_lines else ""
         prompt = PAGE_CONFIRM_PROMPT.format(tc_count=tc_count, tc_names=tc_names, context_block=context_block)
         try:
-            return self.call_llm(prompt, prompt_label="PAGE_CONFIRM_PROMPT").strip()
+            return self.call_llm(prompt, prompt_label="PAGE_CONFIRM_PROMPT", max_tokens=400).strip()
         except Exception as e:
             logger.warning(f"[generate_confirm] LLM call failed: {e}")
             return self.narrate("generate_complete", "",

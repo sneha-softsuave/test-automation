@@ -65,7 +65,7 @@ def _extract_credentials_semantic(text: str, agent) -> dict:
         "JSON:"
     )
     try:
-        raw = agent.call_llm(prompt).strip()
+        raw = agent.call_llm(prompt, max_tokens=150).strip()
         # Strip markdown code fences if the model wraps the JSON
         raw = _cred_re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=_cred_re.MULTILINE).strip()
         result = _j.loads(raw)
@@ -107,7 +107,7 @@ def _extract_credentials_contextual(text: str, required_fields: list, agent) -> 
         f"User message: \"{text[:600]}\"\n\nJSON:"
     )
     try:
-        raw = agent.call_llm(prompt, markdown=False).strip()
+        raw = agent.call_llm(prompt, markdown=False, max_tokens=150).strip()
         raw = _cred_re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=_cred_re.MULTILINE).strip()
         result = _j.loads(raw)
         return {
@@ -154,7 +154,7 @@ def _extract_form_data_semantic(text: str, agent) -> dict:
         "JSON:"
     )
     try:
-        raw = agent.call_llm(prompt, markdown=False).strip()
+        raw = agent.call_llm(prompt, markdown=False, max_tokens=300).strip()
         raw = _cred_re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=_cred_re.MULTILINE).strip()
         result = _j.loads(raw)
         return {

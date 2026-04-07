@@ -1378,7 +1378,7 @@ def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = N
                         except Exception:
                             pass
 
-    if action_type == "click" and element_name and _has_toggle_like_label(page, element_name):
+    if action_type == "click" and element_name and (element_type or "").lower() != "button" and _has_toggle_like_label(page, element_name):
         for cb_sel in [
             f'label:has-text("{element_name}")',
             f'label.cursor-pointer:has-text("{element_name}")',
@@ -1408,6 +1408,16 @@ def _get_best_selector_sync(page, selector_hints: Dict, step_test_data: Dict = N
                 f'label:has-text("{label_text}") + div button',
                 f'label:has-text("{label_text}") ~ button',
                 f'label:has-text("{label_text}") + button',
+                # Non-<label> elements acting as dropdown label (span, div, p)
+                f'span:text-is("{label_text}") ~ div',
+                f'span:text-is("{label_text}") + div',
+                f'span:text-is("{label_text}") ~ div button',
+                f'span:text-is("{label_text}") + div button',
+                f'span:text-is("{label_text}") ~ button',
+                f'div:has(> span:text-is("{label_text}")) button',
+                f'div:has(> span:has-text("{label_text}")) button:has(svg)',
+                f'div:has(> div:text-is("{label_text}")) button',
+                f'div:has(> p:text-is("{label_text}")) button',
             ]:
                 try:
                     loc = page.locator(lbl_sel)
@@ -1724,6 +1734,14 @@ def _find_selector_dynamically_sync(page, selector_hints: Dict, test_data: Dict 
                     f'label:has-text("{label_text}") + div button',
                     f'label:has-text("{label_text}") ~ button',
                     f'label:has-text("{label_text}") + button',
+                    # Non-<label> elements acting as dropdown label (span, div, p)
+                    f'span:text-is("{label_text}") ~ div button',
+                    f'span:text-is("{label_text}") + div button',
+                    f'span:text-is("{label_text}") ~ button',
+                    f'div:has(> span:text-is("{label_text}")) button',
+                    f'div:has(> span:has-text("{label_text}")) button:has(svg)',
+                    f'div:has(> div:text-is("{label_text}")) button',
+                    f'div:has(> p:text-is("{label_text}")) button',
                 ]:
                     try:
                         loc = page.locator(selector)
@@ -3274,7 +3292,7 @@ def _execute_action_sync(
         toggle_request = element_type_lc in ("checkbox", "radio", "switch") or any(
             kw in instruction_lc for kw in ("checkbox", "radio", "toggle", "switch")
         )
-        if not toggle_request and selector_hints.get("element_name"):
+        if not toggle_request and element_type_lc != "button" and selector_hints.get("element_name"):
             toggle_request = _has_toggle_like_label(page, selector_hints.get("element_name") or "")
             if toggle_request:
                 print("    [toggle fast-path] Inferred custom toggle from live DOM")
@@ -4041,6 +4059,18 @@ def _execute_action_sync(
                     # Exact label text match
                     f'label:text-is("{element_name}") + div button',
                     f'label:text-is("{element_name}") ~ div button',
+                    # Non-<label> elements acting as dropdown label (span, div, p)
+                    # Handles: <span>Select Project</span> ... <button>current value</button>
+                    f'span:text-is("{element_name}") ~ div button',
+                    f'span:text-is("{element_name}") + div button',
+                    f'span:text-is("{element_name}") ~ button',
+                    f'span:has-text("{label_text}") ~ div button',
+                    f'span:has-text("{label_text}") + div button',
+                    f'div:has(> span:text-is("{element_name}")) button',
+                    f'div:has(> span:text-is("{element_name}")) > div button',
+                    f'div:has(> span:has-text("{label_text}")) button:has(svg)',
+                    f'div:has(> div:text-is("{element_name}")) button',
+                    f'div:has(> p:text-is("{element_name}")) button',
                 ]
 
                 for pattern in label_patterns:
@@ -4059,10 +4089,21 @@ def _execute_action_sync(
 
             # PRIORITY 3: Generic trigger patterns — only if PRIORITY 1 & 2 both failed
             if not dropdown_clicked:
+                # Compute label keywords for use in container-based searches below
+                _p3_label_kw = [w for w in (element_name or "").split() if w.lower() not in _DROPDOWN_LABEL_STOPWORDS]
+                _p3_label = ' '.join(_p3_label_kw) if _p3_label_kw else (element_name or "")
+
                 dropdown_triggers = [
                     # By element name in button/div text
                     f'button:has-text("{element_name}")' if element_name else None,
                     f'div[class*="select"]:has-text("{element_name}")' if element_name else None,
+                    # Container-based: find the div that contains the label text, click its button.
+                    # This handles dropdowns where the button shows the current value (not the label),
+                    # so button:has-text("Select Project") would miss it entirely.
+                    f'div:has(> span:text-is("{element_name}")) button' if element_name else None,
+                    f'div:has(> span:text-is("{_p3_label}")) button' if _p3_label and _p3_label != element_name else None,
+                    f'div:has(> div:text-is("{element_name}")) button' if element_name else None,
+                    f'div:has(:text-is("{element_name}")) button:has(svg)' if element_name else None,
                     # Common dropdown patterns
                     'button:has(svg[class*="rotate"])',
                     'button[class*="select"]',

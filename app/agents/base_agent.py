@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from enum import Enum
+import logging
+import threading
 
 # Lazy imports - only import when provider is actually used
 # This prevents ModuleNotFoundError when a provider SDK isn't installed
@@ -9,6 +11,14 @@ anthropic = None
 Groq = None
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+# Singleton client pool: (provider_name, api_key, base_url) → SDK client instance.
+# Each SDK client is created once and reused for all subsequent requests with the
+# same credentials — avoids repeated TCP/TLS handshakes per request.
+_CLIENT_POOL: dict = {}
+_CLIENT_POOL_LOCK = threading.Lock()
 
 
 def _get_anthropic():
@@ -99,8 +109,12 @@ class BaseAgent(ABC):
                 raise ValueError(
                     "Anthropic provider selected but ANTHROPIC_API_KEY is not set in .env"
                 )
-            anthropic_sdk = _get_anthropic()
-            self.client = anthropic_sdk.Anthropic(api_key=self.anthropic_api_key)
+            _key = ("anthropic", self.anthropic_api_key, "")
+            with _CLIENT_POOL_LOCK:
+                if _key not in _CLIENT_POOL:
+                    anthropic_sdk = _get_anthropic()
+                    _CLIENT_POOL[_key] = anthropic_sdk.Anthropic(api_key=self.anthropic_api_key)
+            self.client = _CLIENT_POOL[_key]
             self.model = self.anthropic_model
             self.max_tokens = 8000
         elif self.provider == LLMProvider.OPENAI:
@@ -108,8 +122,12 @@ class BaseAgent(ABC):
                 raise ValueError(
                     "OpenAI provider selected but OPENAI_API_KEY is not set in .env"
                 )
-            openai_sdk = _get_openai()
-            self.client = openai_sdk.OpenAI(api_key=self.openai_api_key)
+            _key = ("openai", self.openai_api_key, "")
+            with _CLIENT_POOL_LOCK:
+                if _key not in _CLIENT_POOL:
+                    openai_sdk = _get_openai()
+                    _CLIENT_POOL[_key] = openai_sdk.OpenAI(api_key=self.openai_api_key)
+            self.client = _CLIENT_POOL[_key]
             self.model = self.openai_model
             self.max_tokens = self.openai_max_tokens
         elif self.provider == LLMProvider.GROQ:
@@ -117,8 +135,12 @@ class BaseAgent(ABC):
                 raise ValueError(
                     "Groq provider selected but GROQ_API_KEY is not set in .env"
                 )
-            Groq_cls = _get_groq()
-            self.client = Groq_cls(api_key=self.groq_api_key)
+            _key = ("groq", self.groq_api_key, "")
+            with _CLIENT_POOL_LOCK:
+                if _key not in _CLIENT_POOL:
+                    Groq_cls = _get_groq()
+                    _CLIENT_POOL[_key] = Groq_cls(api_key=self.groq_api_key)
+            self.client = _CLIENT_POOL[_key]
             self.model = self.groq_model.strip()
             self.max_tokens = 8000
         elif self.provider == LLMProvider.WAYMORE:
@@ -126,17 +148,22 @@ class BaseAgent(ABC):
                 raise ValueError(
                     "Waymore provider selected but WAYMORE_API_KEY is not set in .env"
                 )
-            openai_sdk = _get_openai()
-            self.client = openai_sdk.OpenAI(
-                api_key=self.waymore_api_key,
-                base_url=settings.WAYMORE_BASE_URL
-            )
+            _waymore_base = settings.WAYMORE_BASE_URL or ""
+            _key = ("waymore", self.waymore_api_key, _waymore_base)
+            with _CLIENT_POOL_LOCK:
+                if _key not in _CLIENT_POOL:
+                    openai_sdk = _get_openai()
+                    _CLIENT_POOL[_key] = openai_sdk.OpenAI(
+                        api_key=self.waymore_api_key,
+                        base_url=settings.WAYMORE_BASE_URL
+                    )
+            self.client = _CLIENT_POOL[_key]
             self.model = self.waymore_model
             self.max_tokens = 8000
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
 
-        print(f"Initialized {self.provider.value} with model: {self.model}")
+        logger.debug(f"[ClientPool] {self.provider.value} client ready (model={self.model})")
 
     def _call_anthropic(self, prompt: str) -> str:
         """Call Anthropic Claude API."""
@@ -183,7 +210,8 @@ class BaseAgent(ABC):
         "values. Do NOT use h1 headings."
     )
 
-    def call_llm(self, prompt: str, markdown: bool = True, prompt_label: str = "") -> str:
+    def call_llm(self, prompt: str, markdown: bool = True, prompt_label: str = "",
+                 max_tokens: int = None) -> str:
         """Call the appropriate LLM based on provider. Signature unchanged."""
         if markdown:
             prompt = prompt + self._MARKDOWN_INSTRUCTION
@@ -191,7 +219,8 @@ class BaseAgent(ABC):
             from app.services.llm_wrapper import call_llm as _wrap
             result = _wrap(
                 provider=self.provider.value, model=self.model,
-                prompt=prompt, client=self.client, max_tokens=self.max_tokens,
+                prompt=prompt, client=self.client,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
                 agent_name=self.__class__.__name__,
                 prompt_label=prompt_label,
             )
@@ -209,7 +238,7 @@ class BaseAgent(ABC):
             raise
 
     def call_llm_chat(self, system: str, messages: list, markdown: bool = True,
-                      prompt_label: str = "") -> str:
+                      prompt_label: str = "", max_tokens: int = None) -> str:
         """
         Multi-turn conversation call. Routes through llm_wrapper.call_llm_chat so
         every call is token-tracked and logged — identical to call_llm().
@@ -226,7 +255,8 @@ class BaseAgent(ABC):
             result = _wrap_chat(
                 provider=self.provider.value, model=self.model,
                 system=system, messages=messages,
-                client=self.client, max_tokens=self.max_tokens,
+                client=self.client,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
                 agent_name=self.__class__.__name__,
                 json_mode=not markdown,
                 prompt_label=prompt_label,
