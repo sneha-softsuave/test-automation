@@ -11,8 +11,12 @@ Usage counter resets every calendar day (not on process restart).
 import json
 import logging
 import threading
-from datetime import date
+from datetime import date, datetime
 from typing import Dict, List
+
+from app.services.token_counter import extract_tokens
+from app.services.cost_calculator import calculate_cost
+from app.utils.logger import log_async
 
 from app.core.config import settings
 
@@ -186,6 +190,23 @@ def analyze_screenshot_for_selector(
             )
 
         raw = response.choices[0].message.content or ""
+
+        # Track tokens through the central logger
+        _usage = getattr(response, "usage", None)
+        _provider = vision_provider  # "openai" or "groq"
+        _tokens = extract_tokens(_provider, _usage, prompt=prompt, output=raw)
+        _cost = calculate_cost(model_name, _tokens["input_tokens"], _tokens["output_tokens"])
+        log_async({
+            "timestamp": datetime.now().isoformat(),
+            "agent": "ImageAnalyzer",
+            "provider": _provider,
+            "model": model_name,
+            "input_tokens": _tokens["input_tokens"],
+            "output_tokens": _tokens["output_tokens"],
+            "total_tokens": _tokens["total_tokens"],
+            "cost_usd": _cost,
+        })
+
         raw = raw.strip()
 
         # Strip markdown fences if present

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { ChevronDown } from 'lucide-react';
-import { getLLMProviders } from '../../services/api';
+import { useStore } from '../../store/useStore';
 import styles from './ProviderSelect.module.css';
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -21,22 +21,15 @@ interface ProviderSelectProps {
 
 export const ProviderSelect = ({ value, onChange, disabled, className }: ProviderSelectProps) => {
   const [open, setOpen] = useState(false);
-  const [configured, setConfigured] = useState<Record<string, boolean>>({});
   const ref = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    getLLMProviders()
-      .then(data => {
-        // Build configured map from providers array (each item has api_key_configured)
-        const map: Record<string, boolean> = {};
-        const providers = data.providers as unknown as Array<{ id: string; api_key_configured: boolean }>;
-        if (Array.isArray(providers)) {
-          providers.forEach(p => { if (p.id) map[p.id] = p.api_key_configured ?? false; });
-        }
-        setConfigured(map);
-      })
-      .catch(() => {});
-  }, []);
+  // Read from the store — already fetched once by App.tsx on startup, no extra network call
+  const llmProvidersConfig = useStore(state => state.llmProvidersConfig);
+
+  const configured: Record<string, boolean> = {};
+  if (llmProvidersConfig) {
+    llmProvidersConfig.forEach(p => { configured[p.id] = p.api_key_configured; });
+  }
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -49,7 +42,7 @@ export const ProviderSelect = ({ value, onChange, disabled, className }: Provide
   }, []);
 
   const isConfigured = (id: string) => configured[id] !== false; // default green if unknown
-  const hasChecked = Object.keys(configured).length > 0;
+  const hasChecked = llmProvidersConfig !== null;
 
   return (
     <div ref={ref} className={`${styles.wrapper} ${className || ''}`}>

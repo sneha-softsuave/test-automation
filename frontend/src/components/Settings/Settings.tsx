@@ -73,11 +73,20 @@ export const Settings: React.FC = () => {
   const [appSettingsExpanded, setAppSettingsExpanded] = useState(false);
   const [intervalConfigExpanded, setIntervalConfigExpanded] = useState(false);
   const [landingPageExpanded, setLandingPageExpanded] = useState(false);
-  const [providers, setProviders] = useState<AIProvider[]>([]);
+  // Read providers from store — fetched once at app startup, no extra network call
+  const llmProvidersConfig = useStore((state) => state.llmProvidersConfig);
+  const loading = llmProvidersConfig === null;
+
+  // Validation overlay: latency/available/error from the health-check endpoint
+  const [validationResults, setValidationResults] = useState<Record<string, { available?: boolean; latency_ms?: number; error?: string }>>({});
+  const providers: AIProvider[] = (llmProvidersConfig ?? []).map(p => ({
+    ...p,
+    ...validationResults[p.id],
+  }));
+
   const [isChecking, setIsChecking] = useState(false);
   const [customInterval, setCustomInterval] = useState(healthCheckInterval);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Update customInterval when healthCheckInterval changes
@@ -121,10 +130,8 @@ export const Settings: React.FC = () => {
     }
   };
 
-  // Fetch provider configuration + image analysis status on mount
+  // Fetch image analysis status + token usage on mount (providers come from store)
   useEffect(() => {
-    console.log('Settings component mounted');
-    fetchProviders();
     fetchImageAnalysisStatus();
 
     // Poll usage count every 30 seconds so count stays fresh without refresh
@@ -139,30 +146,6 @@ export const Settings: React.FC = () => {
 
     return () => { clearInterval(interval); clearInterval(tokenInterval); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const fetchProviders = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      console.log('Fetching providers from /api/v1/llm-providers...');
-
-      const response = await fetch('/api/v1/llm-providers');
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      console.log('Providers fetched:', data);
-
-      setProviders(data.providers || []);
-    } catch (error) {
-      console.error('Failed to fetch providers:', error);
-      setError(error instanceof Error ? error.message : 'Failed to fetch providers');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const validateProviders = async () => {
     setIsChecking(true);
@@ -180,13 +163,8 @@ export const Settings: React.FC = () => {
       const data = await response.json();
       console.log('Validation results:', data);
 
-      // Update providers with availability status
-      setProviders(prev => prev.map(p => ({
-        ...p,
-        available: data[p.id]?.available,
-        latency_ms: data[p.id]?.latency_ms,
-        error: data[p.id]?.error
-      })));
+      // Overlay validation results onto the store-provided providers
+      setValidationResults(data);
 
       if (setLastHealthCheck) {
         setLastHealthCheck(new Date());

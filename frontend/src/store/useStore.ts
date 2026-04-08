@@ -211,6 +211,7 @@ interface AppState {
   llmProvider: LLMProvider;
   setLlmProvider: (provider: LLMProvider) => void;
   initializeLlmProvider: () => Promise<void>;
+  llmProvidersConfig: Array<{ id: string; display_name: string; model: string; api_key_configured: boolean; is_default: boolean }> | null;
 
   // Test Suite
   testSuite: TestSuite | null;
@@ -519,7 +520,7 @@ export const useAgentChatStore = create<AgentChatSessionState>()((set) => ({
 
 export const useStore = create<AppState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       // Navigation
       currentView: 'upload',
       setCurrentView: (view) => set({ currentView: view }),
@@ -536,16 +537,20 @@ export const useStore = create<AppState>()(
 
       // LLM Provider (default to groq - cost-effective and fast)
       llmProvider: 'groq',
+      llmProvidersConfig: null,
       setLlmProvider: (provider) => set({ llmProvider: provider }),
       initializeLlmProvider: async () => {
+        // Skip if already fetched — only call the backend once per session
+        if (get().llmProvidersConfig !== null) return;
         try {
           const response = await fetch(`${API_BASE_URL}/api/v1/llm-providers`);
           if (response.ok) {
             const config = await response.json();
             const provider = config.default_provider as LLMProvider;
+            set({ llmProvidersConfig: config.providers ?? [] });
             if (provider && ['groq', 'openai', 'anthropic', 'waymore'].includes(provider)) {
               set({ llmProvider: provider });
-              console.log(`🤖 Initialized LLM provider from backend: ${provider}`);
+              console.log(`Initialized LLM provider from backend: ${provider}`);
             } else {
               console.warn(`Unknown provider from backend: ${provider}, keeping default`);
             }
@@ -723,17 +728,10 @@ export const useStore = create<AppState>()(
         // Clear persisted storage
         localStorage.removeItem('test-automation-storage');
 
-        // Fetch default provider from backend
-        let defaultProvider: LLMProvider = 'groq';
-        try {
-          const response = await fetch(`${API_BASE_URL}/api/v1/llm-providers`);
-          if (response.ok) {
-            const config = await response.json();
-            defaultProvider = config.default as LLMProvider;
-          }
-        } catch (error) {
-          console.warn('Failed to fetch default LLM provider on reset, using fallback');
-        }
+        // Reuse cached config — no extra network call needed
+        const cachedProviders = get().llmProvidersConfig;
+        const defaultProvider: LLMProvider =
+          (cachedProviders?.find(p => p.is_default)?.id as LLMProvider) ?? 'groq';
 
         set({
           currentView: 'upload',

@@ -21,6 +21,7 @@ from app.agents.enhanced_json_parser import EnhancedJsonParserAgent
 from app.tools.enhanced_executor import execute_enhanced
 from app.tools.script_generator import generate_enhanced_pytest_script
 from app.core.config import settings
+from app.services.llm_wrapper import call_llm as _wrapper_call_llm
 
 
 class OrchestratorLLM:
@@ -55,28 +56,17 @@ class OrchestratorLLM:
                 base_url=settings.WAYMORE_BASE_URL
             )
 
-    def call_llm(self, prompt: str) -> str:
-        """Call the LLM with the given prompt."""
-        try:
-            if self.provider == LLMProvider.ANTHROPIC:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.content[0].text.strip()
-
-            elif self.provider in (LLMProvider.OPENAI, LLMProvider.GROQ, LLMProvider.WAYMORE):
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.choices[0].message.content.strip()
-
-        except Exception as e:
-            print(f"[OrchestratorLLM] Error calling LLM: {e}")
-            raise
+    def call_llm(self, prompt: str, agent_name: str = "Orchestrator") -> str:
+        """Call the LLM through the central wrapper for token tracking."""
+        result = _wrapper_call_llm(
+            provider=self.provider.value,
+            model=self.model,
+            prompt=prompt,
+            client=self.client,
+            max_tokens=self.max_tokens,
+            agent_name=agent_name,
+        )
+        return result["text"]
 
 
 @dataclass
