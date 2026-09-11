@@ -1,9 +1,19 @@
+import math
 import pandas as pd
 import io
 import os
 from typing import List, Dict, Any, Tuple
 from openpyxl import load_workbook
 from datetime import datetime
+
+
+def _sanitize_records(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Replace NaN/Infinity floats with None for JSON compliance."""
+    for record in data:
+        for key, value in record.items():
+            if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                record[key] = None
+    return data
 
 
 class ExcelService:
@@ -24,7 +34,8 @@ class ExcelService:
         # Read file content into bytes first to avoid SpooledTemporaryFile issues
         content = file.file.read()
         df = pd.read_excel(io.BytesIO(content), engine=engine)
-        data = df.to_dict(orient="records")
+        df = df.where(pd.notnull(df), None)
+        data = _sanitize_records(df.to_dict(orient="records"))
 
         print(f"\n{'='*50}")
         print(f"Reading Excel file: {file.filename}")
@@ -52,7 +63,8 @@ class ExcelService:
         # Determine engine based on file extension
         engine = 'openpyxl' if filename.endswith('.xlsx') else 'xlrd'
         df = pd.read_excel(io.BytesIO(content), engine=engine)
-        data = df.to_dict(orient="records")
+        df = df.where(pd.notnull(df), None)
+        data = _sanitize_records(df.to_dict(orient="records"))
 
         print(f"\n{'='*50}")
         print(f"Reading Excel file: {filename}")

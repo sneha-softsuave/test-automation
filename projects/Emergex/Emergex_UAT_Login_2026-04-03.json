@@ -1,0 +1,304 @@
+{
+  "project": "UAT-Emergex Tests",
+  "base_url": "https://uat-emergex.zapptor.com",
+  "common_selectors": {
+    "common_elements": {
+      "toast_message": "page.locator('.toast, .Toastify, [role=\"alert\"]')"
+    }
+  },
+  "test_data": {
+    "default_credentials": {
+      "email": "steve.wilson@emaschiyoda.com",
+      "password": "123456"
+    }
+  },
+  "test_cases": [
+    {
+      "id": "TC_001",
+      "name": "Valid Login - Successful Authentication",
+      "steps": [
+        {
+          "step_number": 1,
+          "instruction": "Navigate to the login page",
+          "action": {
+            "type": "goto",
+            "playwright_method": "page.goto()"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://uat-emergex.zapptor.com/login"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 2,
+          "instruction": "Fill in the 'Enter your email' field with valid email",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Email",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_placeholder('Enter your email')",
+              "page.get_by_label('Email')",
+              "page.locator('input[type=\"email\"]')"
+            ]
+          },
+          "test_data": {
+            "email": "steve.wilson@emaschiyoda.com"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 3,
+          "instruction": "Fill in the 'Enter your password' field with valid password",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Password",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_placeholder('Enter your password')",
+              "page.get_by_label('Password')",
+              "page.locator('input[type=\"password\"]')"
+            ]
+          },
+          "test_data": {
+            "password": "123456"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 4,
+          "instruction": "Click the 'Log in' button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Log in",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Log in')",
+              "page.get_by_text('Log in', exact=True)",
+              "page.locator('button[type=\"submit\"]')"
+            ]
+          },
+          "test_data": null,
+          "assertions": null
+        },
+        {
+          "step_number": 5,
+          "instruction": "Verify successful login by checking the URL changed away from login page",
+          "action": {
+            "type": "assert",
+            "playwright_method": "expect()"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": null,
+          "assertions": [
+            {
+              "type": "url",
+              "expected_value": "/dashboard",
+              "playwright_assertion": "expect(page).not.toHaveURL(/login/)"
+            }
+          ]
+        }
+      ],
+      "expected_results": [
+        "User is redirected to the dashboard after successful login"
+      ]
+    },
+    {
+      "id": "TC_002",
+      "name": "Invalid Login - Wrong Password",
+      "steps": [
+        {
+          "step_number": 1,
+          "instruction": "Navigate to the login page",
+          "action": {
+            "type": "goto",
+            "playwright_method": "page.goto()"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://uat-emergex.zapptor.com/login"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 2,
+          "instruction": "Fill in the 'Enter your email' field with valid email",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Email",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_placeholder('Enter your email')",
+              "page.get_by_label('Email')",
+              "page.locator('input[type=\"email\"]')"
+            ]
+          },
+          "test_data": {
+            "email": "steve.wilson@emaschiyoda.com"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 3,
+          "instruction": "Fill in the 'Enter your password' field with wrong password",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Password",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_placeholder('Enter your password')",
+              "page.get_by_label('Password')",
+              "page.locator('input[type=\"password\"]')"
+            ]
+          },
+          "test_data": {
+            "password": "wrongpassword"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 4,
+          "instruction": "Click the 'Log in' button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Log in",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Log in')",
+              "page.get_by_text('Log in', exact=True)",
+              "page.locator('button[type=\"submit\"]')"
+            ]
+          },
+          "test_data": null,
+          "assertions": null
+        },
+        {
+          "step_number": 5,
+          "instruction": "Verify error message is shown and user remains on login page",
+          "action": {
+            "type": "assert",
+            "playwright_method": "expect()"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": null,
+          "assertions": [
+            {
+              "type": "url",
+              "expected_value": "/login",
+              "playwright_assertion": "expect(page).toHaveURL(/login/)"
+            },
+            {
+              "type": "element",
+              "expected_value": "error",
+              "playwright_assertion": "expect(page.locator('[role=\"alert\"], .error, .Toastify')).toBeVisible()"
+            }
+          ]
+        }
+      ],
+      "expected_results": [
+        "User stays on the login page and an error message is displayed"
+      ]
+    },
+    {
+      "id": "TC_003",
+      "name": "Empty Fields - Login Validation",
+      "steps": [
+        {
+          "step_number": 1,
+          "instruction": "Navigate to the login page",
+          "action": {
+            "type": "goto",
+            "playwright_method": "page.goto()"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://uat-emergex.zapptor.com/login"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 2,
+          "instruction": "Click the 'Log in' button without entering any credentials",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Log in",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Log in')",
+              "page.get_by_text('Log in', exact=True)",
+              "page.locator('button[type=\"submit\"]')"
+            ]
+          },
+          "test_data": null,
+          "assertions": null
+        },
+        {
+          "step_number": 3,
+          "instruction": "Verify user remains on login page with validation feedback",
+          "action": {
+            "type": "assert",
+            "playwright_method": "expect()"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": null,
+          "assertions": [
+            {
+              "type": "url",
+              "expected_value": "/login",
+              "playwright_assertion": "expect(page).toHaveURL(/login/)"
+            }
+          ]
+        }
+      ],
+      "expected_results": [
+        "User stays on the login page; form does not submit with empty fields"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "project": "Dev-Emergex Tests",
+  "base_url": "https://dev-emergex.zapptor.com/login",
+  "common_selectors": {},
+  "test_data": {
+    "default_credentials": {
+      "email": "steve.wilson@emaschiyoda.com",
+      "password": "123456"
+    }
+  },
+  "test_cases": [
+    {
+      "id": "TC_001",
+      "name": "Recorded Test",
+      "steps": [
+        {
+          "step_number": 1,
+          "instruction": "Navigate to Application url",
+          "action": {
+            "type": "goto",
+            "playwright_method": "page.goto()"
+          },
+          "selector_hints": {
+            "element_name": "",
+            "element_type": "",
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://dev-emergex.zapptor.com/login"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 2,
+          "instruction": "Fill Email with Email",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Email",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_placeholder('Enter your email')"
+            ]
+          },
+          "test_data": {
+            "email": "steve.wilson@emaschiyoda.com"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 3,
+          "instruction": "Fill Password with Password",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Password",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_placeholder('Enter your password')"
+            ]
+          },
+          "test_data": {
+            "password": "123456"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 4,
+          "instruction": "click Login button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Login",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Log in')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        }
+      ],
+      "expected_results": [
+        "All recorded steps execute successfully"
+      ]
+    }
+  ]
+}

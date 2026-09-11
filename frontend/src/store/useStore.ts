@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
+const API_BASE_URL = '';
+
 // Clear corrupted storage on load (one-time fix for quota exceeded)
 try {
   const stored = localStorage.getItem('test-automation-storage');
@@ -85,19 +87,22 @@ export interface ExecutionResult {
   executed_at: string;
 }
 
-type View = 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest';
+export type View = 'generate' | 'upload' | 'suite' | 'execution' | 'results' | 'download' | 'loadtest' | 'loadtest-logs' | 'loadtest-reports' | 'loadtest-insights' | 'settings' | 'projects' | 'project-workspace';
+
+export interface ProjectSummary { name: string; test_count: number; }
 
 // Execution mode: Multi-Agent (Supervisor + Sub-agents)
 export type ExecutionMode = 'multi-agent';
 
 // LLM Provider type
-export type LLMProvider = 'groq' | 'openai' | 'anthropic';
+export type LLMProvider = 'groq' | 'openai' | 'anthropic' | 'waymore';
 
 // LLM Options with models
 export const LLM_OPTIONS: Record<LLMProvider, { label: string; model: string }> = {
   groq: { label: 'Groq (Llama)', model: 'llama-3.1-8b-instant' },
   openai: { label: 'OpenAI (GPT-4o)', model: 'gpt-4o' },
   anthropic: { label: 'Anthropic (Claude)', model: 'claude-sonnet-4-20250514' },
+  waymore: { label: 'Waymore AI', model: 'Waymore-A1-Instruct-1011' },
 };
 
 // Raw Excel data for reports
@@ -139,6 +144,17 @@ export interface LoadTestAPIConfig {
     api_key_value?: string;
   };
   description?: string;
+  // Load test configuration (from Excel)
+  users?: number;
+  spawn_rate?: number;
+  run_time?: string;
+  // Phase 1: Multi-user data support
+  test_data?: Array<Record<string, any>>;
+  data_mode?: 'sequential' | 'random' | 'round_robin';
+  think_time_min?: number;
+  think_time_max?: number;
+  user_journey?: string;
+  variable_mapping?: Record<string, string>;
 }
 
 export interface LoadTestConfig {
@@ -167,10 +183,25 @@ export interface LoadTestMetrics {
   timestamp: string;
 }
 
+export interface SequentialTestStatus {
+  sequential_test_id: string;
+  status: 'running' | 'completed' | 'stopped';
+  current_index: number;
+  total_apis: number;
+  current_api: string | null;
+  apis: string[];
+}
+
 interface AppState {
   // Navigation
   currentView: View;
   setCurrentView: (view: View) => void;
+
+  // Navigation guard for unsaved Excel edits
+  hasUnsavedEditChanges: boolean;
+  setHasUnsavedEditChanges: (v: boolean) => void;
+  pendingNavigation: View | null;
+  setPendingNavigation: (view: View | null) => void;
 
   // Execution Mode
   executionMode: ExecutionMode;
@@ -179,6 +210,8 @@ interface AppState {
   // LLM Provider
   llmProvider: LLMProvider;
   setLlmProvider: (provider: LLMProvider) => void;
+  initializeLlmProvider: () => Promise<void>;
+  llmProvidersConfig: Array<{ id: string; display_name: string; model: string; api_key_configured: boolean; is_default: boolean }> | null;
 
   // Test Suite
   testSuite: TestSuite | null;
@@ -226,6 +259,8 @@ interface AppState {
   removeNotification: (id: string) => void;
 
   // Load Test State
+  uploadId: string | null;
+  setUploadId: (id: string | null) => void;
   uploadedApis: LoadTestAPIConfig[] | null;
   setUploadedApis: (apis: LoadTestAPIConfig[] | null) => void;
   selectedLoadTestApi: LoadTestAPIConfig | null;
@@ -237,24 +272,294 @@ interface AppState {
   activeLoadTestId: string | null;
   setActiveLoadTestId: (id: string | null) => void;
 
+  // Last completed test (for reports/insights display)
+  lastCompletedTestId: string | null;
+  setLastCompletedTestId: (id: string | null) => void;
+
+  // Auto-Execute Mode
+  autoExecuteMode: boolean;
+  setAutoExecuteMode: (enabled: boolean) => void;
+
+  // Sequential Test State
+  sequentialTestId: string | null;
+  setSequentialTestId: (id: string | null) => void;
+  sequentialTestStatus: SequentialTestStatus | null;
+  setSequentialTestStatus: (status: SequentialTestStatus | null) => void;
+  selectedApis: string[];
+  setSelectedApis: (apis: string[]) => void;
+
+  // Load Test Session ID (persists across navigation)
+  loadTestSessionId: string | null;
+  setLoadTestSessionId: (id: string | null) => void;
+
+  // Terminal Logs (persists across navigation)
+  terminalLogs: Array<{ timestamp: string; log: string }>;
+  addTerminalLog: (log: { timestamp: string; log: string }) => void;
+  clearTerminalLogs: () => void;
+
+  // AI Suggested Load Test Config
+  aiSuggestedConfig: {
+    users?: number;
+    spawn_rate?: number;
+    run_time?: string;
+    think_time_min?: number;
+    think_time_max?: number;
+  } | null;
+  setAiSuggestedConfig: (config: {
+    users?: number;
+    spawn_rate?: number;
+    run_time?: string;
+    think_time_min?: number;
+    think_time_max?: number;
+  } | null) => void;
+
+  // Settings State
+  healthCheckEnabled: boolean;
+  setHealthCheckEnabled: (enabled: boolean) => void;
+  healthCheckInterval: number;  // in minutes (default: 120 = 2 hours)
+  setHealthCheckInterval: (interval: number) => void;
+  lastHealthCheck: Date | null;
+  setLastHealthCheck: (date: Date | null) => void;
+
+  // Application Settings
+  useDefaultLandingPage: boolean;
+  setUseDefaultLandingPage: (enabled: boolean) => void;
+  defaultLandingPage: 'upload' | 'loadtest';  // 'upload' = Functional Test
+  setDefaultLandingPage: (page: 'upload' | 'loadtest') => void;
+
+  // Browser Behaviour Settings
+  keepBrowserOpenAgent: boolean;  // Functional Test Agent: default false (close between test cases)
+  setKeepBrowserOpenAgent: (enabled: boolean) => void;
+  liveBrowserEnabled: boolean;    // Show real browser window on server (headless=false)
+  setLiveBrowserEnabled: (enabled: boolean) => void;
+
+  // Image Analysis (Vision) Settings
+  imageAnalysisEnabled: boolean;
+  setImageAnalysisEnabled: (enabled: boolean) => void;
+
+  // Projects
+  selectedProjectName: string | null;
+  setSelectedProjectName: (name: string | null) => void;
+
+  // Per-project workspace
+  activeProjectSection: 'generate' | 'history' | 'suite' | 'execute';
+  setActiveProjectSection: (s: 'generate' | 'history' | 'suite' | 'execute') => void;
+  projectActiveSuites: Record<string, TestSuite>;
+  setProjectActiveSuite: (projectName: string, suite: TestSuite) => void;
+  clearProjectActiveSuite: (projectName: string) => void;
+  projectExecutionResults: Record<string, ExecutionResult>;
+  setProjectExecutionResult: (projectName: string, result: ExecutionResult) => void;
+
   // Reset
-  reset: () => void;
+  reset: () => Promise<void>;
 }
+
+// ─── Agent Chat Session State ───────────────────────────────────────────────
+// Persists to sessionStorage: survives navigation but clears on browser refresh.
+
+export interface AgentMessage {
+  id: string;
+  type: 'user' | 'agent' | 'system';
+  content: string;
+  timestamp: string; // ISO string (Date not JSON-serializable directly)
+  status?: 'thinking' | 'complete' | 'error';
+  testCases?: unknown[];
+}
+
+export interface AgentExecutionLog {
+  id: string;
+  timestamp: string; // ISO string
+  type: string;
+  testId?: string;
+  step?: number;
+  status?: string;
+  message: string;
+  level?: string;
+  agent?: string;
+  subAgent?: string;
+  phase?: string;
+  method?: string;
+  url?: string;
+  payload?: Record<string, unknown>;
+  response?: Record<string, unknown>;
+  attempt?: number;
+  maxRetries?: number;
+}
+
+export interface AgentProgressState {
+  totalTests: number;
+  totalSteps: number;
+  completedTests: number;
+  completedSteps: number;
+  passedTests: number;
+  failedTests: number;
+}
+
+export interface AgentChatSessionState {
+  // Chat messages
+  agentMessages: AgentMessage[];
+  setAgentMessages: (msgs: AgentMessage[]) => void;
+  addAgentMessage: (msg: AgentMessage) => void;
+
+  // Execution state
+  agentIsExecuting: boolean;
+  setAgentIsExecuting: (v: boolean) => void;
+  agentIsProcessing: boolean;
+  setAgentIsProcessing: (v: boolean) => void;
+
+  // Live log state
+  agentShowLiveLog: boolean;
+  setAgentShowLiveLog: (v: boolean) => void;
+
+  // SSE logs
+  agentLogs: AgentExecutionLog[];
+  setAgentLogs: (logs: AgentExecutionLog[]) => void;
+  addAgentLog: (log: AgentExecutionLog) => void;
+  clearAgentLogs: () => void;
+
+  // Progress
+  agentProgress: AgentProgressState;
+  setAgentProgress: (p: AgentProgressState) => void;
+  updateAgentProgress: (partial: Partial<AgentProgressState>) => void;
+
+  // Current test/step (transient — reset on reconnect)
+  agentCurrentTest: string | null;
+  setAgentCurrentTest: (t: string | null) => void;
+  agentCurrentStep: number | null;
+  setAgentCurrentStep: (s: number | null) => void;
+
+  // Session ID — generated once per browser session
+  agentSessionId: string;
+
+  // Clear all execution state
+  clearAgentSession: () => void;
+}
+
+const generateSessionId = () =>
+  `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+const INITIAL_MESSAGES: AgentMessage[] = [
+  {
+    id: '1',
+    type: 'agent',
+    content:
+      "Hello! I'm your Test Automation Agent. Upload an Excel or JSON file with your test cases, and I'll help you understand and execute them.\n\n**After uploading, you can:**\n\n**Ask questions:**\n• \"What does test 1 do?\"\n• \"Explain the login test steps\"\n• \"How many tests are there?\"\n\n**Run tests:**\n• **\"execute test 2\"** - Run a specific test\n• **\"run test 1, 3, 5\"** - Run multiple tests\n• **\"execute all\"** - Run all tests",
+    timestamp: new Date().toISOString(),
+    status: 'complete',
+  },
+];
+
+const INITIAL_PROGRESS: AgentProgressState = {
+  totalTests: 0,
+  totalSteps: 0,
+  completedTests: 0,
+  completedSteps: 0,
+  passedTests: 0,
+  failedTests: 0,
+};
+
+// Plain in-memory store (no persistence middleware).
+// State lives in JS memory → survives SPA navigation (component unmount/remount)
+// but is wiped on browser refresh (F5 / Ctrl+R) exactly as intended.
+export const useAgentChatStore = create<AgentChatSessionState>()((set) => ({
+  agentMessages: INITIAL_MESSAGES,
+  setAgentMessages: (msgs) => set({ agentMessages: msgs }),
+  addAgentMessage: (msg) =>
+    set((s) => ({ agentMessages: [...s.agentMessages, msg] })),
+
+  agentIsExecuting: false,
+  setAgentIsExecuting: (v) => set({ agentIsExecuting: v }),
+  agentIsProcessing: false,
+  setAgentIsProcessing: (v) => set({ agentIsProcessing: v }),
+
+  agentShowLiveLog: false,
+  setAgentShowLiveLog: (v) => set({ agentShowLiveLog: v }),
+
+  agentLogs: [],
+  setAgentLogs: (logs) => set({ agentLogs: logs }),
+  addAgentLog: (log) =>
+    set((s) => {
+      const MAX = 500;
+      const next = [...s.agentLogs, log];
+      return { agentLogs: next.length > MAX ? next.slice(-MAX) : next };
+    }),
+  clearAgentLogs: () =>
+    set({
+      agentLogs: [],
+      agentProgress: INITIAL_PROGRESS,
+      agentCurrentTest: null,
+      agentCurrentStep: null,
+    }),
+
+  agentProgress: INITIAL_PROGRESS,
+  setAgentProgress: (p) => set({ agentProgress: p }),
+  updateAgentProgress: (partial) =>
+    set((s) => ({ agentProgress: { ...s.agentProgress, ...partial } })),
+
+  agentCurrentTest: null,
+  setAgentCurrentTest: (t) => set({ agentCurrentTest: t }),
+  agentCurrentStep: null,
+  setAgentCurrentStep: (s) => set({ agentCurrentStep: s }),
+
+  agentSessionId: generateSessionId(),
+
+  clearAgentSession: () =>
+    set({
+      agentMessages: INITIAL_MESSAGES,
+      agentIsExecuting: false,
+      agentIsProcessing: false,
+      agentShowLiveLog: false,
+      agentLogs: [],
+      agentProgress: INITIAL_PROGRESS,
+      agentCurrentTest: null,
+      agentCurrentStep: null,
+    }),
+}));
+
+// ─── Main App Store ──────────────────────────────────────────────────────────
 
 export const useStore = create<AppState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       // Navigation
       currentView: 'upload',
       setCurrentView: (view) => set({ currentView: view }),
+
+      // Navigation guard for unsaved Excel edits
+      hasUnsavedEditChanges: false,
+      setHasUnsavedEditChanges: (v) => set({ hasUnsavedEditChanges: v }),
+      pendingNavigation: null,
+      setPendingNavigation: (view) => set({ pendingNavigation: view }),
 
       // Execution Mode (Multi-Agent only)
       executionMode: 'multi-agent',
       setExecutionMode: (mode) => set({ executionMode: mode }),
 
-      // LLM Provider (default to openai)
-      llmProvider: 'openai',
+      // LLM Provider (default to groq - cost-effective and fast)
+      llmProvider: 'groq',
+      llmProvidersConfig: null,
       setLlmProvider: (provider) => set({ llmProvider: provider }),
+      initializeLlmProvider: async () => {
+        // Skip if already fetched — only call the backend once per session
+        if (get().llmProvidersConfig !== null) return;
+        try {
+          const response = await fetch(`${API_BASE_URL}/api/v1/llm-providers`);
+          if (response.ok) {
+            const config = await response.json();
+            const provider = config.default_provider as LLMProvider;
+            set({ llmProvidersConfig: config.providers ?? [] });
+            if (provider && ['groq', 'openai', 'anthropic', 'waymore'].includes(provider)) {
+              set({ llmProvider: provider });
+              console.log(`Initialized LLM provider from backend: ${provider}`);
+            } else {
+              console.warn(`Unknown provider from backend: ${provider}, keeping default`);
+            }
+          }
+        } catch (error) {
+          console.warn('Failed to fetch default LLM provider, using fallback:', error);
+          // Keep default 'groq' as fallback
+        }
+      },
 
       // Test Suite
       testSuite: null,
@@ -316,6 +621,8 @@ export const useStore = create<AppState>()(
         })),
 
       // Load Test State
+      uploadId: null,
+      setUploadId: (id) => set({ uploadId: id }),
       uploadedApis: null,
       setUploadedApis: (apis) => set({ uploadedApis: apis }),
       selectedLoadTestApi: null,
@@ -327,14 +634,109 @@ export const useStore = create<AppState>()(
       activeLoadTestId: null,
       setActiveLoadTestId: (id) => set({ activeLoadTestId: id }),
 
+      // Last completed test
+      lastCompletedTestId: null,
+      setLastCompletedTestId: (id) => set({ lastCompletedTestId: id }),
+
+      // Auto-Execute Mode
+      autoExecuteMode: false,
+      setAutoExecuteMode: (enabled) => set({ autoExecuteMode: enabled }),
+
+      // Sequential Test State
+      sequentialTestId: null,
+      setSequentialTestId: (id) => set({ sequentialTestId: id }),
+      sequentialTestStatus: null,
+      setSequentialTestStatus: (status) => set({ sequentialTestStatus: status }),
+      selectedApis: [],
+      setSelectedApis: (apis) => set({ selectedApis: apis }),
+
+      // Load Test Session ID
+      loadTestSessionId: null,
+      setLoadTestSessionId: (id) => set({ loadTestSessionId: id }),
+
+      // Terminal Logs
+      terminalLogs: [],
+      addTerminalLog: (log) =>
+        set((state) => {
+          const MAX_LOGS = 1000;
+          const newLogs = [...state.terminalLogs, log];
+          // Keep only last 1000 logs
+          return {
+            terminalLogs: newLogs.length > MAX_LOGS ? newLogs.slice(-MAX_LOGS) : newLogs,
+          };
+        }),
+      clearTerminalLogs: () => set({ terminalLogs: [] }),
+
+      // AI Suggested Load Test Config
+      aiSuggestedConfig: null,
+      setAiSuggestedConfig: (config) => set({ aiSuggestedConfig: config }),
+
+      // Settings State
+      healthCheckEnabled: true,
+      setHealthCheckEnabled: (enabled) => set({ healthCheckEnabled: enabled }),
+      healthCheckInterval: 120,  // 2 hours default
+      setHealthCheckInterval: (interval) => set({ healthCheckInterval: interval }),
+      lastHealthCheck: null,
+      setLastHealthCheck: (date) => set({ lastHealthCheck: date }),
+
+      // Application Settings
+      useDefaultLandingPage: false,
+      setUseDefaultLandingPage: (enabled) => set({ useDefaultLandingPage: enabled }),
+      defaultLandingPage: 'upload',  // Default to Functional Test
+      setDefaultLandingPage: (page) => set({ defaultLandingPage: page }),
+
+      // Browser Behaviour Settings
+      keepBrowserOpenAgent: false,  // default OFF: browser closes between test cases
+      setKeepBrowserOpenAgent: (enabled) => set({ keepBrowserOpenAgent: enabled }),
+      liveBrowserEnabled: false,    // default OFF: headless (screenshots in-app)
+      setLiveBrowserEnabled: (enabled) => set({ liveBrowserEnabled: enabled }),
+
+      // Projects
+      selectedProjectName: null,
+      setSelectedProjectName: (name) => set({ selectedProjectName: name }),
+
+      // Per-project workspace
+      activeProjectSection: 'generate',
+      setActiveProjectSection: (s) => set({ activeProjectSection: s }),
+      projectActiveSuites: {},
+      setProjectActiveSuite: (projectName, suite) =>
+        set((state) => ({ projectActiveSuites: { ...state.projectActiveSuites, [projectName]: suite } })),
+      clearProjectActiveSuite: (projectName) =>
+        set((state) => {
+          const next = { ...state.projectActiveSuites };
+          delete next[projectName];
+          return { projectActiveSuites: next };
+        }),
+      projectExecutionResults: {},
+      setProjectExecutionResult: (projectName, result) =>
+        set((state) => ({ projectExecutionResults: { ...state.projectExecutionResults, [projectName]: result } })),
+
+      // Image Analysis (Vision) Settings — OFF by default
+      imageAnalysisEnabled: false,
+      setImageAnalysisEnabled: (enabled) => {
+        set({ imageAnalysisEnabled: enabled });
+        // Sync to backend so the server-side toggle is also updated
+        fetch('/api/v1/image-analysis/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled }),
+        }).catch(() => { /* ignore network errors */ });
+      },
+
       // Reset - also clears localStorage
-      reset: () => {
+      reset: async () => {
         // Clear persisted storage
         localStorage.removeItem('test-automation-storage');
+
+        // Reuse cached config — no extra network call needed
+        const cachedProviders = get().llmProvidersConfig;
+        const defaultProvider: LLMProvider =
+          (cachedProviders?.find(p => p.is_default)?.id as LLMProvider) ?? 'groq';
+
         set({
           currentView: 'upload',
           executionMode: 'multi-agent',
-          llmProvider: 'openai',
+          llmProvider: defaultProvider,
           testSuite: null,
           rawTestCases: null,
           generatedScript: null,
@@ -345,6 +747,8 @@ export const useStore = create<AppState>()(
           expandedSteps: new Set(),
           uploadProgress: 0,
           isUploading: false,
+          hasUnsavedEditChanges: false,
+          pendingNavigation: null,
         });
       },
     }),
@@ -359,6 +763,26 @@ export const useStore = create<AppState>()(
         testSuite: state.testSuite,
         executionResult: state.executionResult,
         generatedScript: state.generatedScript,
+        // Load test state persistence
+        loadTestSessionId: state.loadTestSessionId,
+        isLoadTesting: state.isLoadTesting,
+        activeLoadTestId: state.activeLoadTestId,
+        sequentialTestId: state.sequentialTestId,
+        loadTestMetrics: state.loadTestMetrics,
+        sequentialTestStatus: state.sequentialTestStatus,
+        terminalLogs: state.terminalLogs,
+        // Settings state persistence
+        healthCheckEnabled: state.healthCheckEnabled,
+        healthCheckInterval: state.healthCheckInterval,
+        lastHealthCheck: state.lastHealthCheck,
+        // Application settings
+        useDefaultLandingPage: state.useDefaultLandingPage,
+        defaultLandingPage: state.defaultLandingPage,
+        // Browser behaviour settings
+        keepBrowserOpenAgent: state.keepBrowserOpenAgent,
+        liveBrowserEnabled: state.liveBrowserEnabled,
+        // Image analysis settings
+        imageAnalysisEnabled: state.imageAnalysisEnabled,
         // screenshots excluded - base64 images exceed localStorage quota
       }),
       // Handle Date serialization on rehydration
@@ -368,6 +792,10 @@ export const useStore = create<AppState>()(
             ...s,
             timestamp: new Date(s.timestamp),
           }));
+        }
+        // Restore lastHealthCheck as Date object
+        if (state?.lastHealthCheck) {
+          state.lastHealthCheck = new Date(state.lastHealthCheck);
         }
       },
     }

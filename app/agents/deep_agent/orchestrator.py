@@ -21,6 +21,7 @@ from app.agents.enhanced_json_parser import EnhancedJsonParserAgent
 from app.tools.enhanced_executor import execute_enhanced
 from app.tools.script_generator import generate_enhanced_pytest_script
 from app.core.config import settings
+from app.services.llm_wrapper import call_llm as _wrapper_call_llm
 
 
 class OrchestratorLLM:
@@ -48,37 +49,24 @@ class OrchestratorLLM:
         elif provider == LLMProvider.GROQ:
             from groq import Groq
             self.client = Groq(api_key=groq_api_key)
+        elif provider == LLMProvider.WAYMORE:
+            import openai
+            self.client = openai.OpenAI(
+                api_key=settings.WAYMORE_API_KEY,
+                base_url=settings.WAYMORE_BASE_URL
+            )
 
-    def call_llm(self, prompt: str) -> str:
-        """Call the LLM with the given prompt."""
-        try:
-            if self.provider == LLMProvider.ANTHROPIC:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.content[0].text.strip()
-
-            elif self.provider == LLMProvider.OPENAI:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.choices[0].message.content.strip()
-
-            elif self.provider == LLMProvider.GROQ:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                return response.choices[0].message.content.strip()
-
-        except Exception as e:
-            print(f"[OrchestratorLLM] Error calling LLM: {e}")
-            raise
+    def call_llm(self, prompt: str, agent_name: str = "Orchestrator") -> str:
+        """Call the LLM through the central wrapper for token tracking."""
+        result = _wrapper_call_llm(
+            provider=self.provider.value,
+            model=self.model,
+            prompt=prompt,
+            client=self.client,
+            max_tokens=self.max_tokens,
+            agent_name=agent_name,
+        )
+        return result["text"]
 
 
 @dataclass
@@ -199,12 +187,12 @@ class DeepAgentOrchestrator:
         )
 
     def _get_default_model(self, provider: str) -> str:
-        """Get default model for provider."""
+        """Get default model for provider — all models come from settings (config.py / .env)."""
         return {
-            "groq": settings.GROQ_MODEL or "llama-3.1-8b-instant",
-            "openai": settings.OPENAI_MODEL or "gpt-4o-mini",
-            "anthropic": settings.ANTHROPIC_MODEL or "claude-3-haiku-20240307"
-        }.get(provider.lower(), "llama-3.1-8b-instant")
+            "groq": settings.GROQ_MODEL,
+            "openai": settings.OPENAI_MODEL,
+            "anthropic": settings.ANTHROPIC_MODEL,
+        }.get(provider.lower(), settings.GROQ_MODEL)
 
     def _broadcast(self, message: Dict):
         """Send SSE broadcast if function is set."""
@@ -319,6 +307,11 @@ class DeepAgentOrchestrator:
         try:
             import asyncio
 
+            # Pull step control from state (may be None for direct calls)
+            _signal_file = (getattr(self.state, 'step_control_file', None)
+                            or (self.state.get('step_control_file') if isinstance(self.state, dict) else None))
+            _stop_evt = getattr(self.state, 'stop_event', None) or self.state.get('stop_event') if isinstance(self.state, dict) else None
+
             # Run async execute_enhanced
             try:
                 loop = asyncio.get_event_loop()
@@ -330,7 +323,10 @@ class DeepAgentOrchestrator:
                             execute_enhanced(
                                 test_suite=self.state.parsed_suite,
                                 headless=self.state.headless,
-                                timeout=self.state.timeout
+                                keep_browser_open=getattr(self.state, 'keep_browser_open', True),
+                                timeout=self.state.timeout,
+                                stop_event=_stop_evt,
+                                signal_file=_signal_file,
                             )
                         )
                         self.state.execution_results = future.result()
@@ -339,7 +335,10 @@ class DeepAgentOrchestrator:
                         execute_enhanced(
                             test_suite=self.state.parsed_suite,
                             headless=self.state.headless,
-                            timeout=self.state.timeout
+                            keep_browser_open=getattr(self.state, 'keep_browser_open', True),
+                            timeout=self.state.timeout,
+                            stop_event=_stop_evt,
+                            signal_file=_signal_file,
                         )
                     )
             except RuntimeError:
@@ -347,7 +346,10 @@ class DeepAgentOrchestrator:
                     execute_enhanced(
                         test_suite=self.state.parsed_suite,
                         headless=self.state.headless,
-                        timeout=self.state.timeout
+                        keep_browser_open=getattr(self.state, 'keep_browser_open', True),
+                        timeout=self.state.timeout,
+                        stop_event=_stop_evt,
+                        signal_file=_signal_file,
                     )
                 )
 

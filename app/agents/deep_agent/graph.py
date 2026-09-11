@@ -109,7 +109,9 @@ def run_deep_agent(
     headless: bool = True,
     timeout: int = 30000,
     max_retries: int = 2,
-    broadcast_func: callable = None
+    broadcast_func: callable = None,
+    stop_event=None,
+    step_control_file: str = None,
 ) -> Dict[str, Any]:
     """
     Run the Deep Agent workflow.
@@ -142,6 +144,9 @@ def run_deep_agent(
         max_retries=max_retries,
         broadcast_func=broadcast_func
     )
+    # Inject step control into state so execute node can pass it down
+    initial_state["step_control_file"] = step_control_file
+    initial_state["stop_event"] = stop_event
 
     # Broadcast workflow start
     if broadcast_func:

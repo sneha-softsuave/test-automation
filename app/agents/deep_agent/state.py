@@ -40,6 +40,9 @@ class TestAutomationState(TypedDict, total=False):
     headless: bool
     """Whether to run browser in headless mode"""
 
+    keep_browser_open: bool
+    """Whether to keep the browser open across all test cases (False = close/reopen per test case)"""
+
     timeout: int
     """Timeout in milliseconds for Playwright actions"""
 
@@ -85,6 +88,13 @@ class TestAutomationState(TypedDict, total=False):
     broadcast_func: Any
     """Function to broadcast SSE events (injected at runtime)"""
 
+    # ===== Step Control =====
+    step_control_file: Optional[str]
+    """Path to temp signal file for next/skip signals from the frontend (injected at runtime)"""
+
+    stop_event: Any
+    """threading.Event to signal executor to stop (injected at runtime)"""
+
 
 def create_initial_state(
     raw_data: List[Dict[str, Any]],
@@ -94,6 +104,7 @@ def create_initial_state(
     llm_provider: str = "groq",
     model: str = "llama-3.1-8b-instant",
     headless: bool = True,
+    keep_browser_open: bool = True,
     timeout: int = 30000,
     max_retries: int = 2,
     broadcast_func: Any = None
@@ -129,6 +140,7 @@ def create_initial_state(
         # Session Config
         session_id=session_id,
         headless=headless,
+        keep_browser_open=keep_browser_open,
         timeout=timeout,
 
         # Processing Results (initially None)
@@ -154,4 +166,8 @@ def create_initial_state(
 
         # SSE
         broadcast_func=broadcast_func,
+
+        # Step Control
+        step_control_file=None,
+        stop_event=None,
     )

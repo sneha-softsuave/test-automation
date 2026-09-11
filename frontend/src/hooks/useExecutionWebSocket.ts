@@ -154,6 +154,19 @@ export interface ScreenshotHistoryItem {
 
 export type ActiveAgent = 'Supervisor' | 'Parser' | 'Executor' | 'Validator' | 'Reporter' | null;
 
+export interface LiveExcelRow {
+  testId: string;
+  tcNo: number;
+  testName: string;
+  stepsText: string;
+  expectedResult: string;
+  inputData: string;
+  status: 'pending' | 'running' | 'passed' | 'failed';
+  currentStep: number;   // 0 = none active
+  totalSteps: number;
+  error: string | null;
+}
+
 export interface UseExecutionWebSocketReturn {
   isConnected: boolean;
   sessionId: string;
@@ -171,13 +184,17 @@ export interface UseExecutionWebSocketReturn {
   };
   browserState: BrowserState;
   screenshots: ScreenshotHistoryItem[];
+  liveExcelRows: LiveExcelRow[];
   connect: () => void;
   disconnect: () => void;
   clearLogs: () => void;
   addLog: (log: Omit<ExecutionLog, 'id' | 'timestamp'>) => void;
 }
 
-export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
+export const useExecutionWebSocket = (
+  fixedSessionId?: string,
+  onDeepAgentComplete?: (data: Record<string, unknown>) => void,
+): UseExecutionWebSocketReturn => {
   const [isConnected, setIsConnected] = useState(false);
   const [logs, setLogs] = useState<ExecutionLog[]>([]);
   const [currentTest, setCurrentTest] = useState<string | null>(null);
@@ -199,9 +216,15 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
     currentStep: 0,
     status: 'idle',
   });
+  const [liveExcelRows, setLiveExcelRows] = useState<LiveExcelRow[]>([]);
 
   const eventSourceRef = useRef<EventSource | null>(null);
-  const sessionIdRef = useRef<string>(`session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+  const onDeepAgentCompleteRef = useRef(onDeepAgentComplete);
+  onDeepAgentCompleteRef.current = onDeepAgentComplete;
+  // Use the provided fixed session ID (for persistence) or generate a new one
+  const sessionIdRef = useRef<string>(
+    fixedSessionId ?? `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  );
 
   const addLog = useCallback((log: Omit<ExecutionLog, 'id' | 'timestamp'>) => {
     setLogs((prev) => [
@@ -445,6 +468,10 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
             type: 'execution_complete',
             message: `[Deep Agent] ${data.message}`,
           });
+          // Notify caller so it can resolve the result without waiting for HTTP response
+          if (onDeepAgentCompleteRef.current) {
+            onDeepAgentCompleteRef.current(data);
+          }
           break;
 
         case 'execution_started':
@@ -525,6 +552,11 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
             passedTests: data.status === 'PASSED' ? prev.passedTests + 1 : prev.passedTests,
             failedTests: data.status === 'FAILED' ? prev.failedTests + 1 : prev.failedTests,
           }));
+          setLiveExcelRows(prev => prev.map(r =>
+            r.testId === data.test_id
+              ? { ...r, status: data.status === 'PASSED' ? 'passed' : 'failed', currentStep: 0 }
+              : r
+          ));
           addLog({
             type: 'test_completed',
             testId: data.test_id,
@@ -532,6 +564,21 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
             agent: eventAgent || 'Executor',
             message: data.message || `Test ${data.status}: ${data.test_name}`,
           });
+          break;
+
+        case 'excel_row_init':
+          setLiveExcelRows(prev => [...prev, {
+            testId: data.test_id,
+            tcNo: data.tc_no,
+            testName: data.test_name,
+            stepsText: data.steps_text,
+            expectedResult: data.expected_result,
+            inputData: data.input_data,
+            status: 'running',
+            currentStep: 0,
+            totalSteps: data.total_steps,
+            error: null,
+          }]);
           break;
 
         case 'step_started':
@@ -544,6 +591,9 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
             currentStep: data.step_number,
             status: 'running',
           }));
+          setLiveExcelRows(prev => prev.map(r =>
+            r.testId === data.test_id ? { ...r, currentStep: data.step_number } : r
+          ));
           addLog({
             type: 'step_started',
             testId: data.test_id,
@@ -566,6 +616,11 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
             ...prev,
             completedSteps: prev.completedSteps + 1,
           }));
+          if (data.status === 'FAILED' && data.error) {
+            setLiveExcelRows(prev => prev.map(r =>
+              r.testId === data.test_id ? { ...r, error: data.error } : r
+            ));
+          }
           addLog({
             type: 'step_completed',
             testId: data.test_id,
@@ -685,8 +740,13 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
   }, [addLog, mapToActiveAgent]);
 
   const connect = useCallback(() => {
+    // Always close any existing connection before opening a new one.
+    // Avoids the stale-connection bug where a second run gets no events
+    // because the old EventSource is still assigned but the server session ended.
     if (eventSourceRef.current) {
-      return;
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+      setIsConnected(false);
     }
 
     const sessionId = sessionIdRef.current;
@@ -711,10 +771,14 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
       eventSource.onmessage = handleMessage;
 
       eventSource.onerror = (error) => {
-        console.error('❌ SSE error:', error);
+        console.error('❌ SSE error:', error, 'readyState:', eventSource.readyState);
+        // Only mark as disconnected when fully closed — not during transient
+        // CONNECTING states which the browser handles automatically.
         if (eventSource.readyState === EventSource.CLOSED) {
+          console.log('📡 SSE closed, marking disconnected');
           setIsConnected(false);
         }
+        // If readyState is CONNECTING (0), the browser is auto-reconnecting — stay connected.
       };
     } catch (error) {
       console.error('SSE connection error:', error);
@@ -732,6 +796,7 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
   const clearLogs = useCallback(() => {
     setLogs([]);
     setScreenshots([]);
+    setLiveExcelRows([]);
     setProgress({
       totalTests: 0,
       totalSteps: 0,
@@ -768,6 +833,7 @@ export const useExecutionWebSocket = (): UseExecutionWebSocketReturn => {
     progress,
     browserState,
     screenshots,
+    liveExcelRows,
     connect,
     disconnect,
     addLog,

@@ -1,0 +1,210 @@
+{
+  "project": "13 Tests",
+  "base_url": "http://13.235.43.242/login",
+  "common_selectors": {},
+  "test_data": {
+    "default_credentials": {
+      "email": "hr@urmilla.com",
+      "password": "password123"
+    }
+  },
+  "test_cases": [
+    {
+      "id": "TC_001",
+      "name": "Recorded Test",
+      "steps": [
+        {
+          "step_number": 1,
+          "instruction": "Navigate to Application url",
+          "action": {
+            "type": "goto",
+            "playwright_method": "page.goto()"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "http://13.235.43.242/login"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 2,
+          "instruction": "Fill Email Address with Email",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Email Address",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_label('Email Address')"
+            ]
+          },
+          "test_data": {
+            "email": "hr@urmilla.com"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 3,
+          "instruction": "Fill Password with Password",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Password",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_label('Password')"
+            ]
+          },
+          "test_data": {
+            "password": "password123"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 4,
+          "instruction": "Click the Log In button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Log In",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Log In')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 5,
+          "instruction": "Verify the page navigated to http://13.235.43.242/candidates",
+          "action": {
+            "type": "verify_url",
+            "playwright_method": "expect(page).to_have_url"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "http://13.235.43.242/candidates"
+          },
+          "assertions": [
+            {
+              "type": "url",
+              "expected_value": "http://13.235.43.242/candidates",
+              "playwright_assertion": "expect(page).to_have_url('http://13.235.43.242/candidates')"
+            }
+          ]
+        },
+        {
+          "step_number": 6,
+          "instruction": "Click on the Create button to create a new candidate",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Create",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_text('Create', exact=False)"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 7,
+          "instruction": "Fill First Name with First Name",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "First Name",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_label('First Name*')"
+            ]
+          },
+          "test_data": {
+            "first_name": "Dinesh"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 8,
+          "instruction": "Fill Middle Name with Middle Name",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Middle Name",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_label('Middle Name')"
+            ]
+          },
+          "test_data": {
+            "middle_name": "E"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 9,
+          "instruction": "Fill Last Name with Last Name",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Last Name",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_label('Last Name*')"
+            ]
+          },
+          "test_data": {
+            "last_name": "Kumar"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 10,
+          "instruction": "Fill Phone Number with Phone Number",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Phone Number",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_placeholder('Enter Phone Number')"
+            ]
+          },
+          "test_data": {
+            "phone_number": "919999423567"
+          },
+          "assertions": null
+        }
+      ],
+      "expected_results": [
+        "All recorded steps execute successfully"
+      ]
+    }
+  ]
+}

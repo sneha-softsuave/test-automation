@@ -1,0 +1,212 @@
+/* =====================================================
+   LiveExcelGrid — Excel-style spreadsheet grid
+   ===================================================== */
+
+.container {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+  background: #fff;
+}
+
+.grid {
+  display: grid;
+  width: max-content;
+  border-collapse: collapse;
+}
+
+/* ---- Header: column letters (A, B, C…) ---- */
+.cornerCell {
+  background: #f1f5f9;
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+  border: 1px solid #e2e8f0;
+  padding: 3px 4px;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  user-select: none;
+}
+
+.headerLetterCell {
+  background: #f1f5f9;
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 500;
+  text-align: center;
+  border: 1px solid #e2e8f0;
+  padding: 3px 4px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  user-select: none;
+}
+
+/* ---- Header: column names ---- */
+.headerNameCell {
+  background: #217346;
+  color: #fff;
+  font-weight: 600;
+  font-size: 11px;
+  padding: 6px 8px;
+  border: 1px solid #1a5c38;
+  position: sticky;
+  top: 22px;
+  z-index: 2;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.rowNumHeader {
+  background: #1a5c38;
+  text-align: center;
+}
+
+/* ---- Data cells ---- */
+.cell {
+  border: 1px solid #d4d4d4;
+  padding: 5px 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-y: auto;
+  max-height: 110px;
+  vertical-align: top;
+  background: #fff;
+  color: #1e293b;
+  /* sticky row numbers handled below */
+}
+
+.rowNumCell {
+  text-align: center;
+  font-size: 10px;
+  color: #64748b;
+  font-weight: 500;
+  background: #f8fafc;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+.stepsCell {
+  padding: 4px 8px;
+}
+
+.stepsContent {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  white-space: pre-wrap;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* Active (current) step highlight */
+.activeStep {
+  font-weight: 700;
+  background: #dbeafe;
+  border-radius: 2px;
+  padding: 1px 2px;
+  color: #1d4ed8;
+}
+
+.statusCell {
+  text-align: center;
+  vertical-align: middle;
+}
+
+.errorCell {
+  color: #dc2626;
+  font-size: 10.5px;
+  overflow-y: auto;
+}
+
+/* ---- Row status coloring — applied directly on each cell ---- */
+.rowPending {
+  /* default white cell */
+}
+
+.rowRunning {
+  border-left: 3px solid #3b82f6 !important;
+  background: #eff6ff;
+}
+
+.rowPassed {
+  border-left: 3px solid #22c55e !important;
+  background: #f0fdf4;
+}
+
+.rowFailed {
+  border-left: 3px solid #ef4444 !important;
+  background: #fef2f2;
+}
+
+/* ---- Status badges ---- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 7px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badgePending {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.badgeRunning {
+  background: #dbeafe;
+  color: #1d4ed8;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.badgePassed {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.badgeFailed {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+/* ---- Empty state ---- */
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 200px;
+  gap: 10px;
+  color: #94a3b8;
+  padding: 24px;
+}
+
+.emptyIcon {
+  opacity: 0.5;
+}
+
+.emptyText {
+  font-size: 13px;
+  font-weight: 500;
+  color: #64748b;
+  text-align: center;
+}
+
+.emptySubtext {
+  font-size: 11px;
+  color: #94a3b8;
+  text-align: center;
+}

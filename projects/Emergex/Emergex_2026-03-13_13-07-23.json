@@ -1,0 +1,588 @@
+{
+  "project": "Dev-Emergex Tests",
+  "base_url": "https://dev-emergex.zapptor.com/login",
+  "common_selectors": {},
+  "test_data": {
+    "default_credentials": {
+      "email": "steve.wilson@emaschiyoda.com",
+      "password": "123456"
+    }
+  },
+  "test_cases": [
+    {
+      "id": "TC_001",
+      "name": "Test Case 1",
+      "steps": [
+        {
+          "step_number": 1,
+          "instruction": "Navigate to Application url",
+          "action": {
+            "type": "goto",
+            "playwright_method": "page.goto()"
+          },
+          "selector_hints": {
+            "element_name": "",
+            "element_type": "",
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://dev-emergex.zapptor.com/login"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 2,
+          "instruction": "Fill Email with Email",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Email",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_placeholder('Enter your email')"
+            ]
+          },
+          "test_data": {
+            "email": "steve.wilson@emaschiyoda.com"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 3,
+          "instruction": "Fill Password with Password",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "Password",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_placeholder('Enter your password')"
+            ]
+          },
+          "test_data": {
+            "password": "123456"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 4,
+          "instruction": "Click on Login button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Log in",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Log in')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 5,
+          "instruction": "Verify the page navigated to https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2025-03-13&to=2026-03-13&sortOrder=asc",
+          "action": {
+            "type": "verify_url",
+            "playwright_method": "expect(page).to_have_url"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2025-03-13&to=2026-03-13&sortOrder=asc"
+          },
+          "assertions": [
+            {
+              "type": "url",
+              "expected_value": "https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2025-03-13&to=2026-03-13&sortOrder=asc",
+              "playwright_assertion": "expect(page).to_have_url('https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2025-03-13&to=2026-03-13&sortOrder=asc')"
+            }
+          ]
+        },
+        {
+          "step_number": 6,
+          "instruction": "Verify the Dashboard page is visible",
+          "action": {
+            "type": "assert_visible",
+            "playwright_method": "locator.is_visible()"
+          },
+          "selector_hints": {
+            "element_name": "Dashboard",
+            "element_type": "page",
+            "suggested_selectors": [
+              "page.get_by_text('Dashboard', exact=True)"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 7,
+          "instruction": "Click the collapse button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "collapse button",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='collapse button')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 8,
+          "instruction": "Click the select project dropdown",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "select project dropdown",
+            "element_type": "combobox",
+            "suggested_selectors": [
+              "page.get_by_role('combobox', name='select project dropdown')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 9,
+          "instruction": "Select  \"Project_Test_001\" from the dropdown list",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Project_Test_001",
+            "element_type": "list item",
+            "suggested_selectors": [
+              "page.get_by_text('Project_Test_001', exact=True)"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 10,
+          "instruction": "Verify the following column headers are displayed: EmergeX Case ID, Reported by, Date Reported, Status",
+          "action": {
+            "type": "assert_table",
+            "playwright_method": "locator.is_visible()"
+          },
+          "selector_hints": {
+            "element_name": "table",
+            "element_type": "table",
+            "suggested_selectors": [
+              "page.get_by_role('table', name='table')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 11,
+          "instruction": "Verify the page navigated to https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2026-03-08&to=2026-03-13&sortOrder=asc",
+          "action": {
+            "type": "verify_url",
+            "playwright_method": "expect(page).to_have_url"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2026-03-08&to=2026-03-13&sortOrder=asc"
+          },
+          "assertions": [
+            {
+              "type": "url",
+              "expected_value": "https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2026-03-08&to=2026-03-13&sortOrder=asc",
+              "playwright_assertion": "expect(page).to_have_url('https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2026-03-08&to=2026-03-13&sortOrder=asc')"
+            }
+          ]
+        }
+      ],
+      "expected_results": [
+        "All recorded steps execute successfully"
+      ]
+    },
+    {
+      "id": "TC_002",
+      "name": "Test Case 2",
+      "steps": [
+        {
+          "step_number": 1,
+          "instruction": "Verify the Dashboard page is visible",
+          "action": {
+            "type": "assert_visible",
+            "playwright_method": "locator.is_visible()"
+          },
+          "selector_hints": {
+            "element_name": "Dashboard",
+            "element_type": "page",
+            "suggested_selectors": [
+              "page.get_by_label('Dashboard')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 2,
+          "instruction": "Capture all rows of the table + For each row, fetch 'EmergeX Case ID' column value and validate value is not null and not empty",
+          "action": {
+            "type": "assert_all_rows",
+            "playwright_method": ""
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "column_name": "emergex case id",
+            "validation": "not_empty",
+            "min_rows": 1
+          },
+          "assertions": null
+        }
+      ],
+      "expected_results": [
+        "All recorded steps execute successfully"
+      ]
+    },
+    {
+      "id": "TC_003",
+      "name": "Test Case 3",
+      "steps": [
+        {
+          "step_number": 1,
+          "instruction": "Click the Create EmergeX Case button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Create EmergeX Case",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Create EmergeX Case')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 2,
+          "instruction": "Verify the page navigated to https://dev-emergex.zapptor.com/report-incident",
+          "action": {
+            "type": "verify_url",
+            "playwright_method": "expect(page).to_have_url"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://dev-emergex.zapptor.com/report-incident"
+          },
+          "assertions": [
+            {
+              "type": "url",
+              "expected_value": "https://dev-emergex.zapptor.com/report-incident",
+              "playwright_assertion": "expect(page).to_have_url('https://dev-emergex.zapptor.com/report-incident')"
+            }
+          ]
+        },
+        {
+          "step_number": 3,
+          "instruction": "Fill EmergeX Case Information with Severity Data",
+          "action": {
+            "type": "fill",
+            "playwright_method": "locator.fill()"
+          },
+          "selector_hints": {
+            "element_name": "EmergeX Case Information",
+            "element_type": "input",
+            "suggested_selectors": [
+              "page.get_by_label('EmergeX Case Information')"
+            ]
+          },
+          "test_data": {
+            "severity data": "On March 8, 2027, at 11:45 AM, an employee slipped on a wet warehouse floor. Vijay Kumar sustained a minor ankle sprain. First aid was provided on site. The wet area was cleaned and warning signs were placed. Incident images were attached for record"
+          },
+          "assertions": null
+        },
+        {
+          "step_number": 4,
+          "instruction": "Wait until the AI analysis to complete",
+          "action": {
+            "type": "wait",
+            "playwright_method": "wait_for"
+          },
+          "selector_hints": {
+            "element_name": "",
+            "element_type": "",
+            "suggested_selectors": []
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 5,
+          "instruction": "Verify AI summary generated",
+          "action": {
+            "type": "assert_text",
+            "playwright_method": "locator.assert_text"
+          },
+          "selector_hints": {
+            "element_name": "AI summary generated",
+            "element_type": "text",
+            "suggested_selectors": [
+              "page.get_by_text('AI summary generated', exact=False)"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 6,
+          "instruction": "Verify Confidence Level > 0%",
+          "action": {
+            "type": "assert_text",
+            "playwright_method": "locator.assert_text"
+          },
+          "selector_hints": {
+            "element_name": "Confidence Level > 0%",
+            "element_type": "text",
+            "suggested_selectors": [
+              "page.get_by_text('Confidence Level > 0%', exact=False)"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 7,
+          "instruction": "Click Continue",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Continue",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Continue')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 8,
+          "instruction": "Wait for AI loader to disappear",
+          "action": {
+            "type": "wait",
+            "playwright_method": "wait_for"
+          },
+          "selector_hints": {
+            "element_name": "",
+            "element_type": "",
+            "suggested_selectors": []
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 9,
+          "instruction": "Click Report",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Report",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Report')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 10,
+          "instruction": "Wait until percentage reaches 100%",
+          "action": {
+            "type": "wait",
+            "playwright_method": "wait_for"
+          },
+          "selector_hints": {
+            "element_name": "",
+            "element_type": "",
+            "suggested_selectors": []
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 11,
+          "instruction": "Verify incident appears in Dashboard",
+          "action": {
+            "type": "assert_text",
+            "playwright_method": "locator.assert_text"
+          },
+          "selector_hints": {
+            "element_name": "incident appears in Dashboard",
+            "element_type": "text",
+            "suggested_selectors": [
+              "page.get_by_text('incident appears in Dashboard', exact=False)"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 12,
+          "instruction": "Click on the created incident",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Incident",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Incident')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 13,
+          "instruction": "Verify the page navigated to https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2026-03-13&to=2026-03-13&sortOrder=asc",
+          "action": {
+            "type": "verify_url",
+            "playwright_method": "expect(page).to_have_url"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2026-03-13&to=2026-03-13&sortOrder=asc"
+          },
+          "assertions": [
+            {
+              "type": "url",
+              "expected_value": "https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2026-03-13&to=2026-03-13&sortOrder=asc",
+              "playwright_assertion": "expect(page).to_have_url('https://dev-emergex.zapptor.com/dashboard?type=incident&page=1&limit=10&from=2026-03-13&to=2026-03-13&sortOrder=asc')"
+            }
+          ]
+        },
+        {
+          "step_number": 14,
+          "instruction": "Click on Submit button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Submit",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Submit')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 15,
+          "instruction": "Verify the page navigated to https://dev-emergex.zapptor.com/report-incident",
+          "action": {
+            "type": "verify_url",
+            "playwright_method": "expect(page).to_have_url"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://dev-emergex.zapptor.com/report-incident"
+          },
+          "assertions": [
+            {
+              "type": "url",
+              "expected_value": "https://dev-emergex.zapptor.com/report-incident",
+              "playwright_assertion": "expect(page).to_have_url('https://dev-emergex.zapptor.com/report-incident')"
+            }
+          ]
+        },
+        {
+          "step_number": 16,
+          "instruction": "Return to Dashboard",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Dashboard",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Dashboard')"
+            ]
+          },
+          "test_data": {},
+          "assertions": null
+        },
+        {
+          "step_number": 17,
+          "instruction": "Verify the page navigated to https://dev-emergex.zapptor.com/our-projects?view=grid",
+          "action": {
+            "type": "verify_url",
+            "playwright_method": "expect(page).to_have_url"
+          },
+          "selector_hints": {
+            "element_name": null,
+            "element_type": null,
+            "suggested_selectors": []
+          },
+          "test_data": {
+            "url": "https://dev-emergex.zapptor.com/our-projects?view=grid"
+          },
+          "assertions": [
+            {
+              "type": "url",
+              "expected_value": "https://dev-emergex.zapptor.com/our-projects?view=grid",
+              "playwright_assertion": "expect(page).to_have_url('https://dev-emergex.zapptor.com/our-projects?view=grid')"
+            }
+          ]
+        }
+      ],
+      "expected_results": [
+        "All recorded steps execute successfully"
+      ]
+    }
+  ]
+}

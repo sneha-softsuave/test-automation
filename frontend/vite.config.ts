@@ -8,11 +8,21 @@ export default defineConfig({
     host: '0.0.0.0', // Allow external access
     port: 5000,
     proxy: {
-      // HTTP API proxy
+      // SSE endpoint — must have no timeout so long-running streams aren't dropped
+      '/api/v1/sse': {
+        target: 'http://localhost:9000',
+        changeOrigin: true,
+        ws: false,
+        proxyTimeout: 0, // no timeout — SSE is a persistent stream
+        timeout: 0,
+      },
+      // All other API routes
       '/api': {
         target: 'http://localhost:9000',
         changeOrigin: true,
-        ws: true, // Enable WebSocket proxying for all /api routes
+        ws: true,
+        proxyTimeout: 900000, // 15 minutes for long-running multi-agent runs
+        timeout: 900000,
         configure: (proxy, _options) => {
           proxy.on('error', (err, _req, _res) => {
             console.log('proxy error', err);

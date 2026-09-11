@@ -295,7 +295,7 @@ export interface AgentChatRequest {
 export interface AgentChatResponse {
   response: string;
   intent: 'question' | 'execute' | 'list' | 'help' | 'view' | 'error' | 'unknown';
-  execute_tests?: number[] | null;
+  execute_tests?: string[] | null;
 }
 
 // Chat with the agent
@@ -304,7 +304,8 @@ export const chatWithAgent = async (
   testCases?: TestCaseRaw[],
   parsedSuite?: TestSuite,
   llmProvider: string = 'groq',
-  model?: string
+  model?: string,
+  chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>
 ): Promise<AgentChatResponse> => {
   const response = await api.post<AgentChatResponse>(
     '/agent/chat',
@@ -314,6 +315,7 @@ export const chatWithAgent = async (
       parsed_suite: parsedSuite,
       llm_provider: llmProvider,
       model,
+      chat_history: chatHistory,
     },
     { timeout: 60000 } // 1 minute timeout for LLM responses
   );
@@ -331,6 +333,7 @@ export const executeMultiAgent = async (
     llmProvider?: string;
     model?: string;
     headless?: boolean;
+    keepBrowserOpen?: boolean;
     timeout?: number;
     maxRetries?: number;
   } = {}
@@ -341,6 +344,7 @@ export const executeMultiAgent = async (
     llmProvider = 'groq',
     model,
     headless = true,
+    keepBrowserOpen = true,
     timeout = 30000,
     maxRetries = 2,
   } = options;
@@ -350,6 +354,7 @@ export const executeMultiAgent = async (
     llm_provider: llmProvider,
     project_name: projectName,
     headless: headless.toString(),
+    keep_browser_open: keepBrowserOpen.toString(),
     timeout: timeout.toString(),
     max_retries: maxRetries.toString(),
   });
@@ -373,6 +378,191 @@ export const executeMultiAgent = async (
   );
 
   return response.data;
+};
+
+export const getLastResult = async (sessionId: string): Promise<MultiAgentResponse | null> => {
+  try {
+    const response = await api.get(`/deep-agent/last-result/${sessionId}`, { timeout: 10000 });
+    if (response.data?.status === 'not_found') return null;
+    return response.data as MultiAgentResponse;
+  } catch {
+    return null;
+  }
+};
+
+export const executeFromParsed = async (
+  testSuite: object,
+  sessionId: string,
+  options: {
+    headless?: boolean;
+    keepBrowserOpen?: boolean;
+    timeout?: number;
+    maxRetries?: number;
+  } = {}
+): Promise<MultiAgentResponse> => {
+  const {
+    headless = true,
+    keepBrowserOpen = true,
+    timeout = 30000,
+    maxRetries = 2,
+  } = options;
+
+  const params = new URLSearchParams({
+    session_id: sessionId,
+    headless: headless.toString(),
+    keep_browser_open: keepBrowserOpen.toString(),
+    timeout: timeout.toString(),
+    max_retries: maxRetries.toString(),
+  });
+
+  const response = await api.post(
+    `/deep-agent/run-from-parsed?${params.toString()}`,
+    testSuite,
+    { timeout: 900000 }
+  );
+
+  return response.data;
+};
+
+// Result from execute-with-script endpoint
+export interface ScriptRunResult {
+  test_id: string;
+  status: 'PASSED' | 'FAILED' | 'ERROR' | 'TIMEOUT';
+  stdout: string;
+  stderr: string;
+  executed_at: string;
+}
+
+// Run a single pre-built script string for a given test case
+export async function runSingleScript(
+  script: string,
+  testId: string,
+  options: { headless: boolean; timeout: number; sessionId: string }
+): Promise<ScriptRunResult> {
+  const params = new URLSearchParams({
+    session_id: options.sessionId,
+    headless: String(options.headless),
+    timeout: String(options.timeout),
+  });
+  const response = await api.post(
+    `/deep-agent/execute-with-script?${params}`,
+    { script, test_id: testId },
+    { timeout: 300000 } // 5 minutes timeout for a single script run
+  );
+  return response.data;
+}
+
+// Stop the currently running test execution for a session
+export async function stopExecution(sessionId: string): Promise<void> {
+  await api.post(`/deep-agent/stop-execution?session_id=${sessionId}`);
+}
+
+// Send a step-level control signal: 'next' marks current step complete, 'skip' skips it
+export async function stepControl(sessionId: string, action: 'next' | 'skip'): Promise<void> {
+  await api.post(`/deep-agent/step-control?session_id=${sessionId}&action=${action}`);
+}
+
+// ─── Active session tracking (survives browser refresh) ─────────────────────
+// We store the active session ID in localStorage so that if the user refreshes
+// the browser while a test is running, we can kill the backend on next startup.
+
+const ACTIVE_SESSION_KEY = 'agent_active_session_id';
+
+export function saveActiveSession(sessionId: string): void {
+  localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
+}
+
+export function clearActiveSession(): void {
+  localStorage.removeItem(ACTIVE_SESSION_KEY);
+}
+
+export function getActiveSession(): string | null {
+  return localStorage.getItem(ACTIVE_SESSION_KEY);
+}
+
+/**
+ * Called once on app startup. If a session ID was saved before a refresh,
+ * the backend may still be running — stop it silently.
+ */
+export async function stopOrphanedSession(): Promise<void> {
+  const sessionId = getActiveSession();
+  if (!sessionId) return;
+  clearActiveSession(); // clear first so a crash here doesn't loop
+  try {
+    await stopExecution(sessionId);
+    console.log('[Startup] Stopped orphaned backend session:', sessionId);
+  } catch {
+    // Backend may have already finished — ignore errors
+  }
+}
+
+// ─── Projects API ────────────────────────────────────────────────────────────
+
+export interface ProjectSummary {
+  name: string;
+  test_count: number;
+}
+
+export interface SavedTestMeta {
+  filename: string;
+  saved_at: string;
+  base_url: string;
+  test_case_count: number;
+  source?: string;
+}
+
+export async function listProjects(): Promise<ProjectSummary[]> {
+  const response = await api.get('/projects/');
+  return response.data;
+}
+
+export async function createProject(name: string): Promise<{ name: string }> {
+  const response = await api.post('/projects/', { name });
+  return response.data;
+}
+
+export async function listProjectTests(name: string): Promise<SavedTestMeta[]> {
+  const response = await api.get(`/projects/${encodeURIComponent(name)}/tests`);
+  return response.data;
+}
+
+export async function saveTestToProject(name: string, suite: object): Promise<{ filename: string; name: string }> {
+  const response = await api.post(`/projects/${encodeURIComponent(name)}/tests`, { suite });
+  return response.data;
+}
+
+export async function loadTestFromProject(name: string, filename: string): Promise<object> {
+  const response = await api.get(`/projects/${encodeURIComponent(name)}/tests/${encodeURIComponent(filename)}`);
+  return response.data;
+}
+
+export async function deleteProjectTest(name: string, filename: string): Promise<void> {
+  await api.delete(`/projects/${encodeURIComponent(name)}/tests/${encodeURIComponent(filename)}`);
+}
+
+export async function deleteProject(name: string): Promise<void> {
+  await api.delete(`/projects/${encodeURIComponent(name)}`);
+}
+
+export interface TokenUsageStats {
+  total_calls: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  by_provider: Record<string, {
+    calls: number; input_tokens: number;
+    output_tokens: number; total_tokens: number; cost_usd: number;
+  }>;
+  recent_calls: Array<{
+    timestamp: string; agent: string; provider: string; model: string;
+    input_tokens: number; output_tokens: number; total_tokens: number; cost_usd: number;
+  }>;
+}
+export const fetchTokenUsage = async (): Promise<TokenUsageStats> =>
+  (await api.get('/token-usage')).data;
+export const resetTokenUsage = async (): Promise<void> => {
+  await api.post('/token-usage/reset');
 };
 
 export default api;

@@ -60,8 +60,10 @@ class ExecutorAgent(BaseSubAgent):
         """
         parsed_suite = task.get("parsed_suite")
         headless = task.get("headless", True)
+        keep_browser_open = task.get("keep_browser_open", True)
         timeout = task.get("timeout", 30000)
         base_url = task.get("base_url")
+        initial_storage_state = task.get("initial_storage_state")
 
         test_count = len(parsed_suite.get("test_cases", [])) if parsed_suite else 0
 
@@ -71,7 +73,7 @@ class ExecutorAgent(BaseSubAgent):
             "message": f"ExecutorAgent running {test_count} tests (headless={headless})..."
         })
 
-        self.log(f"Starting execution: {test_count} tests, headless={headless}, timeout={timeout}")
+        self.log(f"Starting execution: {test_count} tests, headless={headless}, keep_browser_open={keep_browser_open}, timeout={timeout}")
 
         # Validate input
         if not parsed_suite:
@@ -93,9 +95,12 @@ class ExecutorAgent(BaseSubAgent):
         result = self.executor_tool.execute(
             test_suite=parsed_suite,
             headless=headless,
+            keep_browser_open=keep_browser_open,
             timeout=timeout,
             base_url=base_url,
-            broadcast_func=self.broadcast_func
+            broadcast_func=self.broadcast_func,
+            stop_event=task.get("stop_event"),
+            initial_storage_state=initial_storage_state,
         )
 
         if result["success"]:

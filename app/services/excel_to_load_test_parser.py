@@ -38,16 +38,29 @@ class ExcelLoadTestParser(BaseAgent):
         if df.empty:
             raise ValueError("Excel file is empty")
 
-        # Try AI-powered parsing first
+        # Try AI-powered parsing first (optional, requires API key)
         try:
-            api_configs = self._parse_with_ai(df)
-            if api_configs:
-                return api_configs
-        except Exception as e:
-            print(f"AI parsing failed: {e}. Falling back to heuristic parsing.")
+            # Check if any API keys are configured
+            from app.core.config import settings
+            has_api_key = bool(settings.OPENAI_API_KEY or settings.GROQ_API_KEY or settings.ANTHROPIC_API_KEY)
 
-        # Fallback to heuristic parsing
-        return self._parse_heuristic(df)
+            if has_api_key:
+                print("🤖 Attempting AI-powered parsing...")
+                api_configs = self._parse_with_ai(df)
+                if api_configs:
+                    print("✅ AI parsing successful!")
+                    return api_configs
+            else:
+                print("ℹ️  No AI API keys configured. Using standard parsing method.")
+        except Exception as e:
+            print(f"⚠️  AI parsing failed: {str(e)[:100]}")
+            print("✓ Falling back to reliable heuristic parsing...")
+
+        # Fallback to heuristic parsing (always works)
+        print("📊 Using heuristic parsing...")
+        result = self._parse_heuristic(df)
+        print(f"✅ Successfully parsed {len(result)} API configuration(s)")
+        return result
 
     def _read_excel(self, excel_path: str) -> pd.DataFrame:
         """Read Excel file into DataFrame."""
@@ -70,6 +83,15 @@ class ExcelLoadTestParser(BaseAgent):
 
         # Call LLM
         response = self.call_llm(prompt)
+
+        # LOG RAW AI RESPONSE
+        print("\n" + "="*80)
+        print("🤖 RAW AI RESPONSE (BEFORE PARSING):")
+        print("="*80)
+        print(response)
+        print("="*80)
+        print(f"Response length: {len(response)} characters")
+        print("="*80 + "\n")
 
         # Extract JSON from response
         api_configs = self._extract_json_from_response(response)
@@ -112,11 +134,24 @@ Expected fields (columns may vary):
 - query_params: Query Params, Query Parameters, URL Params, Parameters (JSON string)
 - auth_type: Auth Type, Authentication, Auth Method (bearer, basic, api_key, none)
 - auth_token: Auth Token, Token, API Key, Bearer Token, Authorization
+- users: Users, Number of Users, Concurrent Users, User Count (integer)
+- spawn_rate: Spawn Rate, Rate, Users Per Second, Spawn (number)
+- run_time: Run Time, Duration, Test Duration, Time (e.g., "5m", "1h", "30s")
+- test_data: Test Data, User Data, Credentials, Test Dataset (JSON array)
+- data_mode: Data Mode, Cycling Mode, Mode (sequential, random, round_robin)
+- think_time_min: Think Time Min, Min Wait, Wait Time Min (float in seconds)
+- think_time_max: Think Time Max, Max Wait, Wait Time Max (float in seconds)
+- user_journey: User Journey, Journey, Flow, Sequence (comma-separated API names)
 
 Excel Data:
 {excel_data}
 
-Return ONLY a valid JSON array with this exact structure (no markdown, no explanations):
+CRITICAL INSTRUCTION - READ CAREFULLY:
+You must respond with ONLY raw JSON. Do NOT write Python code. Do NOT write explanations.
+Do NOT use markdown formatting like ```json or ```python.
+Your ENTIRE response must be a valid JSON array starting with '[' and ending with ']'.
+
+Return a JSON array with this exact structure:
 [
   {{
     "name": "API name",
@@ -130,7 +165,15 @@ Return ONLY a valid JSON array with this exact structure (no markdown, no explan
       "auth_type": "bearer",
       "token": "eyJhbGc..."
     }},
-    "description": "API description"
+    "description": "API description",
+    "users": 10,
+    "spawn_rate": 2,
+    "run_time": "5m",
+    "test_data": [{{"username": "user1", "password": "pass1"}}, {{"username": "user2", "password": "pass2"}}],
+    "data_mode": "round_robin",
+    "think_time_min": 1.0,
+    "think_time_max": 3.0,
+    "user_journey": "Login API,Browse API,Checkout API"
   }}
 ]
 
@@ -142,20 +185,47 @@ Rules:
 5. auth_type must be one of: bearer, basic, api_key, none
 6. If no auth info found, set auth_type to "none"
 7. Handle missing/optional fields gracefully
+8. If users/spawn_rate/run_time are present, include them; otherwise omit them (don't set to null)
+9. users should be integer, spawn_rate should be number, run_time should be string like "5m"
+10. If run_time is just a number (e.g., "5", "10"), append "m" to make it "5m", "10m"
+11. test_data should be parsed as JSON array if present (e.g., [{{"user":"u1"}}, {{"user":"u2"}}])
+12. data_mode should be one of: sequential, random, round_robin (default: round_robin)
+13. think_time_min and think_time_max should be floats (default: 1.0 and 3.0)
+14. user_journey should be comma-separated string of API names if present
 """
 
     def _extract_json_from_response(self, response: str) -> List[Dict[str, Any]]:
-        """Extract JSON array from LLM response."""
+        """Extract JSON array from LLM response with better error handling."""
+        if not response or len(response.strip()) < 2:
+            raise ValueError("LLM returned empty response (possible API key issue or rate limit)")
+
         # Try to find JSON array in response
         json_match = re.search(r'\[.*\]', response, re.DOTALL)
         if json_match:
             json_str = json_match.group(0)
             try:
-                return json.loads(json_str)
+                result = json.loads(json_str)
+                if not isinstance(result, list):
+                    raise ValueError(f"Expected JSON array, got {type(result)}")
+                if len(result) == 0:
+                    raise ValueError("LLM returned empty array")
+                return result
             except json.JSONDecodeError as e:
-                raise ValueError(f"Failed to parse JSON from LLM response: {e}")
+                # Show first 200 chars of what LLM returned for debugging
+                preview = response[:200] + "..." if len(response) > 200 else response
+                raise ValueError(
+                    f"Failed to parse JSON from LLM response. "
+                    f"Error: {e}. "
+                    f"Response preview: {preview}"
+                )
 
-        raise ValueError("No JSON array found in LLM response")
+        # Show what we got if no JSON found
+        preview = response[:200] + "..." if len(response) > 200 else response
+        raise ValueError(
+            f"No JSON array found in LLM response. "
+            f"This usually means: API key missing/invalid, rate limit hit, or LLM service down. "
+            f"Response preview: {preview}"
+        )
 
     def _dict_to_api_config(self, config_dict: Dict[str, Any]) -> APIConfig:
         """Convert dictionary to APIConfig object."""
@@ -190,6 +260,45 @@ Rules:
         # Ensure method is uppercase
         method = config_dict.get('method', 'GET').upper()
 
+        # Process run_time: append 'm' if just a number
+        run_time = config_dict.get('run_time')
+        if run_time is not None:
+            run_time = str(run_time).strip()
+            # If it's just a number without unit, append 'm' (minutes)
+            if run_time and run_time.replace('.', '').isdigit():
+                run_time = f"{run_time}m"
+
+        # Get test_data and validate it's a list
+        test_data = config_dict.get('test_data')
+        if test_data is not None and not isinstance(test_data, list):
+            test_data = [test_data]
+
+        # Get data_mode with validation
+        data_mode = config_dict.get('data_mode', 'round_robin')
+        if data_mode and isinstance(data_mode, str):
+            data_mode = data_mode.lower()
+            if data_mode not in ['sequential', 'random', 'round_robin']:
+                data_mode = 'round_robin'
+
+        # Get think-time values
+        think_time_min = config_dict.get('think_time_min', 1.0)
+        think_time_max = config_dict.get('think_time_max', 3.0)
+
+        try:
+            think_time_min = float(think_time_min)
+        except (ValueError, TypeError):
+            think_time_min = 1.0
+
+        try:
+            think_time_max = float(think_time_max)
+        except (ValueError, TypeError):
+            think_time_max = 3.0
+
+        # Get user_journey
+        user_journey = config_dict.get('user_journey')
+        if user_journey and isinstance(user_journey, str):
+            user_journey = user_journey.strip()
+
         return APIConfig(
             name=config_dict.get('name', 'Unnamed API'),
             base_url=base_url,
@@ -199,7 +308,15 @@ Rules:
             payload=config_dict.get('payload'),
             query_params=config_dict.get('query_params'),
             auth_config=auth_config,
-            description=config_dict.get('description')
+            description=config_dict.get('description'),
+            users=config_dict.get('users'),
+            spawn_rate=config_dict.get('spawn_rate'),
+            run_time=run_time,
+            test_data=test_data,
+            data_mode=data_mode,
+            think_time_min=think_time_min,
+            think_time_max=think_time_max,
+            user_journey=user_journey
         )
 
     def _parse_heuristic(self, df: pd.DataFrame) -> List[APIConfig]:
@@ -239,7 +356,15 @@ Rules:
             'query_params': ['query params', 'query parameters', 'url params', 'parameters', 'query'],
             'auth_type': ['auth type', 'authentication', 'auth method', 'auth'],
             'auth_token': ['auth token', 'token', 'api key', 'bearer token', 'authorization'],
-            'description': ['description', 'desc', 'notes', 'comment']
+            'description': ['description', 'desc', 'notes', 'comment'],
+            'users': ['users', 'number of users', 'concurrent users', 'user count', 'num users'],
+            'spawn_rate': ['spawn rate', 'rate', 'users per second', 'spawn', 'spawn_rate'],
+            'run_time': ['run time', 'duration', 'test duration', 'time', 'run_time'],
+            'test_data': ['test data', 'test_data', 'data', 'user data', 'credentials', 'test dataset'],
+            'data_mode': ['data mode', 'data_mode', 'cycling mode', 'mode'],
+            'think_time_min': ['think time min', 'think_time_min', 'wait time min', 'min wait'],
+            'think_time_max': ['think time max', 'think_time_max', 'wait time max', 'max wait'],
+            'user_journey': ['user journey', 'user_journey', 'journey', 'flow', 'sequence']
         }
 
         for field, possible_names in patterns.items():
@@ -293,6 +418,13 @@ Rules:
         payload = parse_json_field('payload')
         query_params = parse_json_field('query_params')
 
+        # Parse test_data (should be JSON array)
+        test_data = parse_json_field('test_data')
+        if test_data is not None:
+            # Ensure it's a list
+            if not isinstance(test_data, list):
+                test_data = [test_data]  # Wrap single object in array
+
         # Parse auth
         auth_type_str = get_value('auth_type', 'none')
         if isinstance(auth_type_str, str):
@@ -328,6 +460,59 @@ Rules:
         if method in ['POST', 'PUT', 'PATCH'] and 'Content-Type' not in headers:
             headers['Content-Type'] = 'application/json'
 
+        # Get load test configuration (users, spawn_rate, run_time)
+        users = get_value('users')
+        if users is not None:
+            try:
+                users = int(users)
+            except (ValueError, TypeError):
+                users = None
+
+        spawn_rate = get_value('spawn_rate')
+        if spawn_rate is not None:
+            try:
+                spawn_rate = float(spawn_rate)
+            except (ValueError, TypeError):
+                spawn_rate = None
+
+        run_time = get_value('run_time')
+        if run_time is not None:
+            run_time = str(run_time).strip()
+            # If it's just a number without unit, append 'm' (minutes)
+            if run_time and run_time.replace('.', '').isdigit():
+                run_time = f"{run_time}m"
+
+        # Get data_mode
+        data_mode = get_value('data_mode', 'round_robin')
+        if data_mode:
+            data_mode = str(data_mode).lower()
+            if data_mode not in ['sequential', 'random', 'round_robin']:
+                data_mode = 'round_robin'
+
+        # Get think-time values
+        think_time_min = get_value('think_time_min')
+        if think_time_min is not None:
+            try:
+                think_time_min = float(think_time_min)
+            except (ValueError, TypeError):
+                think_time_min = 1.0
+        else:
+            think_time_min = 1.0
+
+        think_time_max = get_value('think_time_max')
+        if think_time_max is not None:
+            try:
+                think_time_max = float(think_time_max)
+            except (ValueError, TypeError):
+                think_time_max = 3.0
+        else:
+            think_time_max = 3.0
+
+        # Get user_journey
+        user_journey = get_value('user_journey')
+        if user_journey:
+            user_journey = str(user_journey).strip()
+
         return APIConfig(
             name=str(name),
             base_url=base_url,
@@ -337,5 +522,13 @@ Rules:
             payload=payload,
             query_params=query_params,
             auth_config=auth_config,
-            description=get_value('description')
+            description=get_value('description'),
+            users=users,
+            spawn_rate=spawn_rate,
+            run_time=run_time,
+            test_data=test_data,
+            data_mode=data_mode,
+            think_time_min=think_time_min,
+            think_time_max=think_time_max,
+            user_journey=user_journey
         )

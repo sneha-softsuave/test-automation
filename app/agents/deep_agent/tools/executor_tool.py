@@ -38,9 +38,12 @@ class ExecutorTool:
         self,
         test_suite: Dict[str, Any],
         headless: bool = True,
+        keep_browser_open: bool = True,
         timeout: int = 30000,
         base_url: Optional[str] = None,
-        broadcast_func: Optional[Callable] = None
+        broadcast_func: Optional[Callable] = None,
+        stop_event=None,
+        initial_storage_state=None,
     ) -> Dict[str, Any]:
         """
         Execute tests in Playwright browser.
@@ -106,8 +109,11 @@ class ExecutorTool:
                 execute_enhanced(
                     test_suite=test_suite,
                     headless=headless,
+                    keep_browser_open=keep_browser_open,
                     timeout=timeout,
-                    update_queue=update_queue
+                    update_queue=update_queue,
+                    stop_event=stop_event,
+                    initial_storage_state=initial_storage_state,
                 )
             )
 
@@ -123,6 +129,7 @@ class ExecutorTool:
             return {
                 "success": True,
                 "execution_results": execution_results,
+                "final_storage_state": execution_results.get("final_storage_state"),
                 "error": None
             }
 

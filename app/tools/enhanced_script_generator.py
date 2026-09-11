@@ -98,9 +98,23 @@ def generate_enhanced_pytest_script(test_suite: Dict[str, Any]) -> str:
     """
     project = test_suite.get("project", "Test Suite")
     base_url = test_suite.get("base_url", "")
-    common_selectors = test_suite.get("common_selectors", {})
-    test_data = test_suite.get("test_data", {})
+    raw_common_selectors = test_suite.get("common_selectors", {})
+    test_data = test_suite.get("test_data", {}) or {}
     test_cases = test_suite.get("test_cases", [])
+
+    # Flatten nested common_selectors (LLM returns nested dicts like {"login": {...}})
+    common_selectors = _flatten_common_selectors(raw_common_selectors)
+
+    # Flatten nested test_data (LLM may nest under "default_credentials")
+    def _flatten_test_data(td: dict) -> dict:
+        flat = {}
+        for k, v in td.items():
+            if isinstance(v, str):
+                flat[k] = v
+            elif isinstance(v, dict):
+                flat.update(v)  # merge nested dict up one level
+        return flat
+    test_data = _flatten_test_data(test_data)
 
     # Extract test data values for constants
     email = test_data.get("email") or test_data.get("test_email") or "test@example.com"
@@ -188,7 +202,19 @@ def generate_enhanced_pytest_script(test_suite: Dict[str, Any]) -> str:
 
         lines.append('')
 
-    return '\n'.join(lines)
+    script = '\n'.join(lines)
+    # Append __main__ block so the script can be run with `python script.py`
+    # --browser chromium is required by pytest-playwright to provide the `page` fixture
+    if 'if __name__ == "__main__"' not in script:
+        script += (
+            '\n\nif __name__ == "__main__":\n'
+            '    import pytest as _pytest, sys as _sys, os as _os\n'
+            '    _args = [__file__, "-v", "--tb=short", "--browser", "chromium"]\n'
+            '    if _os.environ.get("PLAYWRIGHT_HEADLESS", "1") == "0":\n'
+            '        _args.append("--headed")\n'
+            '    _sys.exit(_pytest.main(_args))\n'
+        )
+    return script
 
 
 def _generate_action_code(
@@ -223,16 +249,33 @@ def _generate_action_code(
     elif action_type == "click":
         if selector:
             lines.append(f'{selector}.click()')
+        elif element_type == "button" and element_name:
+            # Use exact=False so "Log in" matches "Login" and vice versa
+            lines.append(f'page.get_by_role("button", name="{element_name}", exact=False).click()')
+        elif element_name:
+            lines.append(f'page.get_by_role("button", name="{element_name}", exact=False).click()')
         else:
-            lines.append(f'page.get_by_role("button", name="{element_name}").click()')
+            lines.append('page.get_by_role("button").first.click()')
 
     elif action_type == "fill":
         if selector and value:
             lines.append(f'{selector}.fill("{value}")')
-        elif element_name.lower() in ["email", "username", "user"]:
-            lines.append(f'page.get_by_label("Email").fill(TEST_EMAIL)')
-        elif element_name.lower() in ["password", "pass"]:
-            lines.append(f'page.get_by_label("Password").fill(TEST_PASSWORD)')
+        elif element_name.lower() in ["email", "username", "user", "email_field"]:
+            # Use actual value from step_test_data if present, else fall back to constant
+            actual_email = (step_test_data or {}).get("email") or (step_test_data or {}).get("value")
+            # Prefer type-based selector — works regardless of label/placeholder text
+            fill_selector = selector or 'page.locator("input[type=\\"email\\"]")'
+            if actual_email:
+                lines.append(f'{fill_selector}.fill("{actual_email}")')
+            else:
+                lines.append(f'{fill_selector}.fill(TEST_EMAIL)')
+        elif element_name.lower() in ["password", "pass", "password_field"]:
+            actual_password = (step_test_data or {}).get("password") or (step_test_data or {}).get("value")
+            fill_selector = selector or 'page.locator("input[type=\\"password\\"]")'
+            if actual_password:
+                lines.append(f'{fill_selector}.fill("{actual_password}")')
+            else:
+                lines.append(f'{fill_selector}.fill(TEST_PASSWORD)')
         else:
             default_selector = 'page.locator("input")'
             default_value = ""
@@ -330,14 +373,113 @@ def _generate_assertion_code(assertion: Dict[str, Any], selector_hints: Dict[str
         lines.append(f'expect(page.locator("{toast_selector}").first).to_contain_text("{expected_value}", timeout=10000)')
 
     elif playwright_assertion:
-        # Use the provided playwright assertion directly
-        lines.append(playwright_assertion)
+        # Use the provided playwright assertion — convert JS→Python if needed
+        converted = _js_to_python_playwright(playwright_assertion)
+        # Skip assertions that need a value argument but have none
+        # e.g. expect(page).to_have_url()  or  expect(loc).to_contain_text()
+        import re as _re2
+        _needs_arg = ('to_have_url', 'to_have_title', 'to_contain_text', 'to_have_text',
+                      'to_have_value', 'to_have_attribute', 'to_have_class', 'to_have_count')
+        _is_empty_call = _re2.search(r'\.(' + '|'.join(_needs_arg) + r')\(\s*\)', converted)
+        if _is_empty_call:
+            lines.append(f'# Assertion skipped (no expected value provided): {converted}')
+            lines.append('pass')
+        else:
+            lines.append(converted)
 
     else:
         lines.append(f'# No specific assertion defined')
         lines.append('pass')
 
     return lines
+
+
+def _js_to_python_playwright(code: str) -> str:
+    """
+    Convert JavaScript-style Playwright API calls to Python.
+
+    LLMs trained mostly on JS Playwright docs sometimes emit JS syntax even
+    when asked for Python. This handles the most common patterns.
+
+    Examples:
+        page.getByLabel('Email')            → page.get_by_label("Email")
+        page.getByRole('button', {name:'X'})→ page.get_by_role("button", name="X")
+        expect(page).toHaveURL('...')       → expect(page).to_have_url("...")
+        expect(loc).toContainText('x')      → expect(loc).to_contain_text("x")
+        expect(loc).toBeVisible()           → expect(loc).to_be_visible()
+    """
+    import re as _re
+
+    # camelCase Playwright locator methods → snake_case
+    _method_map = {
+        'getByLabel': 'get_by_label',
+        'getByRole': 'get_by_role',
+        'getByText': 'get_by_text',
+        'getByPlaceholder': 'get_by_placeholder',
+        'getByTestId': 'get_by_test_id',
+        'getByTitle': 'get_by_title',
+        'getByAltText': 'get_by_alt_text',
+        'frameLocator': 'frame_locator',
+        'locator': 'locator',
+        'waitForLoadState': 'wait_for_load_state',
+        'waitForURL': 'wait_for_url',
+        'waitForSelector': 'wait_for_selector',
+        'waitForTimeout': 'wait_for_timeout',
+        # expect assertion methods
+        'toHaveURL': 'to_have_url',
+        'toHaveTitle': 'to_have_title',
+        'toContainText': 'to_contain_text',
+        'toHaveText': 'to_have_text',
+        'toBeVisible': 'to_be_visible',
+        'toBeHidden': 'to_be_hidden',
+        'toBeEnabled': 'to_be_enabled',
+        'toBeDisabled': 'to_be_disabled',
+        'toBeChecked': 'to_be_checked',
+        'toHaveValue': 'to_have_value',
+        'toHaveAttribute': 'to_have_attribute',
+        'toHaveClass': 'to_have_class',
+        'toHaveCount': 'to_have_count',
+        'toBeFocused': 'to_be_focused',
+    }
+    for js_name, py_name in _method_map.items():
+        code = code.replace(f'.{js_name}(', f'.{py_name}(')
+
+    # Convert JS object argument {name: 'X'} or { name: "X" } → name="X"
+    # e.g. get_by_role("button", { name: 'Login' }) → get_by_role("button", name="Login")
+    def _convert_js_obj(m: '_re.Match') -> str:
+        inner = m.group(1).strip()
+        # key: 'value' or key: "value"  →  key="value"
+        inner = _re.sub(r"(\w+)\s*:\s*'([^']*)'", r'\1="\2"', inner)
+        inner = _re.sub(r'(\w+)\s*:\s*"([^"]*)"', r'\1="\2"', inner)
+        return inner
+    code = _re.sub(r'\{\s*([^}]+)\s*\}', _convert_js_obj, code)
+
+    # Convert single-quoted strings to double-quoted ONLY when they don't contain double quotes
+    # (to avoid breaking CSS selectors like input[type="email"])
+    code = _re.sub(r"(?<![\\])'([^'\"]*)'", r'"\1"', code)
+
+    return code
+
+
+def _flatten_common_selectors(common_selectors: Dict) -> Dict[str, str]:
+    """
+    Flatten the potentially nested common_selectors dict into a flat key→selector mapping.
+
+    The LLM produces a nested structure like:
+      {"login": {"email_field": "page.getByLabel('Email')", "login_button": "..."}, ...}
+
+    We flatten it so element lookups like "login_button" → "page.get_by_role(...)" work.
+    Only string leaf values (actual selectors) are kept.
+    """
+    flat: Dict[str, str] = {}
+    for key, value in common_selectors.items():
+        if isinstance(value, str):
+            flat[key.lower()] = value
+        elif isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                if isinstance(sub_value, str):
+                    flat[sub_key.lower()] = sub_value
+    return flat
 
 
 def _get_best_selector(
@@ -348,12 +490,27 @@ def _get_best_selector(
 ) -> Optional[str]:
     """Get the best selector from available options."""
 
-    # Try common selectors first
-    if element_name and element_name.lower() in common_selectors:
-        return common_selectors[element_name.lower()]
+    # Flatten nested common_selectors (LLM returns nested dicts)
+    flat_selectors = _flatten_common_selectors(common_selectors) if common_selectors else {}
+
+    # Try common selectors first — look up by element_name
+    if element_name:
+        match = flat_selectors.get(element_name.lower())
+        if match and isinstance(match, str):
+            # Convert JS→Python and take only the first alternative (before " or ")
+            match = match.split(" or ")[0].strip()
+            return _js_to_python_playwright(match)
+
+    # Normalise: LLM sometimes returns a dict instead of a list
+    if isinstance(suggested_selectors, dict):
+        suggested_selectors = list(suggested_selectors.values())
+    if not isinstance(suggested_selectors, list):
+        suggested_selectors = []
 
     # Try suggested selectors
     for selector in suggested_selectors:
+        if not isinstance(selector, str):
+            continue
         if selector.startswith("get_by_"):
             # Convert our format to Playwright
             if "::" in selector:
@@ -375,7 +532,21 @@ def _get_best_selector(
                     return f'page.get_by_test_id("{args[0]}")'
             return f'page.{selector}()'
         elif selector.startswith("page."):
-            return selector
+            converted = _js_to_python_playwright(selector)
+            # Sanity check: if it's a text= selector but the text doesn't match element_name,
+            # it's likely a stale/wrong LLM suggestion — skip it and use fallback below
+            if element_name and "text=" in converted:
+                import re as _re
+                text_match = _re.search(r"text=['\"]([^'\"]+)['\"]", converted)
+                if text_match:
+                    suggested_text = text_match.group(1).lower()
+                    name_lower = element_name.lower()
+                    # If the suggested text shares no words with element_name, skip
+                    name_words = set(name_lower.split())
+                    text_words = set(suggested_text.split())
+                    if not name_words.intersection(text_words):
+                        continue  # skip this bad selector, try next or fall through to fallback
+            return converted
         elif selector.startswith("#") or selector.startswith(".") or selector.startswith("["):
             return f'page.locator("{selector}")'
 
@@ -384,6 +555,9 @@ def _get_best_selector(
         return f'page.get_by_role("button", name="{element_name}")'
     elif element_type == "link":
         return f'page.get_by_role("link", name="{element_name}")'
+    elif element_type in ("menu item", "menuitem", "tab", "navigation item"):
+        # Use text or role-based selector for nav/menu items
+        return f'page.get_by_text("{element_name}", exact=False)'
     elif element_type == "input":
         return f'page.get_by_label("{element_name}")'
     elif element_type == "heading":
@@ -404,12 +578,20 @@ def _get_value(
 
     # Check step-level test data first
     if step_test_data:
-        keys_to_check = ["value", "text", "input"]
-        if element_name:
-            keys_to_check.append(element_name.lower())
+        # Try element_name as key first (highest priority)
+        if element_name and element_name.lower().replace(" ", "_") in step_test_data:
+            return str(step_test_data[element_name.lower().replace(" ", "_")])
+        if element_name and element_name.lower() in step_test_data:
+            return str(step_test_data[element_name.lower()])
+        # Try known generic keys
+        keys_to_check = ["value", "text", "input", "email", "password", "username", "url"]
         for key in keys_to_check:
             if key in step_test_data:
                 return str(step_test_data[key])
+        # Fallback: return the first non-empty value in the dict (covers first_name, phone_number, etc.)
+        for v in step_test_data.values():
+            if v is not None and str(v).strip():
+                return str(v)
 
     # Check global test data
     if test_data and element_name:

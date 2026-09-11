@@ -1,0 +1,70 @@
+{
+  "project": "My App Tests",
+  "base_url": "https://uat-emergex.zapptor.com",
+  "test_cases": [
+    {
+      "id": "TS_009",
+      "name": "Click 'Assign', 'Submit', and 'Continue' Button Sequence",
+      "steps": [
+        {
+          "step_number": 1,
+          "instruction": "Click the 'Assign' button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Assign",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Assign')",
+              "page.get_by_text('Assign', exact=True)"
+            ]
+          },
+          "test_data": null,
+          "assertions": []
+        },
+        {
+          "step_number": 2,
+          "instruction": "Click the 'Submit' button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Submit",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Submit')",
+              "page.get_by_text('Submit', exact=True)"
+            ]
+          },
+          "test_data": null,
+          "assertions": []
+        },
+        {
+          "step_number": 3,
+          "instruction": "Click the 'Continue' button",
+          "action": {
+            "type": "click",
+            "playwright_method": "locator.click()"
+          },
+          "selector_hints": {
+            "element_name": "Continue",
+            "element_type": "button",
+            "suggested_selectors": [
+              "page.get_by_role('button', name='Continue')",
+              "page.get_by_text('Continue', exact=True)"
+            ]
+          },
+          "test_data": null,
+          "assertions": []
+        }
+      ],
+      "expected_results": [
+        "The user is able to successfully click the 'Assign', 'Submit', and 'Continue' buttons in sequence."
+      ]
+    }
+  ],
+  "source": "generate"
+}

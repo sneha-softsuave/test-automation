@@ -67,6 +67,7 @@ class TestCaseService:
             LLMProvider.ANTHROPIC: settings.ANTHROPIC_MODEL,
             LLMProvider.OPENAI: settings.OPENAI_MODEL,
             LLMProvider.GROQ: settings.GROQ_MODEL,
+            LLMProvider.WAYMORE: settings.WAYMORE_MODEL,
         }
 
         return {
@@ -100,9 +101,10 @@ class TestCaseService:
             LLMProvider.ANTHROPIC: settings.ANTHROPIC_MODEL,
             LLMProvider.OPENAI: settings.OPENAI_MODEL,
             LLMProvider.GROQ: settings.GROQ_MODEL,
+            LLMProvider.WAYMORE: settings.WAYMORE_MODEL,
         }
 
-        used_model = model or default_model_map[provider]
+        used_model = model or default_model_map.get(provider, settings.GROQ_MODEL)
 
         print(f"\n{'='*50}")
         print(f"JSON Parser Agent - Processing JSON Data")
@@ -119,6 +121,7 @@ class TestCaseService:
             "anthropic_api_key": settings.ANTHROPIC_API_KEY,
             "openai_api_key": settings.OPENAI_API_KEY,
             "groq_api_key": settings.GROQ_API_KEY,
+            "waymore_api_key": settings.WAYMORE_API_KEY,
         }
 
         # Override model if specified
@@ -129,6 +132,8 @@ class TestCaseService:
                 agent_kwargs["openai_model"] = model
             elif provider == LLMProvider.GROQ:
                 agent_kwargs["groq_model"] = model
+            elif provider == LLMProvider.WAYMORE:
+                agent_kwargs["waymore_model"] = model
 
         agent = JsonParserAgent(**agent_kwargs)
 

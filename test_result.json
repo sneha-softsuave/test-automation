@@ -1,0 +1,457 @@
+{
+    "success": true,
+    "session_id": "1200b9fc-d0c1-4b0d-a00c-6d8f9a3108e2",
+    "api_type": "authentication",
+    "required_fields": [
+        "email",
+        "password"
+    ],
+    "recommendations": {
+        "users": 250,
+        "spawn_rate": 10.0,
+        "think_time_min": 1.5,
+        "think_time_max": 2.5,
+        "data_mode": "round_robin",
+        "test_data": [
+            {
+                "email": "john.doe@example.com",
+                "password": "password123"
+            },
+            {
+                "email": "jane.doe@example.com",
+                "password": "ilovecats"
+            },
+            {
+                "email": "bob.smith@gmail.com",
+                "password": "password1234"
+            },
+            {
+                "email": "alice.brown@yahoo.com",
+                "password": "football"
+            },
+            {
+                "email": "mike.johnson@outlook.com",
+                "password": "password123"
+            },
+            {
+                "email": "linda.williams@hotmail.com",
+                "password": "gaming"
+            },
+            {
+                "email": "stephen.davidson@icloud.com",
+                "password": "password1234"
+            },
+            {
+                "email": "becca.sanchez@gmail.com",
+                "password": "travel"
+            },
+            {
+                "email": "ryan.wilson@yahoo.com",
+                "password": "password123"
+            },
+            {
+                "email": "lucille.brown@outlook.com",
+                "password": "reading"
+            },
+            {
+                "email": "gary.johnson@gmail.com",
+                "password": "password1234"
+            },
+            {
+                "email": "jessica.williams@icloud.com",
+                "password": "movies"
+            },
+            {
+                "email": "terrence.davis@yahoo.com",
+                "password": "password123"
+            },
+            {
+                "email": "karen.garcia@gmail.com",
+                "password": "food"
+            },
+            {
+                "email": "joseph.brown@outlook.com",
+                "password": "password1234"
+            },
+            {
+                "email": "cynthia.sanchez@hotmail.com",
+                "password": "gardening"
+            },
+            {
+                "email": "edward.johnson@icloud.com",
+                "password": "password123"
+            },
+            {
+                "email": "donna.wilson@outlook.com",
+                "password": "hiking"
+            },
+            {
+                "email": "paul.garcia@gmail.com",
+                "password": "password1234"
+            },
+            {
+                "email": "sharon.davis@yahoo.com",
+                "password": "music"
+            },
+            {
+                "email": "william.brown@gmail.com",
+                "password": "password123"
+            },
+            {
+                "email": "patricia.williams@yahoo.com",
+                "password": "photography"
+            },
+            {
+                "email": "alan.johnson@icloud.com",
+                "password": "password1234"
+            },
+            {
+                "email": "donna.johnson@gmail.com",
+                "password": "books"
+            },
+            {
+                "email": "carol.garcia@outlook.com",
+                "password": "password123"
+            },
+            {
+                "email": "frank.davis@hotmail.com",
+                "password": "sports"
+            },
+            {
+                "email": "margaret.wilson@yahoo.com",
+                "password": "biking"
+            },
+            {
+                "email": "robert.smith@gmail.com",
+                "password": "password1234"
+            },
+            {
+                "email": "betty.brown@icloud.com",
+                "password": "reading"
+            },
+            {
+                "email": "david.garcia@outlook.com",
+                "password": "password123"
+            },
+            {
+                "email": "charles.johnson@yahoo.com",
+                "password": "travel"
+            },
+            {
+                "email": "debra.sanchez@gmail.com",
+                "password": "movies"
+            },
+            {
+                "email": "jeffrey.davis@gmail.com",
+                "password": "password1234"
+            },
+            {
+                "email": "emma.williams@icloud.com",
+                "password": "music"
+            },
+            {
+                "email": "tom.wilson@yahoo.com",
+                "password": "password123"
+            },
+            {
+                "email": "susan.garcia@outlook.com",
+                "password": "hiking"
+            },
+            {
+                "email": "gregory.sanchez@gmail.com",
+                "password": "password1234"
+            },
+            {
+                "email": "karen.smith@gmail.com",
+                "password": "food"
+            },
+            {
+                "email": "ronald.brown@icloud.com",
+                "password": "gardening"
+            },
+            {
+                "email": "laura.johnson@yahoo.com",
+                "password": "password123"
+            },
+            {
+                "email": "terri.wilson@outlook.com",
+                "password": "photography"
+            },
+            {
+                "email": "christopher.garcia@gmail.com",
+                "password": "password1234"
+            },
+            {
+                "email": "mary.davis@icloud.com",
+                "password": "books"
+            },
+            {
+                "email": "daniel.smith@yahoo.com",
+                "password": "sports"
+            },
+            {
+                "email": "elizabeth.williams@gmail.com",
+                "password": "biking"
+            },
+            {
+                "email": "kevin.brown@outlook.com",
+                "password": "password123"
+            },
+            {
+                "email": "nancy.sanchez@icloud.com",
+                "password": "travel"
+            },
+            {
+                "email": "jack.wilson@yahoo.com",
+                "password": "movies"
+            },
+            {
+                "email": "melissa.garcia@gmail.com",
+                "password": "music"
+            },
+            {
+                "email": "russell.johnson@gmail.com",
+                "password": "hiking"
+            },
+            {
+                "email": "tiffany.davis@outlook.com",
+                "password": "password1234"
+            },
+            {
+                "email": "josephine.williams@yahoo.com",
+                "password": "reading"
+            },
+            {
+                "email": "roberto.garcia@icloud.com",
+                "password": "password123"
+            },
+            {
+                "email": "angela.smith@outlook.com",
+                "password": "gardening"
+            },
+            {
+                "email": "scott.wilson@gmail.com",
+                "password": "password1234"
+            },
+            {
+                "email": "pamela.davis@gmail.com",
+                "password": "food"
+            },
+            {
+                "email": "steven.brown@yahoo.com",
+                "password": "password123"
+            },
+            {
+                "email": "shirley.garcia@icloud.com",
+                "password": "photography"
+            },
+            {
+                "email": "edward.johnson@yahoo.com",
+                "password": "books"
+            },
+            {
+                "email": "cathy.sanchez@gmail.com",
+                "password": "sports"
+            },
+            {
+                "email": "randall.smith@outlook.com",
+                "password": "biking"
+            },
+            {
+                "email": "geraldine.williams@gmail.com",
+                "password": "password1234"
+            },
+            {
+                "email": "roberto.davis@icloud.com",
+                "password": "music"
+            },
+            {
+                "email": "sandra.brown@yahoo.com",
+                "password": "hiking"
+            },
+            {
+                "email": "lisa.garcia@gmail.com",
+                "password": "password123"
+            },
+            {
+                "email": "gerald.wilson@outlook.com",
+                "password": "travel"
+            },
+            {
+                "email": "debra.sanchez@yahoo.com",
+                "password": "movies"
+            },
+            {
+                "email": "karen.johnson@gmail.com",
+                "password": "reading"
+            },
+            {
+                "email": "ronald.williams@icloud.com",
+                "password": "password1234"
+            },
+            {
+                "email": "gregory.garcia@outlook.com",
+                "password": "password123"
+            },
+            {
+                "email": "melissa.smith@gmail.com",
+                "password": "gardening"
+            },
+            {
+                "email": "sharon.wilson@yahoo.com",
+                "password": "password1234"
+            },
+            {
+                "email": "alan.davis@gmail.com",
+                "password": "food"
+            },
+            {
+                "email": "donna.garcia@icloud.com",
+                "password": "books"
+            },
+            {
+                "email": "paul.johnson@yahoo.com",
+                "password": "sports"
+            },
+            {
+                "email": "linda.smith@outlook.com",
+                "password": "biking"
+            },
+            {
+                "email": "carol.davis@gmail.com",
+                "password": "password123"
+            },
+            {
+                "email": "david.brown@icloud.com",
+                "password": "music"
+            },
+            {
+                "email": "karen.wilson@outlook.com",
+                "password": "hiking"
+            },
+            {
+                "email": "lucille.johnson@gmail.com",
+                "password": "password1234"
+            },
+            {
+                "email": "terrence.smith@yahoo.com",
+                "password": "reading"
+            },
+            {
+                "email": "margaret.williams@icloud.com",
+                "password": "password123"
+            },
+            {
+                "email": "jeffery.garcia@outlook.com",
+                "password": "gardening"
+            },
+            {
+                "email": "jessica.sanchez@gmail.com",
+                "password": "movies"
+            },
+            {
+                "email": "stephen.johnson@yahoo.com",
+                "password": "password1234"
+            },
+            {
+                "email": "emily.davis@icloud.com",
+                "password": "photography"
+            },
+            {
+                "email": "frank.smith@gmail.com",
+                "password": "password123"
+            },
+            {
+                "email": "tanya.wilson@gmail.com",
+                "password": "sports"
+            },
+            {
+                "email": "susan.brown@outlook.com",
+                "password": "biking"
+            },
+            {
+                "email": "jennifer.garcia@yahoo.com",
+                "password": "password1234"
+            },
+            {
+                "email": "kevin.williams@icloud.com",
+                "password": "music"
+            },
+            {
+                "email": "amy.johnson@gmail.com",
+                "password": "hiking"
+            },
+            {
+                "email": "christopher.sanchez@gmail.com",
+                "password": "password123"
+            },
+            {
+                "email": "jim.wilson@yahoo.com",
+                "password": "travel"
+            },
+            {
+                "email": "donna.garcia@icloud.com",
+                "password": "password1234"
+            },
+            {
+                "email": "robert.johnson@outlook.com",
+                "password": "reading"
+            },
+            {
+                "email": "david.smith@gmail.com",
+                "password": "movies"
+            },
+            {
+                "email": "laura.williams@outlook.com",
+                "password": "password123"
+            },
+            {
+                "email": "shirley.davis@yahoo.com",
+                "password": "gardening"
+            },
+            {
+                "email": "gerald.brown@gmail.com",
+                "password": "password1234"
+            }
+        ],
+        "api_type": "authentication",
+        "locustfile": ""
+    },
+    "agent_thoughts": [
+        {
+            "agent": "ConfigParserAgent",
+            "thought": "Analyzing API configuration...",
+            "reasoning": "Examining endpoint, method, payload structure to determine API type and requirements"
+        },
+        {
+            "agent": "ConfigParserAgent",
+            "thought": "Detected API type: authentication",
+            "reasoning": "Based on endpoint pattern 'api/auth/login' and method 'POST'"
+        },
+        {
+            "agent": "ConfigParserAgent",
+            "thought": "Found 2 required test data fields",
+            "reasoning": "Fields: email, password"
+        },
+        {
+            "agent": "ConfigParserAgent",
+            "thought": "Configuration analysis complete",
+            "reasoning": "Recommended: 250 users, spawn rate 10.0/s, think-time {'min': 1.5, 'max': 2.5}"
+        },
+        {
+            "agent": "DataGeneratorAgent",
+            "thought": "Generating test data for 2 fields",
+            "reasoning": "Creating 100 unique data entries using hybrid approach"
+        },
+        {
+            "agent": "DataGeneratorAgent",
+            "thought": "Using ai generation method",
+            "reasoning": "Best approach for fields: email, password"
+        },
+        {
+            "agent": "DataGeneratorAgent",
+            "thought": "Generated 100 test data entries",
+            "reasoning": "Each entry contains: email, password"
+        }
+    ]
+}
